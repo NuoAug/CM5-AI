@@ -45,18 +45,23 @@ tts_engine = None
 kokoro_engine = None
 init_error = {"ocr": None, "tts": None, "kokoro": None}
 
-MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.2"))
+MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
+
+
+def _used_bytes(mem_info):
+    """Windows 用提交内存更稳定；工作集会被系统修剪，读数会虚低。"""
+    return getattr(mem_info, "private", mem_info.rss)
 
 
 def model_memory_bytes():
     """只统计模型侧占用：llama-server 常驻 + 本服务进程。"""
-    app = psutil.Process(os.getpid()).memory_info().rss
+    app = _used_bytes(psutil.Process(os.getpid()).memory_info())
     vlm = 0
     for proc in psutil.process_iter(["name", "memory_info"]):
         try:
             name = (proc.info["name"] or "").lower()
             if name.startswith("llama-server"):
-                vlm += proc.info["memory_info"].rss
+                vlm += _used_bytes(proc.info["memory_info"])
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
     return app, vlm
@@ -137,15 +142,20 @@ EYES_TASKS = {
 }
 
 EYES_NEGATIVE = ("没看到", "没有", "看不到", "没发现")
-EYES_TARGET = {"toilet": "卫生间", "exit": "出口"}
+EYES_TARGET = {
+    "toilet": ("卫生间", "洗手间", "厕所", "WC", "Toilet"),
+    "exit": ("出口", "EXIT"),
+}
 
 
 def settle_eyes_answer(task, answer, fallback, item=""):
     """二值查找任务：模型说没找到时，一律只念兜底句。"""
     if not answer:
         return fallback
-    target = item if task == "item" else EYES_TARGET.get(task)
-    if target and target in answer and any(word in answer for word in EYES_NEGATIVE):
+    targets = (item,) if task == "item" else EYES_TARGET.get(task, ())
+    low = answer.lower()
+    hit = any(t and t.lower() in low for t in targets)
+    if hit and any(word in answer for word in EYES_NEGATIVE):
         return fallback
     return answer
 
