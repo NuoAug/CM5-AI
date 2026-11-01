@@ -87,6 +87,46 @@ def over_budget():
     return (app + vlm) > MEM_BUDGET_GB * 1024 ** 3
 
 
+# ---------- CPU：只统计模型侧进程，按整机逻辑核心归一化 ----------
+CPU_LOCK = threading.Lock()
+_cpu_sample = {"ts": None, "ticks": 0.0, "percent": None}
+
+
+def model_cpu_ticks():
+    """本服务进程 + llama-server 的累计 CPU 秒数。"""
+    total = 0.0
+    try:
+        t = psutil.Process(os.getpid()).cpu_times()
+        total += t.user + t.system
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    for proc in psutil.process_iter(["name", "cpu_times"]):
+        try:
+            if (proc.info["name"] or "").lower().startswith("llama-server"):
+                t = proc.info["cpu_times"]
+                total += t.user + t.system
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return total
+
+
+def model_cpu_percent():
+    """模型侧 CPU 占整机百分比；首次采样或间隔不足 1 秒时返回上次值。"""
+    now = time.time()
+    ticks = model_cpu_ticks()
+    with CPU_LOCK:
+        prev_ts = _cpu_sample["ts"]
+        if prev_ts is None or now - prev_ts < 1.0:
+            if prev_ts is None:
+                _cpu_sample["ts"] = now
+                _cpu_sample["ticks"] = ticks
+            return _cpu_sample["percent"]
+        percent = (ticks - _cpu_sample["ticks"]) / (now - prev_ts) / (psutil.cpu_count() or 1) * 100
+        percent = round(min(max(percent, 0.0), 100.0), 1)
+        _cpu_sample.update(ts=now, ticks=ticks, percent=percent)
+        return percent
+
+
 EYES_RULE = (
     "你是视障人士的AI眼睛。用1到2句口语中文回答，不分点、不加括号。"
     "方位只说左/中/右，远近只说近/远。"
@@ -835,6 +875,7 @@ def index():
 def status():
     app_rss, vlm_rss = model_memory_bytes()
     total = app_rss + vlm_rss
+    cpu_percent = model_cpu_percent()
     return jsonify(
         {
             "vlm": {"up": vlm_health(), "url": VLM_URL},
@@ -854,7 +895,10 @@ def status():
                 "budget_gb": MEM_BUDGET_GB,
                 "over_budget": total > MEM_BUDGET_GB * 1024 ** 3,
             },
-            "cpu_percent": psutil.cpu_percent(interval=None),
+            "cpu": {
+                "model_percent": cpu_percent,
+                "cores": psutil.cpu_count() or 1,
+            },
         }
     )
 

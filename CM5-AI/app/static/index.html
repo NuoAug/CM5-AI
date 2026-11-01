@@ -141,6 +141,7 @@
     <div class="pill"><span class="dot" id="dot-ocr"></span>OCR</div>
     <div class="pill"><span class="dot" id="dot-tts"></span>TTS</div>
     <div class="pill" id="mem-pill">模型内存 <span id="mem-text">--</span></div>
+    <div class="pill" title="仅统计 llama-server 与本服务进程，按整机逻辑核心归一化">模型 CPU <span id="cpu-text">--</span></div>
   </div>
 </header>
 
@@ -316,6 +317,8 @@ async function refreshStatus() {
     $('dot-tts').className = 'dot ' + (s.tts.ready ? 'on' : 'off');
     $('mem-text').textContent = `${s.memory.sum_gb} / ${s.memory.budget_gb} GB`;
     $('mem-pill').classList.toggle('over', s.memory.over_budget);
+    const cpu = s.cpu ? s.cpu.model_percent : null;
+    $('cpu-text').textContent = typeof cpu === 'number' ? cpu.toFixed(1) + '%' : '--';
   } catch (e) { /* ignore */ }
 }
 setInterval(refreshStatus, 5000); refreshStatus();

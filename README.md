@@ -96,7 +96,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 | 接口 | 方法 | 入参 |
 |---|---|---|
-| `/api/status` | GET | 无，返回 VLM / OCR / ASR / TTS 状态与内存 |
+| `/api/status` | GET | 无，返回 VLM / OCR / ASR / TTS 状态、内存与模型 CPU 占用 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question` |
 | `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`wake`、`armed`（免唤醒窗口内为 true）、`session_id` |
 | `/api/ocr` | POST | `image` |
@@ -126,7 +126,7 @@ $env:MEM_BUDGET_GB = "3.2"
 
 以上为 v1.0.12 及以前的实测值，当时服务端 TTS 不加载。v1.0.13 起 MeloTTS 启动即常驻，空闲与语音识别时的基线需要重新实测。
 
-页面右上角实时显示「模型内存 当前 / 预算」，超预算变红。
+页面右上角实时显示「模型内存 当前 / 预算」，超预算变红；旁边的「模型 CPU」显示模型侧进程占整机 CPU 的百分比，只统计 llama-server 与本服务进程（内含 OCR / ASR / TTS），按整机逻辑核心归一化，不含系统其它进程。首次采样显示 `--`，第二次轮询起才有读数。
 
 ## 内存优化原则
 
@@ -228,3 +228,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.13 | 移除浏览器 speechSynthesis，播报统一走服务端 MeloTTS 并在启动时预加载；语音试听改为 MeloTTS 测试 |
 | v1.0.14 | 测试台改为「语音交互 / 调试工具」两层页签，删除左侧说明卡与重复编号，同步页头页脚文案 |
 | v1.0.15 | 聊天与追问合并为单一「对话」输入框，勾选「结合画面」走追问，否则走聊天 |
+| v1.0.16 | 顶栏新增模型 CPU 占用百分比，只统计 llama-server 与本服务进程 |
