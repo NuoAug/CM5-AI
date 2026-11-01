@@ -31,6 +31,14 @@ $vlmProc = Start-Process -FilePath $vlm -ArgumentList $vlmArgs `
     -RedirectStandardError (Join-Path $logs "vlm.err.log") `
     -WindowStyle Hidden -PassThru
 
+# 先登记 VLM PID，并启动守护进程：主窗口关闭后自动结束模型与网页服务
+@{ vlm = $vlmProc.Id; web = 0 } | ConvertTo-Json | Set-Content (Join-Path $logs "pids.json")
+$stopScript = Join-Path $PSScriptRoot "stop.ps1"
+Start-Process -FilePath "powershell.exe" -ArgumentList @(
+    "-NoProfile", "-WindowStyle", "Hidden", "-Command",
+    "Wait-Process -Id $PID -ErrorAction SilentlyContinue; & '$stopScript'"
+) -WindowStyle Hidden | Out-Null
+
 Write-Host "VLM 启动中 (PID $($vlmProc.Id)) ..."
 $ok = $false
 for ($i = 0; $i -lt 90; $i++) {
@@ -55,23 +63,6 @@ Start-Sleep -Seconds 3
 Write-Host ""
 Write-Host "测试页面： http://127.0.0.1:8090" -ForegroundColor Cyan
 Write-Host "VLM 接口： http://127.0.0.1:8091" -ForegroundColor DarkGray
-Write-Host "服务运行中；输入 stop 回车停止。" -ForegroundColor Yellow
+Write-Host "服务运行中；关闭此窗口即停止模型与网页服务。" -ForegroundColor Yellow
 
-try {
-    while ($true) {
-        if ($vlmProc.HasExited -or $webProc.HasExited) {
-            Write-Host "服务进程已退出，正在清理…" -ForegroundColor Yellow
-            break
-        }
-        try {
-            $cmd = Read-Host
-        } catch {
-            # 非交互环境（后台、任务计划）无法读取输入，改为等待进程结束
-            Wait-Process -Id $vlmProc.Id, $webProc.Id
-            break
-        }
-        if ($cmd -and $cmd.Trim().ToLower() -eq "stop") { break }
-    }
-} finally {
-    & (Join-Path $PSScriptRoot "stop.ps1")
-}
+Wait-Process -Id $vlmProc.Id, $webProc.Id

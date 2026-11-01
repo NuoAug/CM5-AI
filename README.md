@@ -25,7 +25,7 @@ AI-Deployment/
 ├─ docs/
 │  └─ CM5-边缘AI模型选型报告-2026-10-31.md   选型依据与对比结论
 └─ CM5-AI/
-   ├─ 启动测试台.bat      双击启动并在同一窗口输入 stop 停止
+   ├─ 启动测试台.bat      双击启动；关闭窗口即停止
    ├─ app/
    │  ├─ server.py        Flask 服务，端口 8090
    │  ├─ static/index.html 测试页面
@@ -62,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 启动后访问 http://127.0.0.1:8090 。VLM 冷启动约 30–60 秒，状态灯变绿即可用。
 
-停止：在启动窗口输入 `stop` 回车，会结束 VLM 与网页服务；也可运行 `CM5-AI\app\stop.ps1`。直接关闭窗口不一定能结束隐藏进程，建议用 `stop`。
+停止：直接关闭启动窗口，守护进程会自动结束 VLM 与网页服务；也可运行 `CM5-AI\app\stop.ps1`。
 
 ## 页面功能
 
@@ -233,3 +233,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.19 | 唤醒词固定为「小冰小冰」并扩展同音词，移除自定义唤醒词输入与 `wake` 参数 |
 | v1.0.20 | 模型人设提示词由「AI 眼睛」改为「AI 助手」，与语音试听文案统一 |
 | v1.0.21 | 重写「看前方」场景提示词：移除床猫示例，标牌/文字画面改为直接读字；start.ps1 在非交互环境改为等待进程 |
+| v1.0.22 | 停止方式改为直接关闭启动窗口，由守护进程自动结束模型与网页服务，移除 stop 输入 |
