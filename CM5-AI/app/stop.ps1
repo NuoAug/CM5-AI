@@ -1,4 +1,4 @@
-# 停止 VLM 与本地测试网页
+﻿# 停止 VLM 与本地测试网页
 $root = Split-Path -Parent $PSScriptRoot
 $pidFile = Join-Path $root "logs\pids.json"
 if (Test-Path $pidFile) {

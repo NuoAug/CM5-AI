@@ -229,3 +229,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.14 | 测试台改为「语音交互 / 调试工具」两层页签，删除左侧说明卡与重复编号，同步页头页脚文案 |
 | v1.0.15 | 聊天与追问合并为单一「对话」输入框，勾选「结合画面」走追问，否则走聊天 |
 | v1.0.16 | 顶栏新增模型 CPU 占用百分比，只统计 llama-server 与本服务进程 |
+| v1.0.17 | 修复 start.ps1 / stop.ps1 缺少 UTF-8 BOM 导致 Windows PowerShell 5.1 双击启动报错 |

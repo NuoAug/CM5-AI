@@ -1,4 +1,4 @@
-# 启动 VLM（llama-server）与本地测试网页
+﻿# 启动 VLM（llama-server）与本地测试网页
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root "app\.venv\Scripts\python.exe"
