@@ -193,15 +193,11 @@
         <div class="result empty" id="out-eyes">等待提问…</div>
         <div class="meta" id="meta-eyes"></div>
         <div class="row">
-          <input type="text" id="eyes-followup" placeholder="追问上一句描述，例如 左边那个是台阶吗" style="flex:1;min-width:220px" />
-          <button id="btn-eyes-followup">追问</button>
-        </div>
-        <div class="row">
-          <input type="text" id="chat-input" placeholder="想聊点什么，例如 今天有点烦" style="flex:1;min-width:220px" />
-          <button id="btn-chat">聊天</button>
+          <input type="text" id="eyes-input" placeholder="聊天或追问，例如 今天有点烦 / 左边那个是台阶吗" style="flex:1;min-width:220px" />
+          <button class="primary" id="btn-send">发送</button>
           <button id="btn-stop">停止播报</button>
+          <label class="auto"><input type="checkbox" id="eyes-use-image" checked /> 结合画面</label>
         </div>
-        <div class="result empty" id="out-chat">等待聊天…</div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
           <input type="text" id="wake-word" placeholder="唤醒词" style="width:120px;flex:0 0 auto" />
@@ -527,7 +523,7 @@ $('tts-spatial').onclick = () => playTts(state.lastSpatial);
 $('tts-vqa').onclick = () => playTts(state.lastVqa);
 $('tts-ocr').onclick = () => playTts(state.lastOcr);
 
-async function runEyes(task, btn) {
+async function runEyes(task, btn, question = '') {
   const it = beginInteraction();
   const frame = await captureFrame();
   if (!frame && task !== 'followup') return toast('请先拍照或打开相机');
@@ -538,8 +534,8 @@ async function runEyes(task, btn) {
     body.item = item;
   }
   if (task === 'followup') {
-    const q = $('eyes-followup').value.trim();
-    if (!q) return toast('请输入追问内容');
+    const q = question || $('eyes-input').value.trim();
+    if (!q) return toast('请输入内容');
     body.question = q;
     body.context = state.lastEyes || '';
   }
@@ -571,20 +567,17 @@ $('btn-eyes-text').onclick = () => runEyes('text', $('btn-eyes-text'));
 $('btn-eyes-date').onclick = () => runEyes('date', $('btn-eyes-date'));
 $('btn-eyes-detail').onclick = () => runEyes('detail', $('btn-eyes-detail'));
 $('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
-$('btn-eyes-followup').onclick = () => runEyes('followup', $('btn-eyes-followup'));
 $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
-$('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-followup').click(); };
 
 // 交互代次由 app-core.js 提供。
 
-// ---------- 普通聊天：流式回答，逐句合成播放 ----------
-async function sendChat() {
-  const q = $('chat-input').value.trim();
-  if (!q) return toast('请输入内容');
+// ---------- 合并输入：勾选「结合画面」走追问，否则走聊天 ----------
+async function sendChat(q, btn) {
   const it = beginInteraction();
-  const out = $('out-chat');
+  const out = $('out-eyes');
   out.classList.remove('empty');
   out.textContent = '思考中…';
+  if (btn) setBusy(btn, true, '回答中…');
   try {
     const resp = await fetch('/api/talk', {
       method: 'POST',
@@ -617,19 +610,32 @@ async function sendChat() {
         if (payload.sentence) {
           text += payload.sentence;
           out.textContent = text;
-          player.queue.push(payload.sentence);
-          pumpPlayer(it.gen);
+          if ($('eyes-auto-tts').checked) {
+            player.queue.push(payload.sentence);
+            pumpPlayer(it.gen);
+          }
         }
         if (payload.done && payload.answer) out.textContent = payload.answer;
       }
     }
+    $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
+  } finally {
+    if (btn) setBusy(btn, false, '发送');
   }
 }
 
-$('btn-chat').onclick = sendChat;
-$('chat-input').onkeydown = (e) => { if (e.key === 'Enter') sendChat(); };
+async function sendMerged() {
+  const q = $('eyes-input').value.trim();
+  if (!q) return toast('请输入内容');
+  const withImage = $('eyes-use-image').checked && (!!currentFrame.id || !!state.image);
+  if (withImage) await runEyes('followup', $('btn-send'), q);
+  else await sendChat(q, $('btn-send'));
+}
+
+$('btn-send').onclick = sendMerged;
+$('eyes-input').onkeydown = (e) => { if (e.key === 'Enter') sendMerged(); };
 $('btn-stop').onclick = () => {
   cancelInteraction();
   voiceState('已停止播报', false);
