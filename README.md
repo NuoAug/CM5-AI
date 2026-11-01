@@ -231,3 +231,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.17 | 修复 start.ps1 / stop.ps1 缺少 UTF-8 BOM 导致 Windows PowerShell 5.1 双击启动报错 |
 | v1.0.18 | 唤醒同音词扩展、唤醒后等待 15 秒；语音试听改称「AI 助手」；启动窗口输入 stop 停止，移除独立停止 bat |
 | v1.0.19 | 唤醒词固定为「小冰小冰」并扩展同音词，移除自定义唤醒词输入与 `wake` 参数 |
+| v1.0.20 | 模型人设提示词由「AI 眼睛」改为「AI 助手」，与语音试听文案统一 |
