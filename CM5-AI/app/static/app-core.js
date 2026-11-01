@@ -6,9 +6,6 @@ let activeCtrl = null;
 function stopPlayer() {
   player.gen += 1;
   player.queue = [];
-  if (window.speechSynthesis) {
-    try { window.speechSynthesis.cancel(); } catch (e) { /* ignore */ }
-  }
   if (player.audio) {
     const a = player.audio;
     a.onended = null;
@@ -72,50 +69,9 @@ function playUrl(url) {
   });
 }
 
-function pickZhVoice() {
-  const synth = window.speechSynthesis;
-  const voices = synth ? synth.getVoices() || [] : [];
-  return voices.find((v) => /^zh|cmn|chinese/i.test(v.lang || '') || /chinese|huihui|yaoyao|kangkang/i.test(v.name || '')) || null;
-}
-
-function systemSpeak(text) {
-  return new Promise((resolve) => {
-    const synth = window.speechSynthesis;
-    if (!synth) { resolve(false); return; }
-    const u = new SpeechSynthesisUtterance(text);
-    const voice = pickZhVoice();
-    if (voice) u.voice = voice;
-    u.lang = voice ? voice.lang : 'zh-CN';
-    u.rate = 1.0;
-    let done = false;
-    let guard = null;
-    const finish = (ok) => {
-      if (done) return;
-      done = true;
-      if (guard) clearTimeout(guard);
-      if (player.resolver === cancel) player.resolver = null;
-      resolve(ok);
-    };
-    const cancel = () => finish(false);
-    // 没有音频输出设备时 onend/onerror 可能都不触发，必须兜底，否则播放器会永久占用
-    guard = setTimeout(() => {
-      try { synth.cancel(); } catch (e) { /* ignore */ }
-      finish(false);
-    }, Math.max(6000, text.length * 400 + 4000));
-    player.resolver = cancel;
-    u.onend = () => finish(true);
-    u.onerror = () => finish(false);
-    synth.speak(u);
-  });
-}
-
 async function speakSentence(text) {
-  if (window.speechSynthesis && window.useSystemVoice !== false) {
-    const ok = await systemSpeak(text);
-    if (ok) return;
-  }
   let url = null;
-  try { url = (await synthTts(text)).url; } catch (e) { return; }
+  try { url = (await synthTts(text, 'melo')).url; } catch (e) { return; }
   if (!url) return;
   await playUrl(url);
   URL.revokeObjectURL(url);

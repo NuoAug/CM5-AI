@@ -500,10 +500,10 @@ $('copy-ocr').onclick = async () => {
   catch (e) { toast('复制失败，请手动选择'); }
 };
 
-async function synthTts(text) {
+async function synthTts(text, engine) {
   const r = await fetch('/api/tts', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, engine: $('tts-engine').value, sid: Number($('tts-sid').value), speed: Number($('tts-speed').value) })
+    body: JSON.stringify({ text, engine: engine || $('tts-engine').value, sid: Number($('tts-sid').value), speed: Number($('tts-speed').value) })
   });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
   return {
@@ -824,9 +824,15 @@ function stopVoice() {
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
 
 $('btn-voice-test').onclick = async () => {
-  if (!window.speechSynthesis) return voiceState('浏览器不支持系统语音', false);
-  const ok = await systemSpeak('你好，我是你的AI眼睛，现在可以听到我说话吗');
-  voiceState(ok ? '系统语音播放完成' : '系统语音播放失败，请检查扬声器或语音包', ok);
+  voiceState('MeloTTS 合成中…', true);
+  try {
+    const t = await synthTts('你好，我是你的AI眼睛，现在可以听到我说话吗', 'melo');
+    await playUrl(t.url);
+    URL.revokeObjectURL(t.url);
+    voiceState('MeloTTS 播放完成', true);
+  } catch (e) {
+    voiceState('MeloTTS 播放失败：' + e.message, false);
+  }
 };
 
 document.querySelectorAll('.tab').forEach(tab => {
