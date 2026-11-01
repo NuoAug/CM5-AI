@@ -174,6 +174,13 @@ $env:MEM_BUDGET_GB = "3.2"
 | `OCR_INTRA_THREADS` / `OCR_INTER_THREADS` | 4 / 1 | RapidOCR 的 ORT 线程，注意 `OMP_NUM_THREADS` 不控制 ORT 线程池 |
 | `FRAME_MAX_AGE` | 20 | 画面过期秒数 |
 | `MEM_BUDGET_GB` | 3.6 | 模型侧内存预算 |
+| `SERVER_TTS` | 0 | 默认 0：不加载 MeloTTS，由浏览器系统中文语音播报；设 1 恢复服务端 TTS |
+
+**播报方式（v1.0.10）**
+
+默认走浏览器 `speechSynthesis`，优先选系统里的中文语音（本机实测 Huihui / Kangkang / Yaoyao 三个可用），零模型零内存。系统语音不可用或播放失败时自动回退 `/api/tts`，后者首次调用才加载 MeloTTS。实测不加载服务端 TTS 时模型侧内存从 3.11GB 降到 2.91GB；降级调用后回升到 3.35GB。
+
+树莓派上需要在系统里安装中文语音包，纯命令行 OS 默认没有；如果 Pi 端要自己发声，建议服务端另装轻量 TTS 或直接使用外接音频播放设备。
 
 **真机 A/B 候选（均未执行，待 CM5 实测）**
 
@@ -211,3 +218,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.7 | 目录更名 edge-ai 为 CM5-AI |
 | v1.0.8 | 新鲜画面与多轮会话、聊天/日期/详细描述、分句播报与打断、OCR 内存图像、线程可配置、测试与报告 |
 | v1.0.9 | 意图否定与改口、读字禁止扩写、资源预检脚本 |
+| v1.0.10 | 播报改为浏览器系统中文语音，服务端 TTS 默认不加载，保留降级路径 |

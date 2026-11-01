@@ -43,6 +43,8 @@ ASR_THREADS = int(os.environ.get("ASR_THREADS", "4"))
 OCR_INTRA_THREADS = int(os.environ.get("OCR_INTRA_THREADS", "4"))
 OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
 FRAME_MAX_AGE = float(os.environ.get("FRAME_MAX_AGE", "20"))
+# 默认不加载服务端 TTS，改由浏览器/系统语音播报；需要降级时设为 1 或在 /api/tts 首次调用时懒加载
+SERVER_TTS = os.environ.get("SERVER_TTS", "0").strip().lower() in ("1", "true", "yes")
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -843,6 +845,7 @@ def status():
             "tts": {
                 "ready": tts_engine is not None,
                 "engine": "melo",
+                "backend": "server" if SERVER_TTS else "browser",
                 "kokoro_ready": kokoro_engine is not None,
                 "error": init_error["tts"],
                 "kokoro_error": init_error["kokoro"],
@@ -1384,6 +1387,12 @@ def api_tts():
     engine = (body.get("engine") or "melo").lower()
     sid = int(body.get("sid", 45))
     speed = float(body.get("speed", 1.0))
+    if engine == "melo" and tts_engine is None:
+        with TTS_LOCK:
+            if tts_engine is None:
+                init_tts()
+        if tts_engine is None:
+            return jsonify({"error": "MeloTTS 未初始化：" + str(init_error["tts"])}), 503
     if not try_enter():
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
@@ -1430,7 +1439,8 @@ def sample(name: str):
 
 if __name__ == "__main__":
     threading.Thread(target=init_ocr, daemon=True).start()
-    threading.Thread(target=init_tts, daemon=True).start()
+    if SERVER_TTS:
+        threading.Thread(target=init_tts, daemon=True).start()
     threading.Thread(target=asr_idle_reaper, daemon=True).start()
     time.sleep(1)
     app.run(host="127.0.0.1", port=8090, threaded=True, debug=False)

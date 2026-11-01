@@ -14,6 +14,7 @@
 <script>
 const results = [];
 const out = document.getElementById('out');
+window.useSystemVoice = false; // 测试强制走 mock 音频路径
 
 let autoEnd = true;
 const audio = {
@@ -84,6 +85,12 @@ async function run() {
 
   // 8. 播放 URL 会被回收
   check('音频 URL 已回收', revoked.length >= 3, 'revoked=' + revoked.length);
+
+  // 9. 系统中文语音可用（浏览器环境）
+  await delay(200);
+  const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
+  const zh = voices.filter((v) => /^zh|cmn|chinese/i.test(v.lang || '') || /huihui|yaoyao|kangkang/i.test(v.name || ''));
+  check('系统中文语音可用', zh.length > 0, '中文=' + zh.length + '/' + voices.length);
 
   const failed = results.filter((r) => !r.pass);
   out.className = failed.length ? 'bad' : 'ok';
