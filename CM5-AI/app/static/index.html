@@ -159,6 +159,7 @@
       <div class="row">
         <button class="primary" id="btn-file">上传图片</button>
         <select id="sample-image" style="flex:1;min-width:180px;width:auto">
+          <option value="">选择示例图…</option>
           <option value="cats.jpg">示例：猫</option>
           <option value="ocr-test.png">示例：中文标牌</option>
           <option value="scene-stairs.jpg">场景：楼梯</option>
@@ -174,7 +175,7 @@
           <option value="scene-tactile-station.jpg">盲道：站内</option>
           <option value="scene-tactile-broken.jpg">盲道：破损</option>
         </select>
-        <button id="btn-sample">载入示例</button>
+        <button id="btn-clear">清除图片</button>
       </div>
       <div class="row">
         <button id="btn-cam">打开摄像头</button>
@@ -363,38 +364,77 @@ async function loadImageFromUrl(url) {
 $('btn-file').onclick = () => $('file').click();
 $('drop').onclick = () => $('file').click();
 $('file').onchange = async (e) => {
-  if (e.target.files[0]) { await loadImageFromBlob(e.target.files[0]); toast('图片已载入'); }
+  if (e.target.files[0]) {
+    closeCamera();
+    $('sample-image').value = '';
+    await loadImageFromBlob(e.target.files[0]);
+    toast('图片已载入');
+  }
 };
 $('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('drag'); };
 $('drop').ondragleave = () => $('drop').classList.remove('drag');
 $('drop').ondrop = async (e) => {
   e.preventDefault(); $('drop').classList.remove('drag');
-  if (e.dataTransfer.files[0]) { await loadImageFromBlob(e.dataTransfer.files[0]); toast('图片已载入'); }
+  if (e.dataTransfer.files[0]) {
+    closeCamera();
+    $('sample-image').value = '';
+    await loadImageFromBlob(e.dataTransfer.files[0]);
+    toast('图片已载入');
+  }
 };
-$('btn-sample').onclick = async () => {
+$('sample-image').onchange = async () => {
   const name = $('sample-image').value;
+  if (!name) return;
   try {
+    closeCamera();
     await loadImageFromUrl('/api/sample/' + name);
     toast('已载入示例图');
   } catch (e) {
     toast('示例图载入失败：' + e.message);
   }
 };
+$('btn-clear').onclick = () => {
+  state.image = null; state.imageVlm = null; state.imageFull = null;
+  const canvas = $('preview');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  canvas.style.display = 'none';
+  $('sample-image').value = '';
+  $('file').value = '';
+  toast('已清除图片');
+};
 
 let stream = null;
+function closeCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  const v = $('video');
+  v.srcObject = null;
+  v.style.display = 'none';
+  $('btn-cam').textContent = '打开摄像头';
+  $('btn-shot').disabled = true;
+}
 $('btn-cam').onclick = async () => {
+  if (stream) { closeCamera(); toast('摄像头已关闭'); return; }
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
     const v = $('video'); v.srcObject = stream; v.style.display = 'block'; $('btn-shot').disabled = false;
+    $('btn-cam').textContent = '关闭摄像头';
     toast('摄像头已打开');
-  } catch (e) { toast('摄像头打开失败：' + e.message); }
+  } catch (e) {
+    closeCamera();
+    toast('摄像头打开失败：' + e.message);
+  }
 };
 $('btn-shot').onclick = async () => {
   const v = $('video'); if (!v.videoWidth) return toast('摄像头还没准备好');
   const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
   c.getContext('2d').drawImage(v, 0, 0);
   const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
-  await loadImageFromBlob(blob); toast('拍照完成');
+  await loadImageFromBlob(blob);
+  $('sample-image').value = '';
+  toast('拍照完成');
 };
 
 async function postJSON(url, body, signal) {
