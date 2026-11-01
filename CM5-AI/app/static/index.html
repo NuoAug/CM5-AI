@@ -648,6 +648,7 @@ let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
 let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false, vArmedUntil = 0;
 const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
 const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
+const ARMED_MS = 15000;     // 唤醒后等待指令的时间
 
 const WAKE_KEY = 'edge-ai-wake';
 function currentWake() {
@@ -735,7 +736,7 @@ async function sendUtterance(chunks) {
       voiceState(`没听到「${currentWake()}」·识别到「${j.text || '空'}」`, true);
       return;
     }
-    if (j.intent === 'wake') vArmedUntil = performance.now() + 6000;
+    if (j.intent === 'wake') vArmedUntil = performance.now() + ARMED_MS;
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
@@ -830,7 +831,7 @@ $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
 $('btn-voice-test').onclick = async () => {
   voiceState('MeloTTS 合成中…', true);
   try {
-    const t = await synthTts('你好，我是你的AI眼睛，现在可以听到我说话吗', 'melo');
+    const t = await synthTts('你好，我是你的AI助手，现在可以听到我说话吗', 'melo');
     await playUrl(t.url);
     URL.revokeObjectURL(t.url);
     voiceState('MeloTTS 播放完成', true);

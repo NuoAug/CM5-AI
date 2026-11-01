@@ -55,5 +55,17 @@ Start-Sleep -Seconds 3
 Write-Host ""
 Write-Host "测试页面： http://127.0.0.1:8090" -ForegroundColor Cyan
 Write-Host "VLM 接口： http://127.0.0.1:8091" -ForegroundColor DarkGray
-Write-Host "服务运行中；关闭本窗口或运行 app\stop.ps1 停止。" -ForegroundColor Yellow
-Wait-Process -Id $vlmProc.Id, $webProc.Id
+Write-Host "服务运行中；输入 stop 回车停止。" -ForegroundColor Yellow
+
+try {
+    while ($true) {
+        if ($vlmProc.HasExited -or $webProc.HasExited) {
+            Write-Host "服务进程已退出，正在清理…" -ForegroundColor Yellow
+            break
+        }
+        $cmd = Read-Host
+        if ($cmd -and $cmd.Trim().ToLower() -eq "stop") { break }
+    }
+} finally {
+    & (Join-Path $PSScriptRoot "stop.ps1")
+}
