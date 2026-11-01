@@ -47,6 +47,7 @@ PIPER_MODEL = Path(
 ASR_DIR = MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09"
 VLM_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8091")
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (ROOT / "data"))
+TTS_CACHE_DIR = DATA_DIR / "tts-cache"
 SAMPLES_DIR = ROOT / "samples"
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0").strip().lower() in ("1", "true", "yes")
 
@@ -58,6 +59,7 @@ OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
 FRAME_MAX_AGE = float(os.environ.get("FRAME_MAX_AGE", "20"))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -605,7 +607,7 @@ def split_sentences(text, max_len=90):
 # ---------- 重任务并发上限 ----------
 ACTIVE_LOCK = threading.Lock()
 ACTIVE = {"n": 0}
-MAX_ACTIVE = 2
+MAX_ACTIVE = 3  # 流式聊天 + 当前句 TTS + 预取下一句，避免预取被 429 丢弃
 
 
 def try_enter():
@@ -676,8 +678,22 @@ def piper_error():
     return "；".join(missing)
 
 
+def prune_tts_cache(max_bytes=50 * 1024 * 1024):
+    """缓存超过上限时按修改时间删最旧的，避免无限增长。"""
+    try:
+        files = sorted(TTS_CACHE_DIR.glob("piper-*.wav"), key=lambda p: p.stat().st_mtime)
+        total = sum(p.stat().st_size for p in files)
+        for path in files:
+            if total <= max_bytes:
+                break
+            total -= path.stat().st_size
+            path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("tts cache prune failed: %s", exc)
+
+
 def piper_tts(text, speed=1.0):
-    """调用 Piper 子进程合成 wav；用完即退，不在服务进程常驻模型。"""
+    """调用 Piper 子进程合成 wav；带磁盘缓存，固定短语第二次 0 ms。"""
     err = piper_error()
     if err:
         raise RuntimeError("Piper 未就绪：" + err)
@@ -685,38 +701,52 @@ def piper_tts(text, speed=1.0):
         length_scale = 1.0 / max(0.5, min(2.0, float(speed or 1.0)))
     except (TypeError, ValueError):
         length_scale = 1.0
-    fd, tmp = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
+    key = hashlib.sha1(
+        f"piper|{PIPER_MODEL.name}|{PIPER_MODEL.stat().st_size}|{length_scale:.3f}|{text}".encode("utf-8")
+    ).hexdigest()[:16]
+    cache_path = TTS_CACHE_DIR / f"piper-{key}.wav"
+    hit = cache_path.exists() and cache_path.stat().st_size > 1024
     t0 = time.time()
-    try:
-        proc = subprocess.run(
-            [
-                str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", tmp,
-                "--length_scale", f"{length_scale:.3f}",
-            ],
-            input=text.encode("utf-8"),
-            capture_output=True,
-            timeout=90,
-            cwd=str(PIPER_BIN.parent),
-        )
-        if proc.returncode != 0 or os.path.getsize(tmp) < 1024:
-            tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
-            raise RuntimeError(f"Piper 合成失败：{tail}")
-        data = Path(tmp).read_bytes()
-        with wave.open(io.BytesIO(data), "rb") as wf:
-            duration = wf.getnframes() / float(wf.getframerate() or 1)
-        gen_ms = int((time.time() - t0) * 1000)
-        log.info("tts engine=piper chars=%d gen=%sms audio=%.2fs", len(text), gen_ms, duration)
-        resp = Response(data, mimetype="audio/wav")
-        resp.headers["X-Gen-Ms"] = str(gen_ms)
-        resp.headers["X-Audio-Seconds"] = str(round(duration, 2))
-        resp.headers["X-TTS-Engine"] = "piper"
-        return resp
-    finally:
+    if hit:
+        data = cache_path.read_bytes()
+    else:
+        fd, tmp = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
         try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+            proc = subprocess.run(
+                [
+                    str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", tmp,
+                    "--length_scale", f"{length_scale:.3f}",
+                ],
+                input=text.encode("utf-8"),
+                capture_output=True,
+                timeout=90,
+                cwd=str(PIPER_BIN.parent),
+            )
+            if proc.returncode != 0 or os.path.getsize(tmp) < 1024:
+                tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
+                raise RuntimeError(f"Piper 合成失败：{tail}")
+            data = Path(tmp).read_bytes()
+            cache_path.write_bytes(data)
+            prune_tts_cache()
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        duration = wf.getnframes() / float(wf.getframerate() or 1)
+    gen_ms = 0 if hit else int((time.time() - t0) * 1000)
+    log.info(
+        "tts engine=piper cache=%s chars=%d gen=%sms audio=%.2fs",
+        "hit" if hit else "miss", len(text), gen_ms, duration,
+    )
+    resp = Response(data, mimetype="audio/wav")
+    resp.headers["X-Gen-Ms"] = str(gen_ms)
+    resp.headers["X-Audio-Seconds"] = str(round(duration, 2))
+    resp.headers["X-TTS-Engine"] = "piper"
+    resp.headers["X-TTS-Cache"] = "hit" if hit else "miss"
+    return resp
 
 
 def load_kokoro():

@@ -69,24 +69,40 @@ function playUrl(url) {
   });
 }
 
-async function speakSentence(text) {
-  let url = null;
-  try { url = (await synthTts(text, 'piper')).url; } catch (e) { return; }
-  if (!url) return;
-  await playUrl(url);
-  URL.revokeObjectURL(url);
+async function synthesizeSentence(text) {
+  try {
+    return await synthTts(text, 'piper');
+  } catch (e) {
+    return null;
+  }
 }
 
 async function pumpPlayer(gen) {
   if (player.running) return;
   player.running = true;
+  let next = null;
   try {
     while (player.queue.length && gen === player.gen) {
       const sentence = player.queue.shift();
-      await speakSentence(sentence);
-      if (gen !== player.gen) break;
+      // 当前句播放时，提前合成下一句，避免每句都等 Piper 进程启动
+      const current = next || synthesizeSentence(sentence);
+      next = null;
+      if (player.queue.length) next = synthesizeSentence(player.queue[0]);
+      const t = await current;
+      if (!t || !t.url) continue;
+      if (gen !== player.gen) {
+        URL.revokeObjectURL(t.url);
+        break;
+      }
+      await playUrl(t.url);
+      URL.revokeObjectURL(t.url);
     }
   } finally {
+    if (next) {
+      next.then((t) => {
+        if (t && t.url) URL.revokeObjectURL(t.url);
+      }).catch(() => {});
+    }
     player.running = false;
   }
 }
