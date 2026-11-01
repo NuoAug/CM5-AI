@@ -1,0 +1,9 @@
+[Unit]
+Description=CM5-AI healthcheck (API, temperature, undervoltage)
+
+[Service]
+Type=oneshot
+User=cm5
+Group=cm5
+EnvironmentFile=/etc/cm5-ai.env
+ExecStart=/usr/local/bin/cm5-ai-healthcheck

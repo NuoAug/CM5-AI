@@ -415,7 +415,7 @@ $('sample-image').onchange = async () => {
   }
 };
 $('btn-clear').onclick = () => {
-  if (guideState.running) stopGuide();
+  if (guideState.running && guideState.needsFrames) stopGuide();
   state.image = null; state.imageVlm = null; state.imageFull = null;
   const canvas = $('preview');
   canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
@@ -428,7 +428,7 @@ $('btn-clear').onclick = () => {
 
 let stream = null;
 function closeCamera() {
-  if (guideState.running) stopGuide();
+  if (guideState.running && guideState.needsFrames) stopGuide();
   if (stream) {
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -464,22 +464,23 @@ $('btn-shot').onclick = async () => {
   toast('拍照完成');
 };
 
-// ---------- 无盲道引导（试验） ----------
-const GUIDE_LABEL = { straight: '直行', left: '向左一点', right: '向右一点', stop: '停下' };
-const GUIDE_REASON = { clear: '可走', obstacle: '需要绕行', road: '道路', stairs: '台阶', person: '有人', ahead: '前方障碍', blocked: '无法通行' };
-const guideState = { running: false, timer: null, busy: false, once: false, candidate: null, count: 0, spoken: '', spokenAt: 0 };
+// ---------- 无盲道引导（服务端持续循环） ----------
+const GUIDE_LABEL = { straight: '直行', left: '向左一点', right: '向右一点', stop: '停下', unavailable: '不可用' };
+const GUIDE_REASON = {
+  clear: '可走', obstacle: '需要绕行', narrow: '通道偏窄', road: '道路', stairs: '台阶',
+  person: '有人', ahead: '前方不连续', blocked: '无法通行', no_seed: '脚下没有可靠地面',
+  low_quality: '画面质量不足', uncertain: '判断不确定', stale: '画面过期', model_stuck: '模型无响应',
+  model_missing: '模型缺失', tilted: '相机倾斜', error: '引导异常', no_frame: '等待画面',
+  stopped: '已停止', recovering: '恢复判断中', depth_obstacle: '深度障碍',
+};
+const guideState = {
+  running: false, needsFrames: true, pushTimer: null, pollTimer: null,
+  lastSeq: -1, lastRaw: '', lastStatus: null,
+};
 
-function guidePhrase(j) {
-  if (j.direction === 'left') return '向左一点';
-  if (j.direction === 'right') return '向右一点';
-  if (j.direction === 'straight') return '继续直行';
-  return {
-    road: '前方是道路，请停下',
-    stairs: '前方有台阶，请停下',
-    person: '前方有人，请停下',
-    ahead: '前方有障碍，请停下',
-    blocked: '前方无法通行，请停下',
-  }[j.reason] || '请停下';
+function newFrameId(prefix = 'f') {
+  const rand = (crypto && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : Math.random().toString(16).slice(2, 10);
+  return `${prefix}-${Date.now().toString(36)}-${rand}`;
 }
 
 async function captureGuideFrame() {
@@ -499,10 +500,81 @@ async function captureGuideFrame() {
   return canvas ? canvasDataUrl(canvas, 512, 0.8) : null;
 }
 
-function stopGuide(keepText) {
+function guideMetricsText(st) {
+  const m = (st && st.metrics) || {};
+  const lanes = m.lanes || {};
+  const c = lanes.center || {};
+  const l = lanes.left || {};
+  const r = lanes.right || {};
+  const pct = (v) => (v == null ? '--' : (v * 100).toFixed(0) + '%');
+  const q = (st && st.quality) || {};
+  const d = (st && st.decision) || {};
+  const parts = [
+    `状态 ${GUIDE_LABEL[d.state] || d.state || '--'}（${GUIDE_REASON[d.reason] || d.reason || '--'}）`,
+    `原始 ${GUIDE_LABEL[d.raw_direction] || d.raw_direction || '--'}/${GUIDE_REASON[d.raw_reason] || d.raw_reason || '--'}`,
+    `中列 近${pct(c.near && c.near.ratio)} 中${pct(c.mid && c.mid.ratio)}`,
+    `左${pct(l.near && l.near.ratio)} 右${pct(r.near && r.near.ratio)}`,
+    `前方物体 中${m.object_center == null ? '--' : m.object_center + '%'}`,
+    `质量 ${q.ok === false ? (q.reasons || []).join('/') : 'OK'}`,
+  ];
+  const stats = (st && st.stats) || {};
+  parts.push(`帧龄 ${st.frame_age_ms == null ? '--' : st.frame_age_ms + 'ms'}`);
+  parts.push(`推理 ${d.inference_ms == null ? '--' : d.inference_ms + 'ms'}`);
+  parts.push(`P50/P95 ${stats.inference_p50_ms || '--'}/${stats.inference_p95_ms || '--'}ms`);
+  parts.push(`丢弃 ${stats.dropped ?? 0}`);
+  return parts.join(' · ');
+}
+
+function renderGuide(st) {
+  const d = (st && st.decision) || {};
+  if (!st || !st.running) {
+    $('out-guide').textContent = '已停止';
+    $('meta-guide').textContent = '';
+    $('btn-guide-start').disabled = false;
+    $('btn-guide-stop').disabled = true;
+    guideState.running = false;
+    return;
+  }
+  $('out-guide').classList.remove('empty');
+  $('out-guide').textContent = `${GUIDE_LABEL[d.state] || d.state || '--'}（${GUIDE_REASON[d.reason] || d.reason || '--'}）`;
+  $('meta-guide').textContent = guideMetricsText(st);
+  $('btn-guide-start').disabled = true;
+  $('btn-guide-stop').disabled = false;
+  guideState.lastSeq = st.seq;
+  guideState.lastStatus = st;
+}
+
+async function pushGuideFrame() {
+  if (!guideState.running || !guideState.needsFrames) return;
+  try {
+    const image = await captureGuideFrame();
+    if (!image) throw new Error('没有可用画面');
+    await postJSON('/api/guide/frame', {
+      image,
+      frame_id: newFrameId('guide'),
+      captured_at: new Date().toISOString(),
+      source: 'browser',
+    });
+  } catch (e) {
+    if (guideState.running) toast('引导送帧失败：' + e.message);
+  }
+  if (guideState.running) guideState.pushTimer = setTimeout(pushGuideFrame, 200);
+}
+
+async function pollGuide() {
+  if (!guideState.running) return;
+  try {
+    const r = await fetch('/api/guide/status');
+    if (r.ok) renderGuide(await r.json());
+    else if (r.status === 409) stopGuideLocal();
+  } catch (e) { /* 网络抖动时继续轮询 */ }
+  if (guideState.running) guideState.pollTimer = setTimeout(pollGuide, 250);
+}
+
+function stopGuideLocal(keepText) {
   guideState.running = false;
-  guideState.busy = false;
-  if (guideState.timer) { clearTimeout(guideState.timer); guideState.timer = null; }
+  if (guideState.pushTimer) { clearTimeout(guideState.pushTimer); guideState.pushTimer = null; }
+  if (guideState.pollTimer) { clearTimeout(guideState.pollTimer); guideState.pollTimer = null; }
   $('btn-guide-start').disabled = false;
   $('btn-guide-stop').disabled = true;
   if (!keepText) {
@@ -511,63 +583,50 @@ function stopGuide(keepText) {
   }
 }
 
-function startGuide() {
+function stopGuide(keepText) {
+  if (!guideState.running) { stopGuideLocal(keepText); return; }
+  stopGuideLocal(keepText);
+  postJSON('/api/guide/stop', { reason: 'browser_ui' }).catch(() => {});
+}
+
+function adoptGuideFromServer(st) {
+  if (!st || !st.running) return;
+  if (guideState.running) { renderGuide(st); return; }
+  guideState.running = true;
+  guideState.needsFrames = st.needs_frames !== false;
+  renderGuide(st);
+  if (guideState.needsFrames) pushGuideFrame();
+  pollGuide();
+}
+
+async function startGuide() {
   if (guideState.running) return;
   const live = $('video').style.display === 'block' && $('video').videoWidth;
   if (!live && !(state.imageFull || state.image)) {
     toast('请先打开摄像头或载入图片');
     return;
   }
-  guideState.running = true;
-  guideState.once = !live;
-  guideState.candidate = null; guideState.count = 0;
-  guideState.spoken = ''; guideState.spokenAt = 0;
-  $('btn-guide-start').disabled = true;
-  $('btn-guide-stop').disabled = false;
-  $('out-guide').classList.remove('empty');
-  $('out-guide').textContent = '识别中…';
-  $('meta-guide').textContent = '';
-  guideTick();
-}
-
-async function guideTick() {
-  if (!guideState.running || guideState.busy) return;
-  guideState.busy = true;
-  try {
-    const image = await captureGuideFrame();
-    if (!guideState.running) return;
-    if (!image) { stopGuide(); toast('没有可用画面'); return; }
-    const j = await postJSON('/api/guide', { image, frame_id: currentFrame.id || 'guide' });
-    if (!guideState.running) return;
-    applyGuide(j);
-    if (guideState.once) { stopGuide(true); return; }
-    guideState.timer = setTimeout(guideTick, 250);
-  } catch (e) {
-    stopGuide();
-    $('out-guide').textContent = '引导失败：' + e.message;
+  if (!live) {
+    try {
+      const image = await captureGuideFrame();
+      const j = await postJSON('/api/guide', { image, frame_id: newFrameId('guide') });
+      $('out-guide').classList.remove('empty');
+      $('out-guide').textContent = `${GUIDE_LABEL[j.raw_direction] || j.raw_direction}（${GUIDE_REASON[j.raw_reason] || j.raw_reason}）`;
+      $('meta-guide').textContent = guideMetricsText({ metrics: j.metrics, quality: j.quality, decision: { state: j.raw_direction, reason: j.raw_reason, raw_direction: j.raw_direction, raw_reason: j.raw_reason, inference_ms: j.timing && j.timing.inference_ms }, stats: {} });
+      toast('静态图只做单帧判断');
+    } catch (e) { $('out-guide').textContent = '引导失败：' + e.message; }
     return;
-  } finally {
-    guideState.busy = false;
   }
-}
-
-function applyGuide(j) {
-  const m = j.metrics;
-  $('out-guide').textContent = `${GUIDE_LABEL[j.direction] || j.direction}（${GUIDE_REASON[j.reason] || j.reason}）`;
-  $('meta-guide').textContent =
-    `左 ${m.left}% · 中 ${m.center}% · 右 ${m.right}% · 近 ${m.near}% · 中距 ${m.mid}% · ` +
-    `道路 ${m.road}% · 台阶 ${m.stairs}% · 人 ${m.person}% · ${j.latency_ms}ms`;
-  const urgent = j.reason === 'road' || j.reason === 'stairs' || j.reason === 'person';
-  if (j.direction === guideState.candidate) guideState.count += 1;
-  else { guideState.candidate = j.direction; guideState.count = 1; }
-  if (!urgent && guideState.count < (guideState.once ? 1 : 2)) return;
-  const phrase = guidePhrase(j);
-  const now = Date.now();
-  const changed = phrase !== guideState.spoken;
-  if ($('guide-voice').checked && (urgent || changed) && now - guideState.spokenAt >= 4000) {
-    guideState.spoken = phrase;
-    guideState.spokenAt = now;
-    speakAll(phrase);
+  try {
+    const st = await postJSON('/api/guide/start', { source: 'browser' });
+    guideState.running = true;
+    guideState.needsFrames = st.needs_frames !== false;
+    renderGuide(st);
+    if (guideState.needsFrames) pushGuideFrame();
+    pollGuide();
+    toast('引导已开始');
+  } catch (e) {
+    $('out-guide').textContent = '引导启动失败：' + e.message;
   }
 }
 
@@ -582,7 +641,6 @@ async function postJSON(url, body, signal) {
 }
 
 // ---------- 帧抓拍：相机开着就即时拍，否则用上传图 ----------
-let frameSeq = 0;
 let currentFrame = { id: '', at: '', source: '' };
 
 function canvasDataUrl(canvas, side, quality) {
@@ -628,8 +686,7 @@ async function captureFrame() {
     canvas.getContext('2d').drawImage(img, 0, 0);
   }
   if (!canvas) return null;
-  frameSeq += 1;
-  currentFrame = { id: `f${frameSeq}`, at: new Date().toISOString(), source };
+  currentFrame = { id: newFrameId('f'), at: new Date().toISOString(), source };
   return { full: canvasDataUrl(canvas, 1600, 0.9), small: canvasDataUrl(canvas, 512, 0.85) };
 }
 
@@ -735,6 +792,59 @@ function speakAnswer(text) {
   speakAll(text, { speed });
 }
 
+// ---------- 统一输出流：危险提示可抢占普通播报 ----------
+let outputReady = false;
+let outputEpoch = -1;
+let outputPriority = 99;
+let outputLastText = '';
+let outputLastAt = 0;
+let outputPlaying = null;
+
+function handleOutputEvent(ev) {
+  let j = null;
+  try { j = JSON.parse(ev.data || '{}'); } catch (e) { return; }
+  if (j.type === 'cancel') {
+    if (j.epoch != null && j.epoch < outputEpoch) return;
+    outputEpoch = j.epoch != null ? j.epoch : outputEpoch;
+    stopPlayer();
+    outputPriority = 99;
+    voiceState('播报已停止', false);
+    return;
+  }
+  if (j.type !== 'speech' || !j.text) return;
+  if (j.epoch != null && j.epoch < outputEpoch) return;
+  if (j.priority === 0) {
+    // 危险/感知失效：无条件打断，忽略“自动朗读”和“引导语音”开关
+    stopPlayer();
+    outputPriority = 0;
+    outputPlaying = speakAll(j.text).finally(() => { if (outputPriority === 0) outputPriority = 99; });
+    return;
+  }
+  if (j.source === 'guide' && j.priority <= 1 && !$('guide-voice').checked) return;
+  if (j.priority >= 3 && !$('eyes-auto-tts').checked) return;
+  const now = Date.now();
+  if (j.text === outputLastText && now - outputLastAt < 1500) return;
+  if (player.running && j.priority > outputPriority) return;
+  if (player.running) stopPlayer();
+  outputPriority = j.priority;
+  outputLastText = j.text;
+  outputLastAt = now;
+  outputPlaying = speakAll(j.text).finally(() => { if (outputPriority === j.priority) outputPriority = 99; });
+}
+
+function connectOutput() {
+  try {
+    const es = new EventSource('/api/output/stream');
+    es.onopen = () => { outputReady = true; };
+    es.onerror = () => { outputReady = false; };
+    es.onmessage = handleOutputEvent;
+  } catch (e) {
+    outputReady = false;
+  }
+}
+
+connectOutput();
+
 async function runEyes(task, btn, question = '') {
   const it = beginInteraction();
   const frame = await captureFrame();
@@ -767,7 +877,7 @@ async function runEyes(task, btn, question = '') {
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
     if (task !== 'followup') state.lastEyes = j.answer || '';
-    if ($('eyes-auto-tts').checked) speakAnswer(j.answer);
+    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(j.answer);
   } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
   finally { setBusy(btn, false, '重试'); }
 }
@@ -831,7 +941,7 @@ async function sendChat(q, btn) {
       }
     }
     // 等整段回答生成完再一次性播报，避免流式逐句合成造成的句间停顿
-    if ($('eyes-auto-tts').checked) speakAnswer(answerText || text);
+    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(answerText || text);
     $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
@@ -852,21 +962,44 @@ $('btn-send').onclick = sendMerged;
 $('eyes-input').onkeydown = (e) => { if (e.key === 'Enter') sendMerged(); };
 $('btn-stop').onclick = () => {
   cancelInteraction();
+  postJSON('/api/output/cancel', { min_priority: 1 }).catch(() => {});
   voiceState('已停止播报', false);
 };
 
 let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
 let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
 let vVoiced = 0, vMuteUntil = 0, vNoise = 0.006, vLastSpoken = '', vSpokenAt = 0;
+let vPreRoll = [], vArmed = false, vKwsReady = null;
 const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
 const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
+const PRE_ROLL_SECONDS = 1.5;  // 唤醒词之前的音频，防止“唤醒词+指令”丢开头
 const WAKE_WORD = '小冰小冰';    // 显示用唤醒词；服务端同时接受单个「小冰」及同音词
+
+function pushPreRoll(data) {
+  vPreRoll.push(new Float32Array(data));
+  let total = vPreRoll.reduce((s, c) => s + c.length, 0);
+  while (total > vSampleRate * PRE_ROLL_SECONDS && vPreRoll.length) {
+    total -= vPreRoll[0].length;
+    vPreRoll.shift();
+  }
+}
 
 function resetVad() {
   vChunks = [];
+  vPreRoll = [];
   vSpeaking = false;
   vSilence = 0;
   vVoiced = 0;
+}
+
+async function ensureKwsReady() {
+  if (vKwsReady !== null) return vKwsReady;
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    vKwsReady = !!(s.kws && s.kws.ready);
+  } catch (e) { vKwsReady = false; }
+  return vKwsReady;
 }
 
 document.addEventListener('cm5-tts-start', (e) => {
@@ -955,8 +1088,29 @@ async function sendUtterance(chunks) {
   voiceState('识别中…', true);
   try {
     const audio = await blobToDataUrl(encodeWav(boostChunks(chunks), vSampleRate));
+    let wakeDetected = false;
+    const kwsReady = await ensureKwsReady();
+    if (kwsReady && !vArmed) {
+      // KWS 常开监听：先确认唤醒词，再送 ASR；模型不可用时退回 ASR 文本匹配。
+      let kws = null;
+      try {
+        kws = await postJSON('/api/kws', { audio }, it.signal);
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        kws = null;
+      }
+      if (it.gen !== interactionGen) return;
+      if (kws && kws.error) {
+        voiceState('KWS 不可用，改用语音识别兜底', true);
+      } else if (kws && !kws.keyword) {
+        voiceState(`没听到「${WAKE_WORD}」`, true);
+        return;
+      } else if (kws && kws.keyword) {
+        wakeDetected = true;
+      }
+    }
     const frame = await captureFrame();
-    const body = { audio, context: state.lastEyes, session_id: sessionId };
+    const body = { audio, context: state.lastEyes, session_id: sessionId, wake_detected: wakeDetected };
     if (frame) {
       body.image = frame.full;
       body.image_vlm = frame.small;
@@ -966,12 +1120,13 @@ async function sendUtterance(chunks) {
     }
     const j = await postJSON('/api/voice', body, it.signal);
     if (it.gen !== interactionGen) return;
+    vArmed = !!j.armed || j.intent === 'wake';
     if (j.text && echoLike(j.text)) {
       voiceState('已忽略播报回声', true);
       return;
     }
     if (j.intent === 'none') {
-      voiceState(`没听到「${WAKE_WORD}」·识别到「${j.text || '空'}」`, true);
+      voiceState(`没听到唤醒词或指令 · 识别到「${j.text || '空'}」`, true);
       return;
     }
     if (j.intent === 'silent') {
@@ -982,12 +1137,24 @@ async function sendUtterance(chunks) {
       voiceState('我在听，请继续说', true);
       return;
     }
+    if (j.intent === 'speech_stop') {
+      cancelInteraction();
+      stopPlayer();
+      voiceState('已停止播报', false);
+      return;
+    }
+    if (j.guide) adoptGuideFromServer(j.guide);
+    if (j.intent === 'guide_stop') stopGuideLocal(true);
+    if (j.close_camera) {
+      closeCamera();
+      stopGuideLocal(true);
+    }
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
     voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
-    if ($('eyes-auto-tts').checked && j.answer) speakAnswer(j.answer);
+    if (!outputReady && $('eyes-auto-tts').checked && j.answer && j.spoken !== false) speakAnswer(j.answer);
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
   } finally {
@@ -1012,7 +1179,7 @@ function onAudio(e) {
     vSilence += data.length / vSampleRate;
     vChunks.push(new Float32Array(data));
     if (vSilence > VAD_SILENCE) {
-      const chunks = vChunks;
+      const chunks = vPreRoll.concat(vChunks);
       const voiced = vVoiced / vSampleRate;
       const total = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
       resetVad();
@@ -1020,6 +1187,7 @@ function onAudio(e) {
       else if (voiced >= 0.2) voiceState('没听清，再说一次', true);
     }
   } else {
+    pushPreRoll(data);
     vNoise = Math.min(0.03, vNoise * 0.95 + rms * 0.05);
   }
 }
@@ -1058,9 +1226,12 @@ async function startVoice() {
     vOn = true;
     vNoise = 0.006;
     vMuteUntil = 0;
+    vArmed = false;
+    vKwsReady = null;
     resetVad();
     $('btn-voice').textContent = '关闭语音唤醒';
-    voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
+    const kwsOk = await ensureKwsReady();
+    voiceState(kwsOk ? `监听中 · 说「${WAKE_WORD}」` : `KWS 未就绪，用 ASR 兜底 · 说「${WAKE_WORD}」`, true);
   } catch (e) {
     stopVoice();
     voiceState('麦克风打开失败：' + e.message, false);
@@ -1071,6 +1242,7 @@ async function startVoice() {
 
 function stopVoice() {
   vOn = false;
+  vArmed = false;
   if (vproc) { vproc.disconnect(); vproc.onaudioprocess = null; vproc = null; }
   if (vctx) { vctx.close(); vctx = null; }
   if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
@@ -1095,7 +1267,7 @@ $('btn-voice-test').onclick = async () => {
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
-    if (tab.dataset.tab !== 'guide' && guideState.running) stopGuide();
+    if (tab.dataset.tab !== 'guide' && guideState.running && guideState.needsFrames) stopGuide();
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');

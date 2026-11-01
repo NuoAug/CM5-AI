@@ -67,9 +67,9 @@ class IntentTests(unittest.TestCase):
     def test_scene(self):
         self.assertEqual(server.parse_voice_intent("前面有什么"), ("scene", ""))
 
-    def test_camera_off_goes_chat(self):
+    def test_camera_off_is_control_intent(self):
         intent, _ = server.parse_voice_intent("不要打开摄像头")
-        self.assertEqual(intent, "chat")
+        self.assertEqual(intent, "camera_off")
 
     def test_topic_switch_goes_chat(self):
         intent, _ = server.parse_voice_intent("换个话题，不看东西")
@@ -293,8 +293,8 @@ class VoiceGuardTests(unittest.TestCase):
         self.assertEqual(server.parse_voice_intent("眼轻有什么"), ("scene", ""))
         self.assertEqual(server.parse_voice_intent("卫生见在哪"), ("toilet", ""))
 
-    def test_short_unknown_goes_chat_without_context(self):
-        self.assertEqual(server.parse_voice_intent("那个东西呢"), ("chat", ""))
+    def test_short_unknown_stays_unknown_without_context(self):
+        self.assertEqual(server.parse_voice_intent("那个东西呢"), ("unknown", ""))
 
     def test_followup_requires_context_or_visual_reference(self):
         self.assertEqual(server.parse_voice_intent("那个东西呢", has_context=True), ("followup", ""))
