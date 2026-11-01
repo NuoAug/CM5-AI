@@ -158,8 +158,17 @@
       <video id="video" autoplay playsinline></video>
       <div class="row">
         <button class="primary" id="btn-file">上传图片</button>
-        <button id="btn-sample-cat">示例：猫</button>
-        <button id="btn-sample-ocr">示例：中文标牌</button>
+        <select id="sample-image" style="flex:1;min-width:180px;width:auto">
+          <option value="cats.jpg">示例：猫</option>
+          <option value="ocr-test.png">示例：中文标牌</option>
+          <option value="scene-stairs.jpg">场景：楼梯</option>
+          <option value="scene-corridor.jpg">场景：走廊</option>
+          <option value="scene-crosswalk.jpg">场景：斑马线</option>
+          <option value="scene-desk.jpg">场景：桌面物品</option>
+          <option value="scene-elevator.jpg">场景：电梯</option>
+          <option value="scene-shelf.jpg">场景：超市货架</option>
+        </select>
+        <button id="btn-sample">载入示例</button>
       </div>
       <div class="row">
         <button id="btn-cam">打开摄像头</button>
@@ -356,8 +365,15 @@ $('drop').ondrop = async (e) => {
   e.preventDefault(); $('drop').classList.remove('drag');
   if (e.dataTransfer.files[0]) { await loadImageFromBlob(e.dataTransfer.files[0]); toast('图片已载入'); }
 };
-$('btn-sample-cat').onclick = async () => { await loadImageFromUrl('/api/sample/cats.jpg'); toast('已载入示例：猫'); };
-$('btn-sample-ocr').onclick = async () => { await loadImageFromUrl('/api/sample/ocr-test.png'); toast('已载入示例：中文标牌'); };
+$('btn-sample').onclick = async () => {
+  const name = $('sample-image').value;
+  try {
+    await loadImageFromUrl('/api/sample/' + name);
+    toast('已载入示例图');
+  } catch (e) {
+    toast('示例图载入失败：' + e.message);
+  }
+};
 
 let stream = null;
 $('btn-cam').onclick = async () => {

@@ -33,7 +33,7 @@ AI-Deployment/
    │  └─ requirements.txt
    ├─ models/             模型文件（VLM / OCR / ASR / TTS）
    ├─ runtime/            llama.cpp、Piper、Python、MinGW
-   ├─ samples/            测试图（猫、中文标牌）
+   ├─ samples/            测试图（猫、中文标牌、6 张场景示例）
    ├─ logs/               运行日志，不入库
    └─ data/               运行产物，不入库
 ```
@@ -89,6 +89,8 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 旁边的「语音试听」按钮只播一句测试语，用来确认服务端 Piper 是否真的发声。
 
 **调试工具**（二级页签）：场景识别、空间关系、图像问答、中文 OCR、语音播报，用于单独调试各模块。
+
+「选择图片」内置 8 个示例：猫、中文标牌、楼梯、走廊、斑马线、桌面物品、电梯、超市货架；场景示例为 AI 生成图，仅用于界面与模型测试。
 
 ## 接口
 
@@ -251,3 +253,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.25 | Piper 播报优化：磁盘缓存固定短语（上限 50 MB）+ 前端提前合成下一句，减少句间卡顿 |
 | v1.0.26 | 移除 Kokoro 引擎、音色选择与模型文件，语音播报只保留 Piper |
 | v1.0.27 | 播报连贯性优化：整段回答分块合成、聊天等生成完再整段播报、压缩过长停顿 |
+| v1.0.28 | 新增 6 张场景示例图（楼梯/走廊/斑马线/桌面/电梯/超市），示例入口合并为下拉框 |
