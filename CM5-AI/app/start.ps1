@@ -63,7 +63,13 @@ try {
             Write-Host "服务进程已退出，正在清理…" -ForegroundColor Yellow
             break
         }
-        $cmd = Read-Host
+        try {
+            $cmd = Read-Host
+        } catch {
+            # 非交互环境（后台、任务计划）无法读取输入，改为等待进程结束
+            Wait-Process -Id $vlmProc.Id, $webProc.Id
+            break
+        }
         if ($cmd -and $cmd.Trim().ToLower() -eq "stop") { break }
     }
 } finally {
