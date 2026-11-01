@@ -88,13 +88,20 @@ function systemSpeak(text) {
     u.lang = voice ? voice.lang : 'zh-CN';
     u.rate = 1.0;
     let done = false;
+    let guard = null;
     const finish = (ok) => {
       if (done) return;
       done = true;
+      if (guard) clearTimeout(guard);
       if (player.resolver === cancel) player.resolver = null;
       resolve(ok);
     };
     const cancel = () => finish(false);
+    // 没有音频输出设备时 onend/onerror 可能都不触发，必须兜底，否则播放器会永久占用
+    guard = setTimeout(() => {
+      try { synth.cancel(); } catch (e) { /* ignore */ }
+      finish(false);
+    }, Math.max(6000, text.length * 400 + 4000));
     player.resolver = cancel;
     u.onend = () => finish(true);
     u.onerror = () => finish(false);

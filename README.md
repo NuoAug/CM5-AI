@@ -86,7 +86,10 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 **语音唤醒**：点「开启语音唤醒」授权麦克风后常开监听。先说唤醒词，再说指令，例如
 「小V，前面有什么」「小V，帮我找一下水杯」「小V，卫生间在哪」。
-唤醒词可在输入框改，保存在浏览器本地；默认「小V」兼容小薇、小微、小威、小伟等识别结果。
+唤醒词可在输入框改，保存在浏览器本地；默认「小V」兼容小晓、小薇、小微、小威、小伟、小维、小唯、小为、小围等识别结果。
+唤醒词与指令分开说也可以：唤醒后 6 秒内直接说指令，不必重复唤醒词。
+每次识别失败界面会显示「识别到「…」」，方便看清 ASR 实际听到了什么；播报期间不采集麦克风，避免把自己的声音当成指令。
+旁边的「语音试听」按钮只播一句测试语，用来确认系统中文语音是否真的发声。
 
 **其它页签**：场景识别、空间关系、图像问答、中文 OCR、语音播报，用于单独调试各模块。
 
@@ -96,7 +99,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 |---|---|---|
 | `/api/status` | GET | 无，返回 VLM / OCR / ASR / TTS 状态与内存 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question` |
-| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`wake` |
+| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`wake`、`armed`（免唤醒窗口内为 true）、`session_id` |
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`sid`、`speed` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
@@ -219,3 +222,5 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.8 | 新鲜画面与多轮会话、聊天/日期/详细描述、分句播报与打断、OCR 内存图像、线程可配置、测试与报告 |
 | v1.0.9 | 意图否定与改口、读字禁止扩写、资源预检脚本 |
 | v1.0.10 | 播报改为浏览器系统中文语音，服务端 TTS 默认不加载，保留降级路径 |
+| v1.0.11 | 打开麦克风增加设备检测与 8 秒超时，失败时给出明确原因 |
+| v1.0.12 | 唤醒修复：唤醒后 6 秒免唤醒窗口、同音词扩展、播报期间不采集、VAD 阈值下调并做音量归一、失败时回显 ASR 原文、系统语音播放加超时兜底 |

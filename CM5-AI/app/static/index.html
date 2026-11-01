@@ -215,6 +215,7 @@
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
           <input type="text" id="wake-word" placeholder="唤醒词" style="width:120px;flex:0 0 auto" />
+          <button id="btn-voice-test">语音试听</button>
           <span id="voice-state" class="voice-state">未开启 · 先说「小V」再说指令</span>
         </div>
       </div>
@@ -640,7 +641,9 @@ $('btn-stop').onclick = () => {
 };
 
 let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
-let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
+let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false, vArmedUntil = 0;
+const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
+const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
 
 const WAKE_KEY = 'edge-ai-wake';
 function currentWake() {
@@ -693,16 +696,28 @@ function blobToDataUrl(blob) {
   });
 }
 
+function boostChunks(chunks) {
+  let peak = 0;
+  for (const c of chunks) for (let i = 0; i < c.length; i++) if (Math.abs(c[i]) > peak) peak = Math.abs(c[i]);
+  if (peak <= 0.001 || peak >= 0.4) return chunks;
+  const gain = Math.min(4, 0.4 / peak);
+  return chunks.map((c) => {
+    const o = new Float32Array(c.length);
+    for (let i = 0; i < c.length; i++) o[i] = c[i] * gain;
+    return o;
+  });
+}
+
 async function sendUtterance(chunks) {
   const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
-  if (duration < 0.5) return;
+  if (duration < 0.35) return;
   const it = beginInteraction();
   vBusy = true;
   voiceState('识别中…', true);
   try {
-    const audio = await blobToDataUrl(encodeWav(chunks, vSampleRate));
+    const audio = await blobToDataUrl(encodeWav(boostChunks(chunks), vSampleRate));
     const frame = await captureFrame();
-    const body = { audio, context: state.lastEyes, wake: currentWake(), session_id: sessionId };
+    const body = { audio, context: state.lastEyes, wake: currentWake(), session_id: sessionId, armed: performance.now() < vArmedUntil };
     if (frame) {
       body.image = frame.full;
       body.image_vlm = frame.small;
@@ -713,9 +728,10 @@ async function sendUtterance(chunks) {
     const j = await postJSON('/api/voice', body, it.signal);
     if (it.gen !== interactionGen) return;
     if (j.intent === 'none') {
-      voiceState(`没听到「${currentWake()}」，继续监听`, true);
+      voiceState(`没听到「${currentWake()}」·识别到「${j.text || '空'}」`, true);
       return;
     }
+    if (j.intent === 'wake') vArmedUntil = performance.now() + 6000;
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
@@ -730,12 +746,12 @@ async function sendUtterance(chunks) {
 }
 
 function onAudio(e) {
-  if (!vOn || vBusy) return;
+  if (!vOn || vBusy || player.running) return;   // 播报期间不采集，避免把自己的声音当成指令
   const data = e.inputBuffer.getChannelData(0);
   let sum = 0;
   for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
   const rms = Math.sqrt(sum / data.length);
-  if (rms > 0.02) {
+  if (rms > VAD_RMS) {
     if (!vSpeaking) voiceState('听到声音，说完停一下…', true);
     vSpeaking = true;
     vSilence = 0;
@@ -743,7 +759,7 @@ function onAudio(e) {
   } else if (vSpeaking) {
     vSilence += data.length / vSampleRate;
     vChunks.push(new Float32Array(data));
-    if (vSilence > 0.7) {
+    if (vSilence > VAD_SILENCE) {
       const chunks = vChunks;
       vChunks = [];
       vSpeaking = false;
@@ -806,6 +822,12 @@ function stopVoice() {
 }
 
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
+
+$('btn-voice-test').onclick = async () => {
+  if (!window.speechSynthesis) return voiceState('浏览器不支持系统语音', false);
+  const ok = await systemSpeak('你好，我是你的AI眼睛，现在可以听到我说话吗');
+  voiceState(ok ? '系统语音播放完成' : '系统语音播放失败，请检查扬声器或语音包', ok);
+};
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {

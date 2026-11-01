@@ -76,6 +76,30 @@ class IntentTests(unittest.TestCase):
         intent, _ = server.parse_voice_intent("眼前这个是什么意思")
         self.assertNotEqual(intent, "chat")
 
+    def test_scene_front(self):
+        self.assertEqual(server.parse_voice_intent("看前方"), ("scene", ""))
+
+
+class WakeTests(unittest.TestCase):
+    def test_default_wake_homophones(self):
+        pat = server.wake_pattern("小V")
+        for text in ("小V 前面有什么", "小微前面有什么", "小维你看一下", "小威", "晓V你好", "小 v"):
+            self.assertRegex(text, pat)
+
+    def test_default_wake_ignores_plain_speech(self):
+        pat = server.wake_pattern("小V")
+        self.assertIsNone(pat.search("前面有什么"))
+
+    def test_custom_wake_literal(self):
+        pat = server.wake_pattern("你好眼睛")
+        self.assertIsNone(pat.search("你好 现在"))
+        self.assertRegex("你好眼睛，读一下", pat)
+
+    def test_ack_is_wake_only(self):
+        self.assertTrue(server.ACK_ONLY.fullmatch("你好"))
+        self.assertFalse(server.ACK_ONLY.fullmatch("看前方"))
+        self.assertFalse(server.ACK_ONLY.fullmatch("读一下"))
+
 
 def _box(x0, y0, x1, y1):
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
