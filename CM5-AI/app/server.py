@@ -8,14 +8,17 @@ CM5 边缘 AI 本地测试服务
 
 import base64
 import gc
+import hashlib
 import io
 import json
+import logging
 import os
 import re
 import threading
 import time
 import wave
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import numpy as np
@@ -45,6 +48,45 @@ OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
 FRAME_MAX_AGE = float(os.environ.get("FRAME_MAX_AGE", "20"))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+LOG_DIR = ROOT / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "app.log"
+
+
+def _setup_logger():
+    logger = logging.getLogger("cm5")
+    logger.setLevel(logging.INFO)
+    if logger.handlers:
+        return logger
+    fmt = logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(levelname)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    file_handler = RotatingFileHandler(
+        LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    logger.addHandler(file_handler)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(fmt)
+    logger.addHandler(stream_handler)
+    return logger
+
+
+log = _setup_logger()
+
+
+def b64_md5(data):
+    """日志用图片指纹：确认请求实际带的是哪张图。"""
+    if not data:
+        return "-"
+    raw = data.split(",", 1)[1] if data.startswith("data:") else data
+    try:
+        return hashlib.md5(base64.b64decode(raw)).hexdigest()[:12]
+    except Exception:  # noqa: BLE001
+        return "bad"
+
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -607,10 +649,10 @@ def init_ocr():
                 "EngineConfig.onnxruntime.inter_op_num_threads": OCR_INTER_THREADS,
             }
         )
-        print("[init] OCR ready")
+        log.info("[init] OCR ready")
     except Exception as exc:  # noqa: BLE001
         init_error["ocr"] = str(exc)
-        print("[init] OCR failed:", exc)
+        log.error("[init] OCR failed: %s", exc)
 
 
 def init_tts():
@@ -633,10 +675,10 @@ def init_tts():
             max_num_sentences=1,
         )
         tts_engine = sherpa_onnx.OfflineTts(cfg)
-        print("[init] MeloTTS ready, sample_rate=", tts_engine.sample_rate)
+        log.info("[init] MeloTTS ready, sample_rate=%s", tts_engine.sample_rate)
     except Exception as exc:  # noqa: BLE001
         init_error["tts"] = str(exc)
-        print("[init] MeloTTS failed:", exc)
+        log.error("[init] MeloTTS failed: %s", exc)
 
 
 def load_kokoro():
@@ -660,7 +702,7 @@ def load_kokoro():
         max_num_sentences=1,
     )
     kokoro_engine = sherpa_onnx.OfflineTts(cfg)
-    print("[init] Kokoro ready")
+    log.info("[init] Kokoro ready")
     return kokoro_engine
 
 
@@ -677,10 +719,10 @@ def init_asr():
             decoding_method="greedy_search",
         )
         init_error["asr"] = None
-        print("[init] ASR ready")
+        log.info("[init] ASR ready")
     except Exception as exc:  # noqa: BLE001
         init_error["asr"] = str(exc)
-        print("[init] ASR failed:", exc)
+        log.error("[init] ASR failed: %s", exc)
 
 
 def ensure_asr():
@@ -708,7 +750,7 @@ def asr_idle_reaper():
             if asr_engine is not None and time.time() - asr_last_used >= ASR_IDLE_SECONDS:
                 asr_engine = None
                 gc.collect()
-                print("[asr] 空闲释放")
+                log.info("[asr] 空闲释放")
 
 
 def decode_image(data: str) -> Image.Image:
@@ -736,6 +778,7 @@ def save_debug_image(name, img):
         return None
     path = DATA_DIR / f"{time.time_ns()}-{threading.get_ident()}-{name}"
     img.save(path)
+    log.info("[snapshot] %s", path.name)
     return path
 
 
@@ -925,8 +968,14 @@ def api_vlm():
             return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
         with VLM_LOCK:
             result = call_vlm(img_b64, prompt, max_tokens=max_tokens)
+        log.info(
+            "vlm mode=%s md5=%s latency=%sms answer=%r",
+            mode, b64_md5(body.get("image", "")), result.get("latency_ms"),
+            (result.get("answer") or "")[:160],
+        )
         return jsonify(result)
     except Exception as exc:  # noqa: BLE001
+        log.exception("vlm failed")
         return jsonify({"error": f"VLM 调用失败：{exc}"}), 500
     finally:
         leave()
@@ -1037,7 +1086,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
                 res = ocr_engine(img)
             text = pick_main_text_block(parse_ocr_result(res))
         except Exception as exc:  # noqa: BLE001
-            print("[eyes] OCR 失败，改用 VLM：", exc)
+            log.warning("[eyes] OCR 失败，改用 VLM：%s", exc)
             text = ""
         if text:
             session_remember(session_id, "读文字", text, visual=True, frame_id=frame_id)
@@ -1111,6 +1160,7 @@ def api_talk():
 
     if task == "chat" and any(w in question for w in REALTIME_WORDS):
         def gen_rule():
+            log.info("talk task=chat rule=realtime q=%r", question)
             try:
                 session_remember(session_id, question, CHAT_REALTIME_REPLY)
                 chunk = json.dumps({"sentence": CHAT_REALTIME_REPLY}, ensure_ascii=False)
@@ -1128,6 +1178,7 @@ def api_talk():
 
     prompt = prompt_for(task, item, context, question)
     max_tokens = spec["max_tokens"]
+    t0 = time.time()
 
     def generate():
         buf, full = "", ""
@@ -1157,12 +1208,18 @@ def api_talk():
             session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
             yield f"data: {json.dumps({'done': True, 'answer': answer}, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001
+            log.warning("talk stream failed: %s", exc)
             yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
         finally:
             if inner is not None:
                 inner.close()
             VLM_LOCK.release()
             leave()
+            log.info(
+                "talk task=%s session=%s frame=%s q=%r latency=%sms answer=%r",
+                task, session_id, frame_id, question[:80],
+                int((time.time() - t0) * 1000), full[:160],
+            )
 
     return Response(
         stream_with_context(generate()),
@@ -1179,24 +1236,38 @@ def api_eyes():
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
         body = request.get_json(force=True, silent=True) or {}
-        return jsonify(
-            run_eyes(
-                body.get("task", "scene"),
-                item=str(body.get("item") or "").strip(),
-                context=str(body.get("context") or "").strip(),
-                question=str(body.get("question") or "").strip(),
-                image_b64=body.get("image", ""),
-                image_vlm_b64=body.get("image_vlm", ""),
-                frame_id=str(body.get("frame_id") or "").strip(),
-                session_id=str(body.get("session_id") or "").strip(),
-                captured_at=str(body.get("captured_at") or "").strip(),
-            )
+        task = str(body.get("task", "scene"))
+        item = str(body.get("item") or "").strip()
+        question = str(body.get("question") or "").strip()
+        frame_id = str(body.get("frame_id") or "").strip()
+        session_id = str(body.get("session_id") or "").strip()
+        captured_at = str(body.get("captured_at") or "").strip()
+        image = body.get("image", "")
+        image_vlm = body.get("image_vlm", "")
+        result = run_eyes(
+            task,
+            item=item,
+            context=str(body.get("context") or "").strip(),
+            question=question,
+            image_b64=image,
+            image_vlm_b64=image_vlm,
+            frame_id=frame_id,
+            session_id=session_id,
+            captured_at=captured_at,
         )
+        log.info(
+            "eyes task=%s source=%s item=%r question=%r frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s latency=%sms answer=%r",
+            task, result.get("source"), item, question, frame_id, captured_at, session_id,
+            body.get("image_source") or "-", b64_md5(image), b64_md5(image_vlm),
+            result.get("latency_ms"), (result.get("answer") or "")[:160],
+        )
+        return jsonify(result)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
+        log.exception("eyes failed")
         return jsonify({"error": f"识别失败：{exc}"}), 500
     finally:
         leave()
@@ -1319,11 +1390,12 @@ def api_voice():
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
-    print(f"[voice] src_sr={src_sr} dur={len(samples) / 16000:.1f}s text={text}", flush=True)
+    log.info("voice asr sr=%s dur=%.1fs text=%r", src_sr, len(samples) / 16000, text)
 
     pattern = WAKE_PATTERN
     armed = bool(body.get("armed"))
     if not armed and not pattern.search(text):
+        log.info("voice no-wake text=%r", text)
         return jsonify(
             {"text": text, "intent": "none", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
         )
@@ -1331,6 +1403,7 @@ def api_voice():
     stripped = pattern.sub("", text) if pattern.search(text) else text
     cmd = re.sub(r"[，。！？、,.!?\s]", "", stripped)
     if not cmd or ACK_ONLY.fullmatch(cmd):
+        log.info("voice wake text=%r", text)
         return jsonify(
             {"text": text, "intent": "wake", "answer": "我在，请说", "latency_ms": int((time.time() - t0) * 1000)}
         )
@@ -1374,10 +1447,17 @@ def api_voice():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001
+        log.exception("voice failed")
         return jsonify({"error": f"识别失败：{exc}"}), 500
     finally:
         leave()
 
+    log.info(
+        "voice intent=%s item=%r frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s source=%s latency=%sms answer=%r text=%r",
+        intent, item, frame_id, captured_at, session_id,
+        body.get("image_source") or "-", b64_md5(img), b64_md5(img_vlm),
+        result["source"], int((time.time() - t0) * 1000), result["answer"][:160], text,
+    )
     return jsonify(
         {
             "text": text,
@@ -1410,6 +1490,7 @@ def api_ocr():
         latency = int((time.time() - t0) * 1000)
         lines = parse_ocr_result(res)
         full_text = "\n".join(item["text"] for item in lines)
+        log.info("ocr lines=%d chars=%d latency=%sms", len(lines), len(full_text), latency)
         return jsonify({"text": full_text, "lines": lines, "latency_ms": latency})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"OCR 失败：{exc}"}), 500
@@ -1462,6 +1543,10 @@ def api_tts():
             wf.setframerate(sr)
             wf.writeframes(pcm)
         buf.seek(0)
+        log.info(
+            "tts engine=%s chars=%d gen=%sms audio=%.2fs",
+            engine, len(text), gen_ms, len(audio.samples) / sr,
+        )
         resp = send_file(buf, mimetype="audio/wav", as_attachment=False, download_name="tts.wav")
         resp.headers["X-Gen-Ms"] = str(gen_ms)
         resp.headers["X-Audio-Seconds"] = str(round(len(audio.samples) / sr, 2))
@@ -1479,6 +1564,10 @@ def sample(name: str):
 
 
 if __name__ == "__main__":
+    log.info(
+        "start vlm=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s data=%s log=%s",
+        VLM_URL, MEM_BUDGET_GB, FRAME_MAX_AGE, DEBUG_SNAPSHOT, DATA_DIR, LOG_FILE,
+    )
     threading.Thread(target=init_ocr, daemon=True).start()
     threading.Thread(target=init_tts, daemon=True).start()
     threading.Thread(target=asr_idle_reaper, daemon=True).start()

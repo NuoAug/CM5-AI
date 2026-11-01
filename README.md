@@ -207,6 +207,16 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 - 日期标签只用构造的 OCR 行与样例图验证，未用真实药品/食品标签拍照验证。
 - 播报已完全依赖服务端 MeloTTS：模型缺失或初始化失败时没有语音，只能看页面文字。
 
+## 日志与排查
+
+| 文件 | 内容 |
+|---|---|
+| `logs/app.log` | 应用事件：启动配置、eyes / voice / talk / OCR / TTS / VLM 请求的任务、意图、画面 md5、来源、延迟与回答、错误堆栈；按 2 MB × 3 轮转 |
+| `logs/web.log` / `web.err.log` | Flask 与 Werkzeug 输出 |
+| `logs/vlm.log` / `vlm.err.log` | llama.cpp 输出 |
+
+每行请求日志都带 `frame`、`session`、`full` / `vlm` 图片 md5、`image_source`（camera / upload）、延迟和回答预览。排查「图不对」时先比对日志里的 md5 与浏览器实际发送的图片；需要保留原图时设 `DEBUG_SNAPSHOT=1`，请求图会写到 `data/`，文件名带时间戳和线程号，默认关闭。
+
 ## 版本记录
 
 | 版本 | 内容 |
@@ -234,3 +244,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.20 | 模型人设提示词由「AI 眼睛」改为「AI 助手」，与语音试听文案统一 |
 | v1.0.21 | 重写「看前方」场景提示词：移除床猫示例，标牌/文字画面改为直接读字；start.ps1 在非交互环境改为等待进程 |
 | v1.0.22 | 停止方式改为直接关闭启动窗口，由守护进程自动结束模型与网页服务，移除 stop 输入 |
+| v1.0.23 | 新增 `logs/app.log`：请求日志带任务/意图/画面 md5/来源/延迟/回答，按 2 MB × 3 轮转 |
