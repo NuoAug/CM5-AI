@@ -19,6 +19,7 @@ import tempfile
 import threading
 import time
 import wave
+import atexit
 from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -47,6 +48,7 @@ PIPER_MODEL = Path(
 )
 ASR_DIR = MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09"
 VLM_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8091")
+VLM_API_KEY = os.environ.get("VLM_API_KEY", "").strip()
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (ROOT / "data"))
 TTS_CACHE_DIR = DATA_DIR / "tts-cache"
 SAMPLES_DIR = ROOT / "samples"
@@ -87,6 +89,16 @@ def _setup_logger():
 
 
 log = _setup_logger()
+
+
+class _QuietAccessFilter(logging.Filter):
+    NOISE = ("/api/status", "/favicon.ico", "/static/", "/@vite/client")
+
+    def filter(self, record):
+        return not any(part in record.getMessage() for part in self.NOISE)
+
+
+logging.getLogger("werkzeug").addFilter(_QuietAccessFilter())
 
 
 def b64_md5(data):
@@ -206,6 +218,8 @@ FOLLOW_RULE = (
     "给了画面就结合画面回答，只用能确认的信息；看不清、被挡住、没看到就直说，不猜。"
     "方位只说左/中/右，远近只说近/远，不报米数、不报秒数，不说能不能走。"
 )
+
+NO_FRAME_REPLY = "当前没有画面，请先拍一张或打开相机"
 
 RULES_BY_TASK = {
     "chat": CHAT_RULE,
@@ -366,8 +380,12 @@ SESSION_LOCK = threading.Lock()
 SESSIONS = {}
 MAX_SESSIONS = 8
 SESSION_TTL = 600
-MAX_HISTORY_TURNS = 4
-MAX_HISTORY_CHARS = 480
+MAX_HISTORY_TURNS = 3
+MAX_HISTORY_CHARS = 360
+MAX_CONTEXT_CHARS = 320
+ARMED_SECONDS = float(os.environ.get("ARMED_SECONDS", "15"))
+MIN_VOICE_SECONDS = float(os.environ.get("MIN_VOICE_SECONDS", "0.6"))
+MIN_VOICE_RMS = float(os.environ.get("MIN_VOICE_RMS", "0.008"))
 
 
 def get_session(session_id):
@@ -382,7 +400,7 @@ def get_session(session_id):
             if len(SESSIONS) >= MAX_SESSIONS:
                 oldest = min(SESSIONS, key=lambda k: SESSIONS[k]["updated"])
                 SESSIONS.pop(oldest, None)
-            sess = {"frame_id": "", "history": [], "updated": now}
+            sess = {"frame_id": "", "history": [], "updated": now, "armed_until": 0.0, "last_cmd": "", "last_cmd_at": 0.0}
             SESSIONS[sid] = sess
         sess["updated"] = now
         return sess
@@ -423,20 +441,26 @@ def session_remember(session_id, question, answer, visual=False, frame_id=None):
         sess["updated"] = time.time()
 
 
-def history_text(session_id):
+def history_text(session_id, include_visual=True):
     sess = get_session(session_id)
     with SESSION_LOCK:
         parts = []
         for item in sess["history"]:
+            if item.get("visual") and not include_visual:
+                continue
             tag = "（旧画面已失效）" if item.get("stale") else ""
             parts.append(f"{tag}问：{item['q']} 答：{item['a']}")
         return "；".join(parts)
 
 
-def session_context(session_id, client_context=""):
-    """服务端历史优先；客户端 context 只在无历史时兜底，不能绕过失效标记。"""
-    server = history_text(session_id)
-    return server if server else (client_context or "").strip()
+def session_context(session_id, client_context="", include_visual=True):
+    """服务端历史优先；无当前画面时不使用客户端视觉上下文，避免复述旧画面。"""
+    server = history_text(session_id, include_visual=include_visual)
+    if include_visual:
+        text = server if server else (client_context or "").strip()
+    else:
+        text = server
+    return text[-MAX_CONTEXT_CHARS:]
 
 
 # ---------- 日期标签解析（只靠 OCR，值不合格就拒猜） ----------
@@ -828,7 +852,7 @@ def ensure_asr():
         return asr_engine
 
 
-ASR_IDLE_SECONDS = 60
+ASR_IDLE_SECONDS = int(os.environ.get("ASR_IDLE_SECONDS", "180"))
 
 
 def asr_idle_reaper():
@@ -891,9 +915,13 @@ def temperature_for(task):
     return 0.4 if task == "chat" else 0.1
 
 
+def vlm_headers():
+    return {"Authorization": f"Bearer {VLM_API_KEY}"} if VLM_API_KEY else {}
+
+
 def vlm_health() -> bool:
     try:
-        r = requests.get(VLM_URL + "/health", timeout=2)
+        r = requests.get(VLM_URL + "/health", headers=vlm_headers(), timeout=2)
         return r.status_code == 200
     except Exception:  # noqa: BLE001
         return False
@@ -918,14 +946,27 @@ def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
         "stream": False,
     }
     t0 = time.time()
-    r = requests.post(VLM_URL + "/v1/chat/completions", json=payload, timeout=300)
+    r = requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), timeout=300)
     r.raise_for_status()
     data = r.json()
     msg = data["choices"][0]["message"]
     answer = (msg.get("content") or "").strip()
     for tag in ("<think>", "</think>"):
         answer = answer.replace(tag, "")
-    return {"answer": answer.strip(), "latency_ms": int((time.time() - t0) * 1000)}
+    usage = data.get("usage") or {}
+    timings = data.get("timings") or {}
+    log.info(
+        "vlm tokens prompt=%s completion=%s prefill_ms=%s total_ms=%s finish=%s",
+        usage.get("prompt_tokens"), usage.get("completion_tokens"),
+        timings.get("prompt_ms"), timings.get("predicted_ms"),
+        data["choices"][0].get("finish_reason"),
+    )
+    return {
+        "answer": answer.strip(),
+        "latency_ms": int((time.time() - t0) * 1000),
+        "prompt_tokens": usage.get("prompt_tokens"),
+        "completion_tokens": usage.get("completion_tokens"),
+    }
 
 
 def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
@@ -945,7 +986,7 @@ def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
         "top_k": 40,
         "stream": True,
     }
-    with requests.post(VLM_URL + "/v1/chat/completions", json=payload, stream=True, timeout=300) as resp:
+    with requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), stream=True, timeout=300) as resp:
         resp.raise_for_status()
         for raw in resp.iter_lines():
             if not raw:
@@ -1004,6 +1045,11 @@ def pick_main_text_block(lines):
 @app.get("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status=204)
 
 
 @app.get("/api/status")
@@ -1117,14 +1163,25 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         }
 
     if task == "followup":
-        ctx = session_context(session_id, context)
-        prompt = build_eyes_prompt("followup", context=ctx, question=question)
+        age = frame_age_seconds(captured_at)
         img = None
-        if image_vlm_b64 or image_b64:
+        if (image_vlm_b64 or image_b64) and age is not None and age <= FRAME_MAX_AGE:
             try:
                 img = image_to_jpeg_b64(decode_image(image_vlm_b64 or image_b64))
             except Exception:  # noqa: BLE001
                 img = None
+        ctx = session_context(session_id, context, include_visual=True)
+        if not img:
+            session_remember(session_id, question, NO_FRAME_REPLY, visual=False)
+            return {
+                "task": task,
+                "source": "rule",
+                "answer": NO_FRAME_REPLY,
+                "has_image": False,
+                "frame_age_s": round(age, 1) if age is not None else None,
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
+        prompt = build_eyes_prompt("followup", context=ctx, question=question)
         if not vlm_health():
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
         with VLM_LOCK:
@@ -1136,6 +1193,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
             "source": "vlm",
             "answer": answer,
             "has_image": bool(img),
+            "frame_age_s": round(age, 1) if age is not None else None,
             "latency_ms": int((time.time() - t0) * 1000),
         }
 
@@ -1347,8 +1405,9 @@ def api_eyes():
             captured_at=captured_at,
         )
         log.info(
-            "eyes task=%s source=%s item=%r question=%r frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s latency=%sms answer=%r",
-            task, result.get("source"), item, question, frame_id, captured_at, session_id,
+            "eyes task=%s source=%s item=%r question=%r frame=%s captured=%s age=%s session=%s image_source=%s full=%s vlm=%s latency=%sms answer=%r",
+            task, result.get("source"), item, question, frame_id, captured_at,
+            frame_age_seconds(captured_at), session_id,
             body.get("image_source") or "-", b64_md5(image), b64_md5(image_vlm),
             result.get("latency_ms"), (result.get("answer") or "")[:160],
         )
@@ -1371,7 +1430,29 @@ WAKE_SEP = r"[\s，,。.、！!？?·]*"
 WAKE_PATTERN = re.compile(rf"[{WAKE_HEAD}]{WAKE_SEP}[{WAKE_TAIL}]", re.I)
 
 
-ACK_ONLY = re.compile(r"^(?:喂|哎|嗯|你好|您好|在吗|在不在|听得到吗|能听到吗)$")
+ACK_ONLY = re.compile(
+    r"^(?:喂|哎|嗯|嗯嗯|你好|您好|在吗|在不在|听得到吗|能听到吗|"
+    r"对|对对|对对对|好的|好|行|可以|知道了|谢谢)$"
+)
+
+ASR_ALIASES = (
+    ("眼轻", "眼前"),
+    ("眼钱", "眼前"),
+    ("前边", "前面"),
+    ("卫生见", "卫生间"),
+    ("出扣", "出口"),
+    ("出抠", "出口"),
+    ("保质其", "保质期"),
+)
+
+FOLLOWUP_MARKER = re.compile(r"这|那|它|他|她|刚才|刚刚|为什么|怎么|多少|哪个|哪边|是不是|吗|呢|还|再")
+
+
+def normalize_voice_text(text):
+    out = text
+    for src, dst in ASR_ALIASES:
+        out = out.replace(src, dst)
+    return out
 
 
 def decode_wav(data_b64):
@@ -1433,8 +1514,11 @@ TOPIC_SWITCH = re.compile(r"换个话题|聊点别的|只聊天|继续聊天|不
 DEFINITION = re.compile(r"是什么意思|什么意思|怎么理解|如何定义")
 
 
-def parse_voice_intent(cmd):
-    """规则匹配意图，不额外加载模型。"""
+def parse_voice_intent(cmd, has_context=False):
+    """规则匹配意图，不额外加载模型；只有明确的追问才走 followup。"""
+    cmd = normalize_voice_text(cmd)
+    if ACK_ONLY.fullmatch(cmd):
+        return "ack", ""
     if CAMERA_OFF.search(cmd) or TOPIC_SWITCH.search(cmd):
         return "chat", ""
     if DEFINITION.search(cmd) and "眼前" not in cmd and "手里" not in cmd:
@@ -1458,7 +1542,11 @@ def parse_voice_intent(cmd):
         return ("item", item) if item else ("scene", "")
     if any(w in cmd for w in ("有什么", "看看", "前面", "前方", "周围", "描述")):
         return "scene", ""
-    return "followup", ""
+    if "眼前" in cmd or "手里" in cmd:
+        return "followup", ""
+    if has_context and (FOLLOWUP_MARKER.search(cmd) or len(cmd) >= 6):
+        return "followup", ""
+    return "chat", ""
 
 
 @app.post("/api/voice")
@@ -1467,13 +1555,21 @@ def api_voice():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     body = request.get_json(force=True, silent=True) or {}
     t0 = time.time()
+    session_id = str(body.get("session_id") or "").strip()
+    sess = get_session(session_id)
 
     try:
         samples, src_sr = decode_wav(body.get("audio", ""))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"音频解析失败：{exc}"}), 400
-    if len(samples) < 4800:
-        return jsonify({"text": "", "intent": "short", "answer": ""})
+
+    duration = len(samples) / 16000
+    rms = float(np.sqrt(np.mean(np.square(samples)))) if len(samples) else 0.0
+    if duration < MIN_VOICE_SECONDS or rms < MIN_VOICE_RMS:
+        log.info("voice skip dur=%.1fs rms=%.4f", duration, rms)
+        return jsonify(
+            {"text": "", "intent": "silent", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
+        )
 
     try:
         text = asr_transcribe(samples)
@@ -1481,28 +1577,59 @@ def api_voice():
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
-    log.info("voice asr sr=%s dur=%.1fs text=%r", src_sr, len(samples) / 16000, text)
+    log.info("voice asr sr=%s dur=%.1fs rms=%.4f text=%r", src_sr, duration, rms, text)
+    if not text:
+        log.info("voice empty dur=%.1fs rms=%.4f", duration, rms)
+        return jsonify(
+            {"text": "", "intent": "silent", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
+        )
 
-    pattern = WAKE_PATTERN
-    armed = bool(body.get("armed"))
-    if not armed and not pattern.search(text):
+    now = time.time()
+    armed = now < sess["armed_until"]
+    has_wake = bool(WAKE_PATTERN.search(text))
+    stripped = WAKE_PATTERN.sub("", text) if has_wake else text
+    cmd = normalize_voice_text(re.sub(r"[，。！？、,.!?\s]", "", stripped))
+
+    if has_wake:
+        with SESSION_LOCK:
+            sess["armed_until"] = now + ARMED_SECONDS
+
+    if not cmd or ACK_ONLY.fullmatch(cmd):
+        if has_wake:
+            log.info("voice wake text=%r", text)
+            return jsonify(
+                {"text": text, "intent": "wake", "answer": "我在，请说", "latency_ms": int((time.time() - t0) * 1000)}
+            )
+        if armed:
+            log.info("voice ack text=%r", text)
+            return jsonify(
+                {"text": text, "intent": "ack", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
+            )
+        return jsonify(
+            {"text": text, "intent": "none", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
+        )
+
+    if not has_wake and not armed:
         log.info("voice no-wake text=%r", text)
         return jsonify(
             {"text": text, "intent": "none", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
         )
 
-    stripped = pattern.sub("", text) if pattern.search(text) else text
-    cmd = re.sub(r"[，。！？、,.!?\s]", "", stripped)
-    if not cmd or ACK_ONLY.fullmatch(cmd):
-        log.info("voice wake text=%r", text)
+    if cmd == sess["last_cmd"] and now - sess["last_cmd_at"] < 2.0:
+        log.info("voice duplicate text=%r", text)
         return jsonify(
-            {"text": text, "intent": "wake", "answer": "我在，请说", "latency_ms": int((time.time() - t0) * 1000)}
+            {"text": text, "intent": "ack", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
         )
 
-    intent, item = parse_voice_intent(cmd)
+    has_context = bool(history_text(session_id))
+    intent, item = parse_voice_intent(cmd, has_context=has_context)
+    with SESSION_LOCK:
+        sess["armed_until"] = 0.0
+        sess["last_cmd"] = cmd
+        sess["last_cmd_at"] = now
+
     context = str(body.get("context") or "").strip()
     frame_id = str(body.get("frame_id") or "").strip()
-    session_id = str(body.get("session_id") or "").strip()
     captured_at = str(body.get("captured_at") or "").strip()
     img = body.get("image", "")
     img_vlm = body.get("image_vlm", "")
@@ -1544,8 +1671,8 @@ def api_voice():
         leave()
 
     log.info(
-        "voice intent=%s item=%r frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s source=%s latency=%sms answer=%r text=%r",
-        intent, item, frame_id, captured_at, session_id,
+        "voice intent=%s item=%r armed=%s frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s source=%s latency=%sms answer=%r text=%r",
+        intent, item, armed, frame_id, captured_at, session_id,
         body.get("image_source") or "-", b64_md5(img), b64_md5(img_vlm),
         result["source"], int((time.time() - t0) * 1000), result["answer"][:160], text,
     )
@@ -1652,9 +1779,11 @@ def sample(name: str):
 
 if __name__ == "__main__":
     log.info(
-        "start vlm=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s data=%s log=%s",
-        VLM_URL, MEM_BUDGET_GB, FRAME_MAX_AGE, DEBUG_SNAPSHOT, DATA_DIR, LOG_FILE,
+        "start vlm=%s auth=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s data=%s log=%s",
+        VLM_URL, "key" if VLM_API_KEY else "none",
+        MEM_BUDGET_GB, FRAME_MAX_AGE, DEBUG_SNAPSHOT, DATA_DIR, LOG_FILE,
     )
+    atexit.register(lambda: log.info("web exit"))
     log.info("piper=%s", "ready" if not piper_error() else piper_error())
     threading.Thread(target=init_ocr, daemon=True).start()
     threading.Thread(target=asr_idle_reaper, daemon=True).start()

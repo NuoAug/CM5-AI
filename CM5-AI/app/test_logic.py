@@ -1,8 +1,14 @@
 """逻辑回归测试：不加载模型，只测纯函数、路由与提示词。"""
 
+import base64
+import io
 import time
 import unittest
+import wave
 from datetime import datetime, timedelta, timezone
+from unittest import mock
+
+import numpy as np
 
 import server
 import guide
@@ -276,6 +282,83 @@ class ResourceConfigTests(unittest.TestCase):
         self.assertGreaterEqual(server.OCR_INTRA_THREADS, 1)
         self.assertGreaterEqual(server.OCR_INTER_THREADS, 1)
         self.assertGreaterEqual(server.ASR_THREADS, 1)
+
+
+class VoiceGuardTests(unittest.TestCase):
+    def test_ack_words_are_not_commands(self):
+        for text in ("嗯", "对对对", "好的", "知道了", "谢谢"):
+            self.assertEqual(server.parse_voice_intent(text), ("ack", ""))
+
+    def test_asr_alias_normalized(self):
+        self.assertEqual(server.parse_voice_intent("眼轻有什么"), ("scene", ""))
+        self.assertEqual(server.parse_voice_intent("卫生见在哪"), ("toilet", ""))
+
+    def test_short_unknown_goes_chat_without_context(self):
+        self.assertEqual(server.parse_voice_intent("那个东西呢"), ("chat", ""))
+
+    def test_followup_requires_context_or_visual_reference(self):
+        self.assertEqual(server.parse_voice_intent("那个东西呢", has_context=True), ("followup", ""))
+        self.assertEqual(server.parse_voice_intent("它是什么颜色", has_context=True), ("followup", ""))
+        self.assertEqual(server.parse_voice_intent("眼前这个是什么"), ("followup", ""))
+
+    def test_text_only_followup_prompt_has_no_visual_rule(self):
+        client = server.app.test_client()
+        j = client.post(
+            "/api/eyes",
+            json={"task": "followup", "question": "左边是什么", "session_id": "s-noimg"},
+        ).get_json()
+        self.assertEqual(j["source"], "rule")
+        self.assertEqual(j["answer"], server.NO_FRAME_REPLY)
+        self.assertFalse(j["has_image"])
+
+    def test_image_followup_prompt_keeps_visual_rule(self):
+        prompt = server.build_eyes_prompt("followup", context="左边有一只猫", question="它是什么颜色")
+        self.assertIn("如果同时给了当前画面", prompt)
+
+
+class VoiceStateTests(unittest.TestCase):
+    def setUp(self):
+        server.SESSIONS.clear()
+        self.client = server.app.test_client()
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            data = np.tile(np.array([10000, -10000], dtype=np.int16), 8000)
+            wf.writeframes(data.tobytes())
+        self.audio = "data:audio/wav;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    def send(self, text):
+        with mock.patch.object(server, "asr_transcribe", lambda samples: text):
+            return self.client.post(
+                "/api/voice", json={"audio": self.audio, "session_id": "s1"}
+            ).get_json()
+
+    def test_wake_then_ack_does_not_reprompt(self):
+        first = self.send("小冰小冰")
+        self.assertEqual(first["intent"], "wake")
+        self.assertEqual(first["answer"], "我在，请说")
+        second = self.send("嗯")
+        self.assertEqual(second["intent"], "ack")
+        self.assertEqual(second["answer"], "")
+        third = self.send("对对对")
+        self.assertEqual(third["intent"], "ack")
+
+    def test_empty_text_is_silent(self):
+        self.assertEqual(self.send("")["intent"], "silent")
+
+    def test_ack_without_wake_is_none(self):
+        server.SESSIONS.clear()
+        self.assertEqual(self.send("嗯")["intent"], "none")
+
+    def test_armed_window_expires(self):
+        self.send("小冰小冰")
+        server.get_session("s1")["armed_until"] = time.time() - 1
+        self.assertEqual(self.send("继续").get("intent"), "none")
+
+    def test_wake_and_ack_in_one_utterance(self):
+        self.assertEqual(self.send("小冰小冰，嗯")["intent"], "wake")
 
 
 class GuideDecisionTests(unittest.TestCase):

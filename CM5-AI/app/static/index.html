@@ -156,6 +156,7 @@
       <input type="file" id="file" accept="image/*" hidden />
       <canvas id="preview"></canvas>
       <video id="video" autoplay playsinline></video>
+      <div class="hint" id="image-source">未选择图片</div>
       <div class="row">
         <button class="primary" id="btn-file">上传图片</button>
         <select id="sample-image" style="flex:1;min-width:180px;width:auto">
@@ -374,6 +375,10 @@ async function loadImageFromUrl(url) {
   await loadImageFromBlob(await r.blob());
 }
 
+function setImageSource(text) {
+  $('image-source').textContent = text;
+}
+
 $('btn-file').onclick = () => $('file').click();
 $('drop').onclick = () => $('file').click();
 $('file').onchange = async (e) => {
@@ -381,6 +386,7 @@ $('file').onchange = async (e) => {
     closeCamera();
     $('sample-image').value = '';
     await loadImageFromBlob(e.target.files[0]);
+    setImageSource('上传图片（静态，非当前视野）');
     toast('图片已载入');
   }
 };
@@ -392,6 +398,7 @@ $('drop').ondrop = async (e) => {
     closeCamera();
     $('sample-image').value = '';
     await loadImageFromBlob(e.dataTransfer.files[0]);
+    setImageSource('拖入图片（静态，非当前视野）');
     toast('图片已载入');
   }
 };
@@ -401,6 +408,7 @@ $('sample-image').onchange = async () => {
   try {
     closeCamera();
     await loadImageFromUrl('/api/sample/' + name);
+    setImageSource('示例图（静态，非当前视野）');
     toast('已载入示例图');
   } catch (e) {
     toast('示例图载入失败：' + e.message);
@@ -414,6 +422,7 @@ $('btn-clear').onclick = () => {
   canvas.style.display = 'none';
   $('sample-image').value = '';
   $('file').value = '';
+  setImageSource('未选择图片');
   toast('已清除图片');
 };
 
@@ -427,6 +436,7 @@ function closeCamera() {
   const v = $('video');
   v.srcObject = null;
   v.style.display = 'none';
+  setImageSource(state.imageFull || state.image ? '静态图（非当前视野）' : '未选择图片');
   $('btn-cam').textContent = '打开摄像头';
   $('btn-shot').disabled = true;
 }
@@ -435,6 +445,7 @@ $('btn-cam').onclick = async () => {
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
     const v = $('video'); v.srcObject = stream; v.style.display = 'block'; $('btn-shot').disabled = false;
+    setImageSource('摄像头实时');
     $('btn-cam').textContent = '关闭摄像头';
     toast('摄像头已打开');
   } catch (e) {
@@ -449,6 +460,7 @@ $('btn-shot').onclick = async () => {
   const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
   await loadImageFromBlob(blob);
   $('sample-image').value = '';
+  setImageSource('摄像头拍照（静态）');
   toast('拍照完成');
 };
 
@@ -583,11 +595,25 @@ function canvasDataUrl(canvas, side, quality) {
   return c.toDataURL('image/jpeg', quality);
 }
 
+function waitNextVideoFrame(v) {
+  return new Promise((resolve) => {
+    if (!v.requestVideoFrameCallback) {
+      setTimeout(resolve, 80);
+      return;
+    }
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const timer = setTimeout(finish, 150);
+    v.requestVideoFrameCallback(() => { clearTimeout(timer); finish(); });
+  });
+}
+
 async function captureFrame() {
   const v = $('video');
   let canvas = null;
   let source = 'upload';
   if (v.style.display === 'block' && v.videoWidth) {
+    await waitNextVideoFrame(v);
     canvas = document.createElement('canvas');
     canvas.width = v.videoWidth;
     canvas.height = v.videoHeight;
@@ -669,10 +695,11 @@ $('copy-ocr').onclick = async () => {
   catch (e) { toast('复制失败，请手动选择'); }
 };
 
-async function synthTts(text) {
+async function synthTts(text, engine = 'piper', speedOverride = null) {
+  const speed = Number(speedOverride) > 0 ? Number(speedOverride) : Number($('tts-speed').value);
   const r = await fetch('/api/tts', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, engine: 'piper', speed: Number($('tts-speed').value) })
+    body: JSON.stringify({ text, engine, speed })
   });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
   return {
@@ -700,6 +727,13 @@ $('tts-scene').onclick = () => playTts(state.lastScene);
 $('tts-spatial').onclick = () => playTts(state.lastSpatial);
 $('tts-vqa').onclick = () => playTts(state.lastVqa);
 $('tts-ocr').onclick = () => playTts(state.lastOcr);
+
+function speakAnswer(text) {
+  if (!text) return;
+  const base = Number($('tts-speed').value) || 1.0;
+  const speed = text.length >= 60 ? Math.max(base, 1.15) : base;
+  speakAll(text, { speed });
+}
 
 async function runEyes(task, btn, question = '') {
   const it = beginInteraction();
@@ -733,7 +767,7 @@ async function runEyes(task, btn, question = '') {
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
     if (task !== 'followup') state.lastEyes = j.answer || '';
-    if ($('eyes-auto-tts').checked) speakAll(j.answer);
+    if ($('eyes-auto-tts').checked) speakAnswer(j.answer);
   } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
   finally { setBusy(btn, false, '重试'); }
 }
@@ -797,7 +831,7 @@ async function sendChat(q, btn) {
       }
     }
     // 等整段回答生成完再一次性播报，避免流式逐句合成造成的句间停顿
-    if ($('eyes-auto-tts').checked) speakAll(answerText || text);
+    if ($('eyes-auto-tts').checked) speakAnswer(answerText || text);
     $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
@@ -822,11 +856,43 @@ $('btn-stop').onclick = () => {
 };
 
 let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
-let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false, vArmedUntil = 0;
+let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
+let vVoiced = 0, vMuteUntil = 0, vNoise = 0.006, vLastSpoken = '', vSpokenAt = 0;
 const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
 const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
-const ARMED_MS = 15000;     // 唤醒后等待指令的时间
 const WAKE_WORD = '小冰小冰';    // 显示用唤醒词；服务端同时接受单个「小冰」及同音词
+
+function resetVad() {
+  vChunks = [];
+  vSpeaking = false;
+  vSilence = 0;
+  vVoiced = 0;
+}
+
+document.addEventListener('cm5-tts-start', (e) => {
+  resetVad();
+  vLastSpoken = (e.detail && e.detail.text) || '';
+  vSpokenAt = performance.now();
+});
+document.addEventListener('cm5-tts-end', () => {
+  resetVad();
+  vMuteUntil = performance.now() + 500;
+});
+
+function echoLike(text) {
+  if (!text || !vLastSpoken || performance.now() - vSpokenAt > 10000) return false;
+  const norm = (s) => (s || '').replace(/[^\u4e00-\u9fa5a-z0-9]/gi, '');
+  const a = norm(text), b = norm(vLastSpoken);
+  if (a.length < 3 || b.length < 3) return false;
+  const grams = (s) => {
+    const out = [];
+    for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+    return out;
+  };
+  const ga = grams(a), gb = new Set(grams(b));
+  const hit = ga.filter((g) => gb.has(g)).length;
+  return hit / Math.max(1, ga.length) > 0.7;
+}
 
 function voiceState(text, on) {
   $('voice-state').textContent = text;
@@ -883,14 +949,14 @@ function boostChunks(chunks) {
 
 async function sendUtterance(chunks) {
   const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
-  if (duration < 0.35) return;
+  if (duration < 0.8) return;
   const it = beginInteraction();
   vBusy = true;
   voiceState('识别中…', true);
   try {
     const audio = await blobToDataUrl(encodeWav(boostChunks(chunks), vSampleRate));
     const frame = await captureFrame();
-    const body = { audio, context: state.lastEyes, session_id: sessionId, armed: performance.now() < vArmedUntil };
+    const body = { audio, context: state.lastEyes, session_id: sessionId };
     if (frame) {
       body.image = frame.full;
       body.image_vlm = frame.small;
@@ -900,17 +966,28 @@ async function sendUtterance(chunks) {
     }
     const j = await postJSON('/api/voice', body, it.signal);
     if (it.gen !== interactionGen) return;
+    if (j.text && echoLike(j.text)) {
+      voiceState('已忽略播报回声', true);
+      return;
+    }
     if (j.intent === 'none') {
       voiceState(`没听到「${WAKE_WORD}」·识别到「${j.text || '空'}」`, true);
       return;
     }
-    if (j.intent === 'wake') vArmedUntil = performance.now() + ARMED_MS;
+    if (j.intent === 'silent') {
+      voiceState('没听到有效语音', true);
+      return;
+    }
+    if (j.intent === 'ack') {
+      voiceState('我在听，请继续说', true);
+      return;
+    }
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
     voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
-    if ($('eyes-auto-tts').checked && j.answer) speakAll(j.answer);
+    if ($('eyes-auto-tts').checked && j.answer) speakAnswer(j.answer);
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
   } finally {
@@ -919,26 +996,31 @@ async function sendUtterance(chunks) {
 }
 
 function onAudio(e) {
-  if (!vOn || vBusy || player.running) return;   // 播报期间不采集，避免把自己的声音当成指令
+  if (!vOn || vBusy || player.running || performance.now() < vMuteUntil) return;
   const data = e.inputBuffer.getChannelData(0);
   let sum = 0;
   for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
   const rms = Math.sqrt(sum / data.length);
-  if (rms > VAD_RMS) {
+  const threshold = Math.max(VAD_RMS, vNoise * 3);
+  if (rms > threshold) {
     if (!vSpeaking) voiceState('听到声音，说完停一下…', true);
     vSpeaking = true;
     vSilence = 0;
+    vVoiced += data.length;
     vChunks.push(new Float32Array(data));
   } else if (vSpeaking) {
     vSilence += data.length / vSampleRate;
     vChunks.push(new Float32Array(data));
     if (vSilence > VAD_SILENCE) {
       const chunks = vChunks;
-      vChunks = [];
-      vSpeaking = false;
-      vSilence = 0;
-      sendUtterance(chunks);
+      const voiced = vVoiced / vSampleRate;
+      const total = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
+      resetVad();
+      if (voiced >= 0.5 && total >= 0.8) sendUtterance(chunks);
+      else if (voiced >= 0.2) voiceState('没听清，再说一次', true);
     }
+  } else {
+    vNoise = Math.min(0.03, vNoise * 0.95 + rms * 0.05);
   }
 }
 
@@ -974,6 +1056,9 @@ async function startVoice() {
     src.connect(vproc);
     vproc.connect(vctx.destination);
     vOn = true;
+    vNoise = 0.006;
+    vMuteUntil = 0;
+    resetVad();
     $('btn-voice').textContent = '关闭语音唤醒';
     voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
   } catch (e) {
@@ -989,7 +1074,7 @@ function stopVoice() {
   if (vproc) { vproc.disconnect(); vproc.onaudioprocess = null; vproc = null; }
   if (vctx) { vctx.close(); vctx = null; }
   if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
-  vChunks = []; vSpeaking = false; vSilence = 0;
+  resetVad();
   $('btn-voice').textContent = '开启语音唤醒';
   voiceState(`未开启 · 先说「${WAKE_WORD}」再说指令`, false);
 }

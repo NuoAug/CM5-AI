@@ -1,5 +1,5 @@
 // 统一播放器与交互代次：页面与自动化测试共用，避免实现和测试分叉。
-const player = { gen: 0, queue: [], running: false, audio: null, resolver: null };
+const player = { gen: 0, queue: [], running: false, audio: null, resolver: null, speed: null };
 let interactionGen = 0;
 let activeCtrl = null;
 
@@ -69,9 +69,9 @@ function playUrl(url) {
   });
 }
 
-async function synthesizeSentence(text) {
+async function synthesizeSentence(text, speed) {
   try {
-    return await synthTts(text, 'piper');
+    return await synthTts(text, 'piper', speed);
   } catch (e) {
     return null;
   }
@@ -85,9 +85,9 @@ async function pumpPlayer(gen) {
     while (player.queue.length && gen === player.gen) {
       const sentence = player.queue.shift();
       // 当前句播放时，提前合成下一句，避免每句都等 Piper 进程启动
-      const current = next || synthesizeSentence(sentence);
+      const current = next || synthesizeSentence(sentence, player.speed);
       next = null;
-      if (player.queue.length) next = synthesizeSentence(player.queue[0]);
+      if (player.queue.length) next = synthesizeSentence(player.queue[0], player.speed);
       const t = await current;
       if (!t || !t.url) continue;
       if (gen !== player.gen) {
@@ -122,12 +122,19 @@ function chunkSentences(text, maxLen = 180) {
   return chunks;
 }
 
-async function speakAll(text) {
+async function speakAll(text, opts = {}) {
   if (!text) return;
   stopPlayer();
+  player.speed = Number(opts.speed) > 0 ? Number(opts.speed) : null;
   const gen = player.gen;
+  document.dispatchEvent(new CustomEvent('cm5-tts-start', { detail: { text, speed: player.speed } }));
   chunkSentences(text).forEach((s) => player.queue.push(s));
-  await pumpPlayer(gen);
+  try {
+    await pumpPlayer(gen);
+  } finally {
+    player.speed = null;
+    document.dispatchEvent(new CustomEvent('cm5-tts-end'));
+  }
 }
 
 function beginInteraction() {

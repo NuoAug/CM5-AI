@@ -81,12 +81,17 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 | 停止播报 | 立即停止播放，丢弃未播放的句子，旧请求结果不再写回 |
 
 视觉按钮在相机开启时会即时抓拍，并带 `frame_id` / `captured_at`；超过 `FRAME_MAX_AGE` 秒的画面会被拒绝并要求重拍。手动上传的静态图标记为「上传」，不会被称为当前视野。
+追问没有当前帧、或帧已过期时，服务端直接返回「当前没有画面，请先拍一张或打开相机」，不调用 VLM，避免小模型拿历史回答编造画面内容。
+会话历史保留最近 3 轮、最多 360 字，送进模型的上下文再截到 320 字；每次 VLM 调用记录 `prompt_tokens` / `completion_tokens` 与 `finish_reason`，方便确认是否被截断。
 
 **语音唤醒**：点「开启语音唤醒」授权麦克风后常开监听。先说唤醒词「小冰小冰」，再说指令，例如
 「小冰小冰，前面有什么」「小冰小冰，帮我找一下水杯」「小冰小冰，卫生间在哪」。
 唤醒词固定为「小冰小冰」，不再提供自定义输入；单说「小冰」也能唤醒，兼容小晓/晓冰、小兵、小并、小病、小斌、小彬、小滨等常见同音识别，字间可带空格或标点，连续说两次会一并去掉。
 只听到唤醒词时回答「我在，请说」，随后 15 秒内直接说指令即可，不必重复唤醒词；超时未说指令则回到需要唤醒词的状态。
+「免唤醒窗口」由服务端按 `session_id` 计时，前端不再传 `armed` 布尔值；窗口内只说「嗯」「对对对」这类确认词不会播报、不会延长窗口，只有真正的指令才消耗窗口。
+播报期间暂停采集，播放结束后再静默 0.5 秒；VAD 状态会在播报前后清空，ASR 结果与最近一次播报文本相似度超过 0.7 时按回声丢弃并提示「已忽略播报回声」。
 每次识别失败界面会显示「识别到「…」」，方便看清 ASR 实际听到了什么；播报期间不采集麦克风，避免把自己的声音当成指令。
+输入不足 0.6 秒、平均音量过低或 ASR 返回空文本时直接判为无效语音，不进入唤醒/命令链路；同一句指令 2 秒内重复出现只按确认处理。
 旁边的「语音试听」按钮只播一句测试语，用来确认服务端 Piper 是否真的发声。
 
 **调试工具**（二级页签）：场景识别、空间关系、图像问答、中文 OCR、语音播报，用于单独调试各模块。
@@ -101,7 +106,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 |---|---|---|
 | `/api/status` | GET | 无，返回 VLM / OCR / ASR / TTS 状态、内存与模型 CPU 占用 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question` |
-| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`armed`（免唤醒窗口内为 true）、`session_id` |
+| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`session_id`；免唤醒窗口由服务端维护 |
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`sid`、`speed` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
@@ -187,11 +192,19 @@ $env:MEM_BUDGET_GB = "3.2"
 7. **输出上限按实测放宽**：出现句尾被截断时，优先放宽 `max_tokens`，不要用降分辨率来换速度。
 8. **数字进文档**：每次优化后的占用与延迟写进上面的内存预算表，不靠经验估算。
 
+## 本地服务安全
+
+- VLM 只监听 `127.0.0.1:8091`，启动时生成随机 API key（`logs/vlm.key`），服务端请求统一带 `Authorization`；未带 key 的生成接口返回 401（`/health` 保持开放）。
+- llama-server 的 CORS 限定为 `http://127.0.0.1:8090`，其它网页不能直接调用本机模型。
+- Flask 仍是开发服务器，只监听 `127.0.0.1:8090`；不要直接暴露到局域网。需要长期对外服务时先验证 `/api/talk` 的 SSE 在 waitress 下不被缓冲，再切换生产服务器。
+- `find_slot: non-consecutive token position` 告警已实测：加 `--no-cache-prompt` 与 `--slot-prompt-similarity 0` 后仍会出现，说明与提示缓存复用无关；当前不影响输出，成因待上游确认，启动参数保持默认。
+- `logs/` 与 `models/` 已在 `.gitignore` 中排除，API key 不会入库。
+
 ## 部署到树莓派时注意
 
 1. 只复制 `models/`、`app/`、`samples/`，不要复制 Windows 版 `runtime/llama.cpp`。
 2. Pi 上需要 b11551 及以上版本的 llama.cpp 才支持 MiniCPM-V 4.7；低于此版本可回退 Qwen3-VL-2B。
-3. 启动参数改为 `-t 4 -c 1024 --parallel 1`（Pi OS Lite 四核）。
+3. 启动参数由 `start.ps1` 按逻辑核数选择：≤4 核用 `-t 4`，也可用 `VLM_THREADS` 覆盖；`-c` 默认 1024，可用 `VLM_CTX` 覆盖。
 4. 摄像头应在 Pi 端抓图（`/picam/shot`），浏览器端抓图在局域网 IP 下会被安全策略禁用。
 5. 麦克风同理：局域网 IP 访问时浏览器不允许录音，需要改成 Pi 端 ALSA 采集。
 6. 4GB 内存下模型侧余量有限，上 Pi 后必须实测峰值与热降频，必要时降到 3.2GB 预算并关闭非必要模块。
@@ -222,6 +235,13 @@ $env:MEM_BUDGET_GB = "3.2"
 | `DATA_DIR` | `CM5-AI/data` | 覆盖数据目录，Windows 默认路径不变 |
 | `DEBUG_SNAPSHOT` | `0` | 设为 `1` 才写调试快照，文件名带时间戳与线程号，避免并发串图 |
 | `ASR_THREADS` | 4 | sherpa 语音识别线程数 |
+| `ASR_IDLE_SECONDS` | 180 | ASR 空闲释放秒数；调大可减少反复加载，占用更多内存 |
+| `MIN_VOICE_SECONDS` | 0.6 | 服务端最短有效语音时长，低于此值不送 ASR |
+| `MIN_VOICE_RMS` | 0.008 | 服务端最低平均音量，低于此值判无效语音 |
+| `ARMED_SECONDS` | 15 | 唤醒后免唤醒窗口秒数 |
+| `VLM_THREADS` | 4（≤4 核）/ 8 | 传给 llama-server 的 `-t`，start.ps1 按逻辑核数选择 |
+| `VLM_CTX` | 1024 | 传给 llama-server 的 `-c` |
+| `VLM_API_KEY` | 每次启动随机生成 | llama-server 与本服务共用的 API key；不设置时由 start.ps1 生成并写入 `logs/vlm.key` |
 | `OCR_INTRA_THREADS` / `OCR_INTER_THREADS` | 4 / 1 | RapidOCR 的 ORT 线程，注意 `OMP_NUM_THREADS` 不控制 ORT 线程池 |
 | `FRAME_MAX_AGE` | 20 | 画面过期秒数 |
 | `MEM_BUDGET_GB` | 3.6 | 模型侧内存预算 |
@@ -235,6 +255,7 @@ $env:MEM_BUDGET_GB = "3.2"
 所有播报统一走服务端 Piper（`/api/tts`，`engine=piper`）。每次合成启动一次 `piper.exe` 子进程，输出 22.05 kHz WAV 后进程退出，不在服务进程常驻模型。Piper 可执行或音色文件缺失时接口返回 503，页面仍显示文字但没有声音。语音播报期间仍然暂停麦克风采集。
 
 合成结果写入 `data/tts-cache/`（上限 50 MB，超出按时间删最旧），固定短语和重复播报第二次为 0 ms；前端把整段回答按 180 字分块合成，当前块播放时提前合成下一块，聊天也等回答生成完再整段播报，避免逐句请求造成的句间停顿。Piper 输出里超过 0.28 s 的停顿会压到 0.15 s，句间静音默认 0.12 s。首句仍有约 0.6–1.2 s 合成等待。
+超过 60 字的回答在前端自动提到 1.15 倍速（用户手动设置的语速更高时以手动值优先）；「详细描述」提示词限三到五句，避免一次生成过长内容。
 
 **真机 A/B 候选（均未执行，待 CM5 实测）**
 
@@ -263,9 +284,12 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 
 | 文件 | 内容 |
 |---|---|
-| `logs/app.log` | 应用事件：启动配置、eyes / voice / talk / OCR / TTS / VLM 请求的任务、意图、画面 md5、来源、延迟与回答、错误堆栈；按 2 MB × 3 轮转 |
-| `logs/web.log` / `web.err.log` | Flask 与 Werkzeug 输出 |
-| `logs/vlm.log` / `vlm.err.log` | llama.cpp 输出 |
+| `logs/app.log` | 应用事件：启动配置、eyes / voice / talk / OCR / TTS / VLM 请求的任务、意图、画面 md5、来源、延迟与回答、token 用量、错误堆栈；按 2 MB × 3 轮转 |
+| `logs/session-YYYYMMDD-HHMMSS/` | 每次启动单独一份：`web.log`、`web.err.log`、`vlm.log`、`vlm.err.log`、`stopped.txt` |
+| `logs/sessions.log` | 启停事件：时间、PID、session 目录、停止原因（manual / window_closed / component_exit）与退出码 |
+| `logs/vlm.key` | 本次启动生成的 llama-server API key，不入库 |
+
+只保留最近 10 次会话目录。Werkzeug 访问日志已过滤 `/api/status`、`/static/*`、`/favicon.ico`、`/@vite/client`，避免轮询刷满错误输出；业务日志仍写 `app.log`。
 
 每行请求日志都带 `frame`、`session`、`full` / `vlm` 图片 md5、`image_source`（camera / upload）、延迟和回答预览。排查「图不对」时先比对日志里的 md5 与浏览器实际发送的图片；需要保留原图时设 `DEBUG_SNAPSHOT=1`，请求图会写到 `data/`，文件名带时间戳和线程号，默认关闭。
 
@@ -306,3 +330,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.30 | 示例图下拉改为选中即载入，新增「清除图片」与摄像头开/关切换 |
 | v1.0.31 | 示例下拉的「选择示例图…」占位项设为不可选，只在未载入时显示 |
 | v1.1.0 | 新增无盲道引导（试验）：SegFormer-B0 分割 + 保守方向决策，测试台新增引导页签 |
+| v1.1.1 | 语音闭环与稳定性修复：回声过滤、服务端免唤醒窗口、无画面追问、意图归一化、VAD/ASR 门限、上下文收紧、llama API key/CORS、会话日志 |
