@@ -192,6 +192,8 @@
           <button class="eyes-btn" id="btn-eyes-toilet">找卫生间</button>
           <button class="eyes-btn" id="btn-eyes-exit">找出口</button>
           <button class="eyes-btn" id="btn-eyes-text">读文字</button>
+          <button class="eyes-btn" id="btn-eyes-date">读日期</button>
+          <button class="eyes-btn" id="btn-eyes-detail">详细描述</button>
           <label class="auto"><input type="checkbox" id="eyes-auto-tts" checked /> 自动朗读</label>
         </div>
         <div class="row">
@@ -204,6 +206,12 @@
           <input type="text" id="eyes-followup" placeholder="追问上一句描述，例如 左边那个是台阶吗" style="flex:1;min-width:220px" />
           <button id="btn-eyes-followup">追问</button>
         </div>
+        <div class="row">
+          <input type="text" id="chat-input" placeholder="想聊点什么，例如 今天有点烦" style="flex:1;min-width:220px" />
+          <button id="btn-chat">聊天</button>
+          <button id="btn-stop">停止播报</button>
+        </div>
+        <div class="result empty" id="out-chat">等待聊天…</div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
           <input type="text" id="wake-word" placeholder="唤醒词" style="width:120px;flex:0 0 auto" />
@@ -291,8 +299,10 @@
 <footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 edge-ai/models 与 edge-ai/runtime</footer>
 <div id="toast"></div>
 
+<script src="/static/app-core.js"></script>
 <script>
-const state = { image: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
+const state = { image: null, imageFull: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
+const sessionId = (crypto.randomUUID ? crypto.randomUUID() : 's' + Date.now() + Math.random().toString(16).slice(2));
 const $ = (id) => document.getElementById(id);
 
 function toast(msg) {
@@ -337,6 +347,13 @@ async function loadImageFromBlob(blob) {
   vCanvas.height = Math.round(img.height * vScale);
   vCanvas.getContext('2d').drawImage(img, 0, 0, vCanvas.width, vCanvas.height);
   state.imageVlm = vCanvas.toDataURL('image/jpeg', 0.85);
+  const fullSide = 1600;
+  const fScale = Math.min(1, fullSide / Math.max(img.width, img.height));
+  const fCanvas = document.createElement('canvas');
+  fCanvas.width = Math.round(img.width * fScale);
+  fCanvas.height = Math.round(img.height * fScale);
+  fCanvas.getContext('2d').drawImage(img, 0, 0, fCanvas.width, fCanvas.height);
+  state.imageFull = fCanvas.toDataURL('image/jpeg', 0.9);
   URL.revokeObjectURL(url);
 }
 
@@ -375,11 +392,49 @@ $('btn-shot').onclick = async () => {
   await loadImageFromBlob(blob); toast('拍照完成');
 };
 
-async function postJSON(url, body) {
-  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+async function postJSON(url, body, signal) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
   return j;
+}
+
+// ---------- 帧抓拍：相机开着就即时拍，否则用上传图 ----------
+let frameSeq = 0;
+let currentFrame = { id: '', at: '', source: '' };
+
+function canvasDataUrl(canvas, side, quality) {
+  const scale = Math.min(1, side / Math.max(canvas.width, canvas.height));
+  if (scale === 1) return canvas.toDataURL('image/jpeg', quality);
+  const c = document.createElement('canvas');
+  c.width = Math.round(canvas.width * scale);
+  c.height = Math.round(canvas.height * scale);
+  c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}
+
+async function captureFrame() {
+  const v = $('video');
+  let canvas = null;
+  let source = 'upload';
+  if (v.style.display === 'block' && v.videoWidth) {
+    canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    canvas.getContext('2d').drawImage(v, 0, 0);
+    source = 'camera';
+  } else if (state.imageFull || state.image) {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = state.imageFull || state.image; });
+    canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+  }
+  if (!canvas) return null;
+  frameSeq += 1;
+  currentFrame = { id: `f${frameSeq}`, at: new Date().toISOString(), source };
+  return { full: canvasDataUrl(canvas, 1600, 0.9), small: canvasDataUrl(canvas, 512, 0.85) };
 }
 
 async function runVlm(mode, prompt, outId, metaId, btn, targetKey) {
@@ -456,13 +511,7 @@ async function synthTts(text) {
   };
 }
 
-async function speakText(text) {
-  if (!text) return;
-  try {
-    const t = await synthTts(text);
-    const audio = $('audio'); audio.src = t.url; audio.play();
-  } catch (e) { toast('朗读失败：' + e.message); }
-}
+// 播放器与分句逻辑在 app-core.js，页面与测试共用同一份实现。
 
 async function playTts(text) {
   if (!text) return toast('没有可朗读的文本');
@@ -483,32 +532,39 @@ $('tts-vqa').onclick = () => playTts(state.lastVqa);
 $('tts-ocr').onclick = () => playTts(state.lastOcr);
 
 async function runEyes(task, btn) {
-  if (task !== 'followup' && !state.image) return toast('请先选择图片');
-  const body = { task };
+  const it = beginInteraction();
+  const frame = await captureFrame();
+  if (!frame && task !== 'followup') return toast('请先拍照或打开相机');
+  const body = { task, session_id: sessionId };
   if (task === 'item') {
     const item = $('eyes-item').value.trim();
     if (!item) return toast('请输入要找的东西');
     body.item = item;
   }
   if (task === 'followup') {
-    if (!state.lastEyes) return toast('先看一次画面再追问');
     const q = $('eyes-followup').value.trim();
     if (!q) return toast('请输入追问内容');
-    body.context = state.lastEyes;
     body.question = q;
-  } else {
-    body.image = state.imageVlm;
+    body.context = state.lastEyes || '';
+  }
+  if (frame) {
+    body.image = frame.full;
+    body.image_vlm = frame.small;
+    body.frame_id = currentFrame.id;
+    body.captured_at = currentFrame.at;
+    body.image_source = currentFrame.source;
   }
   setBusy(btn, true, '识别中…');
   $('out-eyes').classList.add('empty'); $('out-eyes').textContent = '识别中，本机约需数秒…';
   try {
-    const j = await postJSON('/api/eyes', body);
+    const j = await postJSON('/api/eyes', body, it.signal);
+    if (it.gen !== interactionGen) return;
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
     if (task !== 'followup') state.lastEyes = j.answer || '';
-    if ($('eyes-auto-tts').checked) speakText(j.answer);
-  } catch (e) { $('out-eyes').textContent = '失败：' + e.message; }
+    if ($('eyes-auto-tts').checked) speakAll(j.answer);
+  } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
   finally { setBusy(btn, false, '重试'); }
 }
 
@@ -516,10 +572,72 @@ $('btn-eyes-scene').onclick = () => runEyes('scene', $('btn-eyes-scene'));
 $('btn-eyes-toilet').onclick = () => runEyes('toilet', $('btn-eyes-toilet'));
 $('btn-eyes-exit').onclick = () => runEyes('exit', $('btn-eyes-exit'));
 $('btn-eyes-text').onclick = () => runEyes('text', $('btn-eyes-text'));
+$('btn-eyes-date').onclick = () => runEyes('date', $('btn-eyes-date'));
+$('btn-eyes-detail').onclick = () => runEyes('detail', $('btn-eyes-detail'));
 $('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
 $('btn-eyes-followup').onclick = () => runEyes('followup', $('btn-eyes-followup'));
 $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
 $('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-followup').click(); };
+
+// 交互代次由 app-core.js 提供。
+
+// ---------- 普通聊天：流式回答，逐句合成播放 ----------
+async function sendChat() {
+  const q = $('chat-input').value.trim();
+  if (!q) return toast('请输入内容');
+  const it = beginInteraction();
+  const out = $('out-chat');
+  out.classList.remove('empty');
+  out.textContent = '思考中…';
+  try {
+    const resp = await fetch('/api/talk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'chat', question: q, frame_id: currentFrame.id, session_id: sessionId }),
+      signal: it.signal
+    });
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({}));
+      throw new Error(j.error || ('HTTP ' + resp.status));
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let text = '';
+    out.textContent = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (it.gen !== interactionGen) { try { reader.cancel(); } catch (e) { /* ignore */ } return; }
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop();
+      for (const chunk of chunks) {
+        if (!chunk.startsWith('data:')) continue;
+        let payload = null;
+        try { payload = JSON.parse(chunk.slice(5).trim()); } catch (e) { continue; }
+        if (it.gen !== interactionGen) return;
+        if (payload.error) throw new Error(payload.error);
+        if (payload.sentence) {
+          text += payload.sentence;
+          out.textContent = text;
+          player.queue.push(payload.sentence);
+          pumpPlayer(it.gen);
+        }
+        if (payload.done && payload.answer) out.textContent = payload.answer;
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
+  }
+}
+
+$('btn-chat').onclick = sendChat;
+$('chat-input').onkeydown = (e) => { if (e.key === 'Enter') sendChat(); };
+$('btn-stop').onclick = () => {
+  cancelInteraction();
+  voiceState('已停止播报', false);
+};
 
 let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
 let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
@@ -578,11 +696,22 @@ function blobToDataUrl(blob) {
 async function sendUtterance(chunks) {
   const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
   if (duration < 0.5) return;
+  const it = beginInteraction();
   vBusy = true;
   voiceState('识别中…', true);
   try {
     const audio = await blobToDataUrl(encodeWav(chunks, vSampleRate));
-    const j = await postJSON('/api/voice', { audio, image: state.imageVlm, context: state.lastEyes, wake: currentWake() });
+    const frame = await captureFrame();
+    const body = { audio, context: state.lastEyes, wake: currentWake(), session_id: sessionId };
+    if (frame) {
+      body.image = frame.full;
+      body.image_vlm = frame.small;
+      body.frame_id = currentFrame.id;
+      body.captured_at = currentFrame.at;
+      body.image_source = currentFrame.source;
+    }
+    const j = await postJSON('/api/voice', body, it.signal);
+    if (it.gen !== interactionGen) return;
     if (j.intent === 'none') {
       voiceState(`没听到「${currentWake()}」，继续监听`, true);
       return;
@@ -592,9 +721,9 @@ async function sendUtterance(chunks) {
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
     voiceState(`监听中 · 说「${currentWake()}」`, true);
-    if ($('eyes-auto-tts').checked && j.answer) speakText(j.answer);
+    if ($('eyes-auto-tts').checked && j.answer) speakAll(j.answer);
   } catch (e) {
-    voiceState('出错：' + e.message, false);
+    if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
   } finally {
     vBusy = false;
   }

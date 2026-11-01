@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>播放器与分句自动化测试</title>
+<style>body{font-family:monospace;padding:16px;background:#0b1220;color:#e8eefc}#out{white-space:pre-wrap;line-height:1.7}.ok{color:#4ade80}.bad{color:#f87171}</style>
+</head>
+<body>
+<h3>前端播放器 / 分句 / 取消测试</h3>
+<pre id="out">等待运行…</pre>
+<div id="audio"></div>
+
+<script src="/static/app-core.js"></script>
+<script>
+const results = [];
+const out = document.getElementById('out');
+
+let autoEnd = true;
+const audio = {
+  src: '', paused: true, onended: null, onerror: null,
+  play() {
+    if (autoEnd) setTimeout(() => { if (this.onended) this.onended(); }, 5);
+    return Promise.resolve();
+  },
+  pause() { this.paused = true; },
+  fireEnd() { if (this.onended) this.onended(); }
+};
+window.$ = (id) => (id === 'audio' ? audio : { textContent: '' });
+window.synthTts = async (s) => ({ url: 'blob:' + s });
+const revoked = [];
+const realRevoke = URL.revokeObjectURL.bind(URL);
+URL.revokeObjectURL = (u) => { revoked.push(u); if (realRevoke) try { realRevoke(u); } catch (e) {} };
+
+function check(name, cond, detail) {
+  results.push({ name, pass: !!cond, detail: detail || '' });
+}
+
+function delay(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+async function run() {
+  // 1. 分句不截断
+  const long = Array.from({ length: 20 }, (_, i) => '第' + i + '句').join('。') + '。';
+  const parts = splitSentences(long, 30);
+  const joined = parts.join('');
+  const allKept = Array.from({ length: 20 }, (_, i) => '第' + i + '句').every((s) => joined.includes(s));
+  check('20 句不丢失', parts.length > 1 && allKept, '段数=' + parts.length);
+
+  // 2. 保留问号
+  const q = splitSentences('你还好吗？我在这里。');
+  check('保留问号', q.join('').includes('？'), q.join('|'));
+
+  // 3. 长无标点硬切
+  const rawLong = '这是一个没有任何标点符号的超长句子需要被强制拆分'.repeat(4);
+  const hs = splitSentences(rawLong, 40);
+  check('超长无标点拆分且不超长', hs.length > 1 && hs.every((s) => s.length <= 40), '段数=' + hs.length);
+
+  // 4. 播放中停止：promise 必须被 resolve，running 归位
+  autoEnd = false;
+  stopPlayer();
+  const gen = player.gen;
+  player.queue.push('第一句');
+  const running = pumpPlayer(gen);
+  await delay(30);
+  stopPlayer();
+  await Promise.race([running, delay(300)]);
+  check('播放中停止后 pumpPlayer 能退出', player.running === false, 'running=' + player.running);
+
+  // 5. 停止后新回答仍可播放
+  autoEnd = true;
+  await speakAll('新回答第一句。新回答第二句。');
+  check('停止后新回答可播', player.queue.length === 0 && player.running === false, 'queue=' + player.queue.length);
+
+  // 6. 连续调用不互抢：第二次覆盖第一次并播完
+  const first = speakAll('旧回答第一句。旧回答第二句。');
+  await delay(10);
+  const second = speakAll('新回答甲。新回答乙。新回答丙。');
+  await Promise.all([first, second]);
+  check('连续播报最后一次胜出', player.queue.length === 0 && player.running === false, 'queue=' + player.queue.length);
+
+  // 7. 交互代次递增并中止旧控制器
+  const a = beginInteraction();
+  const b = beginInteraction();
+  check('新交互作废旧请求', b.gen > a.gen && a.signal.aborted, 'gen ' + a.gen + '->' + b.gen);
+
+  // 8. 播放 URL 会被回收
+  check('音频 URL 已回收', revoked.length >= 3, 'revoked=' + revoked.length);
+
+  const failed = results.filter((r) => !r.pass);
+  out.className = failed.length ? 'bad' : 'ok';
+  out.textContent = results.map((r) => (r.pass ? 'PASS ' : 'FAIL ') + r.name + '  ' + r.detail).join('\n')
+    + '\n\n合计 ' + results.length + ' 项，失败 ' + failed.length + ' 项';
+  document.title = failed.length ? 'FAIL' : 'PASS';
+}
+
+run().catch((e) => {
+  out.className = 'bad';
+  out.textContent = '测试异常：' + e.message;
+  document.title = 'ERROR';
+});
+</script>
+</body>
+</html>

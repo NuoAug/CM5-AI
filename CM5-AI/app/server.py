@@ -15,12 +15,13 @@ import re
 import threading
 import time
 import wave
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import psutil
 import requests
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
 from PIL import Image
 from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
@@ -32,8 +33,16 @@ TTS_DIR = MODELS / "tts" / "kokoro-int8-multi-lang-v1_1"
 TTS_MELO_DIR = MODELS / "tts" / "vits-melo-tts-zh_en"
 ASR_DIR = MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09"
 VLM_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8091")
-DATA_DIR = ROOT / "data"
+DATA_DIR = Path(os.environ.get("DATA_DIR") or (ROOT / "data"))
 SAMPLES_DIR = ROOT / "samples"
+DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0").strip().lower() in ("1", "true", "yes")
+
+# 线程数可配置：默认值与现状一致，CM5 上按实测再调，不做绑核
+TTS_THREADS = int(os.environ.get("TTS_THREADS", "4"))
+ASR_THREADS = int(os.environ.get("ASR_THREADS", "4"))
+OCR_INTRA_THREADS = int(os.environ.get("OCR_INTRA_THREADS", "4"))
+OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
+FRAME_MAX_AGE = float(os.environ.get("FRAME_MAX_AGE", "20"))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +93,37 @@ EYES_RULE = (
     "只说画面里看得见的；看不清、被挡住、没看到就直说，不猜、不补常识。"
     "不报米数、不报秒数，不说能不能走、能不能过马路。"
 )
+
+CHAT_RULE = (
+    "你是陪伴视障人士的中文语音助手。用口语中文回答，两到四句，不分点、不加括号。"
+    "不要描述画面，也不要提眼睛或视力。"
+    "不编造事实，不假装能查询实时信息。"
+    "如果对方问新闻、天气或实时数据，直接说明没有联网查询能力，请他看手机或问身边的人。"
+    "涉及安全或医疗时只给一般性建议，并提醒找专业人员。"
+)
+
+DETAIL_RULE = (
+    "你是视障人士的AI眼睛。用三到五句口语中文描述，不分点、不加括号。"
+    "方位只说左/中/右，远近只说近/远。"
+    "只说画面里看得见的；看不清就直说，不猜、不补常识。"
+    "不报米数、不报秒数，不说能不能走、能不能过马路。"
+)
+
+FOLLOW_RULE = (
+    "你是视障人士的AI眼睛。用一到两句口语中文回答，不分点、不加括号。"
+    "给了画面就结合画面回答，只用能确认的信息；看不清、被挡住、没看到就直说，不猜。"
+    "方位只说左/中/右，远近只说近/远，不报米数、不报秒数，不说能不能走。"
+)
+
+RULES_BY_TASK = {
+    "chat": CHAT_RULE,
+    "detail": DETAIL_RULE,
+    "compare": DETAIL_RULE,
+    "followup": FOLLOW_RULE,
+}
+
+REALTIME_WORDS = ("新闻", "天气", "股价", "比分", "热搜", "今天发生", "实时", "现在几点")
+CHAT_REALTIME_REPLY = "我这边没有联网，查不到今天的实时信息，你可以用手机看一下。"
 
 EYES_TASKS = {
     "scene": {
@@ -138,12 +178,42 @@ EYES_TASKS = {
     },
     "followup": {
         "prompt": (
-            "只根据下面这段刚才的描述回答，不要补充描述里没有的东西。\n"
-            "描述：{context}\n问题：{question}\n"
-            "用一句口语回答，分不清就说“刚才没看清”。"
+            "根据刚才的对话回答，如果同时给了当前画面，可以结合画面补充细节。"
+            "不要补充对话和画面里都没有的东西。\n"
+            "对话：{context}\n问题：{question}\n"
+            "用一到两句口语中文，分不清就说“刚才没看清”。"
         ),
-        "max_tokens": 40,
+        "max_tokens": 48,
         "fallback": "刚才没看清",
+    },
+    "detail": {
+        "prompt": (
+            "详细描述这张图片：先说正前方和近处有没有障碍物，再说主要物体的位置、外观和相互位置关系，"
+            "用三到五句口语中文，不要分点。看不清的地方直接说看不清，不要猜。"
+        ),
+        "max_tokens": 160,
+        "fallback": "看不清",
+    },
+    "compare": {
+        "prompt": (
+            "比较画面里“{item}”和另一个同类物体：先说各自在左/中/右、近还是远，"
+            "再说大小、颜色或遮挡上的差别，两三句口语中文。看不清就说看不清。"
+        ),
+        "max_tokens": 120,
+        "fallback": "看不清",
+    },
+    "chat": {
+        "prompt": (
+            "对方想和你聊几句，顺着他的话回应，可以问一句他现在的感受。"
+            "不要描述画面，也不要提眼睛或视力。"
+        ),
+        "max_tokens": 120,
+        "fallback": "我在听，你慢慢说",
+    },
+    "date": {
+        "prompt": "只读出生产日期、保质期和批次，看不清就说看不清。",
+        "max_tokens": 64,
+        "fallback": "日期没看清，请把标签对准光线，靠近一点",
     },
 }
 
@@ -153,24 +223,310 @@ EYES_TARGET = {
     "exit": ("出口", "EXIT"),
 }
 
+NEG_PATTERN = "没看到|看不到|没发现|看不见|没有看到|没有|不在|没在"
+OBSCURED_NEG = re.compile(r"没(有)?被(挡住|遮挡|遮住|遮盖)")
+
 
 def settle_eyes_answer(task, answer, fallback, item=""):
-    """二值查找任务：模型说没找到时，一律只念兜底句。"""
+    """二值查找任务：只有“否定词紧挨目标词”才收敛成兜底句。
+
+    “水杯在右边，没有被挡住”里的“没有被”是描述遮挡，不是没找到，先剥掉再判断。
+    """
     if not answer:
         return fallback
     targets = (item,) if task == "item" else EYES_TARGET.get(task, ())
-    low = answer.lower()
-    hit = any(t and t.lower() in low for t in targets)
-    if hit and any(word in answer for word in EYES_NEGATIVE):
-        return fallback
+    if not targets:
+        return answer
+    cleaned = OBSCURED_NEG.sub("", answer)
+    for target in targets:
+        if not target:
+            continue
+        t = re.escape(target)
+        pat = re.compile(rf"({NEG_PATTERN})[^，。；,]{{0,8}}{t}|{t}[^，。；,]{{0,8}}({NEG_PATTERN})")
+        if pat.search(cleaned):
+            return fallback
     return answer
 
 
 def build_eyes_prompt(task, item="", context="", question=""):
     spec = EYES_TASKS[task]
-    return EYES_RULE + "\n\n" + spec["prompt"].format(
+    rule = RULES_BY_TASK.get(task, EYES_RULE)
+    return rule + "\n\n" + spec["prompt"].format(
         item=item, context=context, question=question
     )
+
+
+def prompt_for(task, item="", context="", question=""):
+    if task == "chat":
+        prompt = build_eyes_prompt("chat")
+        if context:
+            prompt += f"\n\n刚才聊过：{context}"
+        prompt += f"\n\n用户说：{question}"
+        return prompt
+    if task == "followup":
+        return build_eyes_prompt("followup", context=context, question=question)
+    return build_eyes_prompt(task, item=item)
+
+
+# ---------- 会话状态：按 session_id 隔离，有界 + TTL，换画面只标记失效 ----------
+SESSION_LOCK = threading.Lock()
+SESSIONS = {}
+MAX_SESSIONS = 8
+SESSION_TTL = 600
+MAX_HISTORY_TURNS = 4
+MAX_HISTORY_CHARS = 480
+
+
+def get_session(session_id):
+    sid = (session_id or "default").strip() or "default"
+    now = time.time()
+    with SESSION_LOCK:
+        expired = [k for k, v in SESSIONS.items() if now - v["updated"] > SESSION_TTL]
+        for k in expired:
+            SESSIONS.pop(k, None)
+        sess = SESSIONS.get(sid)
+        if sess is None:
+            if len(SESSIONS) >= MAX_SESSIONS:
+                oldest = min(SESSIONS, key=lambda k: SESSIONS[k]["updated"])
+                SESSIONS.pop(oldest, None)
+            sess = {"frame_id": "", "history": [], "updated": now}
+            SESSIONS[sid] = sess
+        sess["updated"] = now
+        return sess
+
+
+def session_begin(session_id, frame_id):
+    """换画面只把旧的视觉事实标记失效，聊天历史保留。"""
+    sess = get_session(session_id)
+    fid = (frame_id or "").strip()
+    with SESSION_LOCK:
+        if fid and fid != sess["frame_id"]:
+            sess["frame_id"] = fid
+            for item in sess["history"]:
+                if item.get("visual"):
+                    item["stale"] = True
+        sess["updated"] = time.time()
+    return sess
+
+
+def session_remember(session_id, question, answer, visual=False, frame_id=None):
+    if not question:
+        return
+    sess = get_session(session_id)
+    with SESSION_LOCK:
+        stale = bool(frame_id) and frame_id != sess["frame_id"]
+        sess["history"].append(
+            {
+                "q": question[:60],
+                "a": (answer or "")[:90],
+                "visual": visual,
+                "frame": frame_id or "",
+                "stale": stale,
+            }
+        )
+        sess["history"] = sess["history"][-MAX_HISTORY_TURNS:]
+        while sum(len(h["q"]) + len(h["a"]) for h in sess["history"]) > MAX_HISTORY_CHARS:
+            sess["history"].pop(0)
+        sess["updated"] = time.time()
+
+
+def history_text(session_id):
+    sess = get_session(session_id)
+    with SESSION_LOCK:
+        parts = []
+        for item in sess["history"]:
+            tag = "（旧画面已失效）" if item.get("stale") else ""
+            parts.append(f"{tag}问：{item['q']} 答：{item['a']}")
+        return "；".join(parts)
+
+
+def session_context(session_id, client_context=""):
+    """服务端历史优先；客户端 context 只在无历史时兜底，不能绕过失效标记。"""
+    server = history_text(session_id)
+    return server if server else (client_context or "").strip()
+
+
+# ---------- 日期标签解析（只靠 OCR，值不合格就拒猜） ----------
+DATE_FIELD_RULES = (
+    ("生产日期", ("生产日期", "制造日期", "MFG", "PROD")),
+    ("包装日期", ("包装日期",)),
+    ("到期日", ("保质期至", "有效期至", "到期日", "此日期前", "EXP")),
+    ("保质期", ("保质期限", "保质期", "有效期")),
+    ("批号", ("批号", "批次", "LOT", "BATCH")),
+)
+DATE_RE = re.compile(r"(20\d{2})\s*[年\-./]\s*(\d{1,2})\s*[月\-./]\s*(\d{1,2})")
+PLACEHOLDER_RE = re.compile(r"见(瓶底|瓶身|瓶盖|包装|盒底|喷码|标签|说明|外包装)")
+DURATION_RE = re.compile(r"\d+\s*(个月|月|年|天)")
+MIN_CONF = 0.65
+
+
+def _valid_date(y, m, d):
+    try:
+        return 2000 <= int(y) <= 2099 and 1 <= int(m) <= 12 and 1 <= int(d) <= 31
+    except ValueError:
+        return False
+
+
+def _box_rect(line):
+    box = line.get("box")
+    if not box:
+        return None
+    xs = [p[0] for p in box]
+    ys = [p[1] for p in box]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def _nearby_line(rows, idx):
+    """按 box 找垂直相邻且水平重叠的行，不依赖列表顺序。"""
+    anchor = _box_rect(rows[idx])
+    if not anchor:
+        return None
+    ax0, ay0, ax1, ay1 = anchor
+    height = max(1, ay1 - ay0)
+    best, best_gap = None, None
+    for j, line in enumerate(rows):
+        if j == idx:
+            continue
+        rect = _box_rect(line)
+        if not rect:
+            continue
+        x0, y0, x1, y1 = rect
+        if min(ax1, x1) - max(ax0, x0) <= 0:
+            continue
+        gap = max(0, max(ay0, y0) - min(ay1, y1))
+        if gap > height * 1.6:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = line, gap
+    return best
+
+
+def _parse_value(text):
+    """返回 (value, kind)，不合格一律 None。"""
+    if not text or PLACEHOLDER_RE.search(text):
+        return None, None
+    m = DATE_RE.search(text)
+    if m:
+        y, mo, d = m.group(1), m.group(2), m.group(3)
+        if not _valid_date(y, mo, d):
+            return None, None
+        return f"{y}年{int(mo)}月{int(d)}日", "date"
+    dm = DURATION_RE.search(text)
+    if dm:
+        return dm.group(0).replace(" ", ""), "duration"
+    return None, None
+
+
+def parse_date_label(lines, min_score=MIN_CONF):
+    """标签与数值都要可信；同字段冲突、占位语、非法日期一律拒猜。"""
+    rows = [l for l in lines if (l.get("text") or "").strip()]
+    found, weak = {}, {}
+
+    for idx, line in enumerate(rows):
+        text = line["text"].strip()
+        score = line.get("score")
+        for field, keys in DATE_FIELD_RULES:
+            match = None
+            for k in keys:
+                match = re.search(re.escape(k), text, re.I)
+                if match:
+                    break
+            if not match:
+                continue
+            rest = text[match.end():].strip(" ：:　-")
+            value, kind = _parse_value(rest)
+            used_score = score
+            if value is None:
+                near = _nearby_line(rows, idx)
+                if near is not None:
+                    value, kind = _parse_value((near.get("text") or "").strip())
+                    if value is not None:
+                        used_score = near.get("score")
+            if value is None:
+                weak[field] = True
+                continue
+            if used_score is None or used_score < min_score:
+                weak[field] = True
+                continue
+            actual = "到期日" if field == "保质期" and kind == "date" else field
+            found.setdefault(actual, []).append(value)
+
+    fields, missing, conflicts = {}, [], []
+    for field, _ in DATE_FIELD_RULES:
+        values = found.get(field, [])
+        if not values:
+            missing.append(field)
+            continue
+        uniq = set(values)
+        if len(uniq) > 1:
+            conflicts.append(field)
+            continue
+        if field in weak:
+            missing.append(field)
+            continue
+        fields[field] = values[0]
+
+    parts = [f"{k} {v}" for k, v in fields.items()]
+    if conflicts:
+        parts.append(f"{'、'.join(conflicts)}有多个不一致的值，没法确定")
+    if missing and fields:
+        parts.append(f"{'、'.join(missing)}没看清")
+    if not fields and not conflicts:
+        return None
+    if not parts:
+        return None
+    return {"answer": "；".join(parts), "fields": fields, "missing": missing, "conflicts": conflicts}
+
+
+# ---------- 长文本分句：不丢内容，超长硬切，保留原标点 ----------
+def split_sentences(text, max_len=90):
+    raw = re.split(r"([。！？；\n])", text or "")
+    pieces, buf = [], ""
+    for i in range(0, len(raw), 2):
+        seg = raw[i].strip()
+        punct = raw[i + 1] if i + 1 < len(raw) else ""
+        if not seg:
+            continue
+        piece = seg + (punct if punct and punct != "\n" else "。")
+        if len(buf) + len(piece) <= max_len:
+            buf += piece
+        else:
+            if buf:
+                pieces.append(buf)
+            buf = piece
+    if buf:
+        pieces.append(buf)
+
+    out = []
+    for piece in pieces:
+        while len(piece) > max_len:
+            window = piece[:max_len]
+            cut = max(window.rfind("，"), window.rfind("、"))
+            cut = cut + 1 if cut >= max_len // 3 else max_len
+            out.append(piece[:cut])
+            piece = piece[cut:]
+        if piece:
+            out.append(piece)
+    return out
+
+
+# ---------- 重任务并发上限 ----------
+ACTIVE_LOCK = threading.Lock()
+ACTIVE = {"n": 0}
+MAX_ACTIVE = 2
+
+
+def try_enter():
+    with ACTIVE_LOCK:
+        if ACTIVE["n"] >= MAX_ACTIVE:
+            return False
+        ACTIVE["n"] += 1
+        return True
+
+
+def leave():
+    with ACTIVE_LOCK:
+        ACTIVE["n"] = max(0, ACTIVE["n"] - 1)
 
 
 PROMPTS = {
@@ -206,6 +562,8 @@ def init_ocr():
                 "Rec.engine_type": EngineType.ONNXRUNTIME,
                 "Rec.ocr_version": OCRVersion.PPOCRV6,
                 "Rec.model_type": ModelType.SMALL,
+                "EngineConfig.onnxruntime.intra_op_num_threads": OCR_INTRA_THREADS,
+                "EngineConfig.onnxruntime.inter_op_num_threads": OCR_INTER_THREADS,
             }
         )
         print("[init] OCR ready")
@@ -225,7 +583,7 @@ def init_tts():
                     tokens=str(TTS_MELO_DIR / "tokens.txt"),
                     dict_dir=str(TTS_MELO_DIR / "dict"),
                 ),
-                num_threads=4,
+                num_threads=TTS_THREADS,
             ),
             rule_fsts=",".join(
                 str(TTS_MELO_DIR / name)
@@ -253,7 +611,7 @@ def load_kokoro():
                 data_dir=str(TTS_DIR / "espeak-ng-data"),
                 lexicon=str(TTS_DIR / "lexicon-us-en.txt") + "," + str(TTS_DIR / "lexicon-zh.txt"),
             ),
-            num_threads=4,
+            num_threads=TTS_THREADS,
         ),
         rule_fsts=",".join(
             str(TTS_DIR / name) for name in ("number-zh.fst", "phone-zh.fst", "date-zh.fst")
@@ -272,7 +630,7 @@ def init_asr():
         asr_engine = sherpa_onnx.OfflineRecognizer.from_paraformer(
             paraformer=str(ASR_DIR / "model.int8.onnx"),
             tokens=str(ASR_DIR / "tokens.txt"),
-            num_threads=4,
+            num_threads=ASR_THREADS,
             sample_rate=16000,
             feature_dim=80,
             decoding_method="greedy_search",
@@ -331,6 +689,32 @@ def image_to_jpeg_b64(img: Image.Image, max_side: int = 800) -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def save_debug_image(name, img):
+    """调试快照默认关闭；开启时用唯一文件名，避免并发写到同一文件串图。"""
+    if not DEBUG_SNAPSHOT:
+        return None
+    path = DATA_DIR / f"{time.time_ns()}-{threading.get_ident()}-{name}"
+    img.save(path)
+    return path
+
+
+def frame_age_seconds(captured_at):
+    """解析前端给的拍摄时间，用于真正的过期检查。"""
+    if not captured_at:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(captured_at).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+def temperature_for(task):
+    return 0.4 if task == "chat" else 0.1
+
+
 def vlm_health() -> bool:
     try:
         r = requests.get(VLM_URL + "/health", timeout=2)
@@ -366,6 +750,45 @@ def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
     for tag in ("<think>", "</think>"):
         answer = answer.replace(tag, "")
     return {"answer": answer.strip(), "latency_ms": int((time.time() - t0) * 1000)}
+
+
+def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
+    """流式取增量文本，供分句 TTS 边生成边播报。"""
+    content = []
+    if img_b64:
+        content.append(
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + img_b64}}
+        )
+    content.append({"type": "text", "text": prompt})
+    payload = {
+        "model": "minicpm-v",
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "top_p": 0.9,
+        "top_k": 40,
+        "stream": True,
+    }
+    with requests.post(VLM_URL + "/v1/chat/completions", json=payload, stream=True, timeout=300) as resp:
+        resp.raise_for_status()
+        for raw in resp.iter_lines():
+            if not raw:
+                continue
+            line = raw.decode("utf-8", "ignore").strip()
+            if not line.startswith("data:"):
+                continue
+            chunk = line[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                data = json.loads(chunk)
+            except json.JSONDecodeError:
+                continue
+            delta = data.get("choices", [{}])[0].get("delta", {}).get("content") or ""
+            for tag in ("<think>", "</think>"):
+                delta = delta.replace(tag, "")
+            if delta:
+                yield delta
 
 
 def parse_ocr_result(res):
@@ -439,53 +862,95 @@ def status():
 def api_vlm():
     if over_budget():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
-    body = request.get_json(force=True, silent=True) or {}
-    mode = body.get("mode", "scene")
-    prompt = body.get("prompt") or PROMPTS.get(mode) or PROMPTS["scene"]
-    max_tokens = int(body.get("max_tokens", 256))
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
-        img = decode_image(body.get("image", ""))
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"图片解析失败：{exc}"}), 400
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode", "scene")
+        prompt = body.get("prompt") or PROMPTS.get(mode) or PROMPTS["scene"]
+        max_tokens = int(body.get("max_tokens", 256))
+        try:
+            img = decode_image(body.get("image", ""))
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": f"图片解析失败：{exc}"}), 400
 
-    img_b64 = image_to_jpeg_b64(img)
-    (DATA_DIR / "last-request.jpg").write_bytes(
-        base64.b64decode(img_b64)
-    )
-    if not vlm_health():
-        return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
-    try:
+        img_b64 = image_to_jpeg_b64(img)
+        save_debug_image("request.jpg", img)
+        if not vlm_health():
+            return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
         with VLM_LOCK:
             result = call_vlm(img_b64, prompt, max_tokens=max_tokens)
         return jsonify(result)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"VLM 调用失败：{exc}"}), 500
+    finally:
+        leave()
 
 
-def run_eyes(task, item="", context="", question="", image_b64=""):
+def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64="", frame_id="", session_id="", captured_at=""):
     """统一执行入口，HTTP 路由和语音链路都走这里。"""
     spec = EYES_TASKS.get(task)
     if spec is None:
         raise ValueError(f"未知任务：{task}")
-    if task == "item" and not item:
+    if task in ("item", "compare") and not item:
         raise ValueError("缺少物品名称")
-    if task == "followup" and not (context and question):
-        raise ValueError("缺少描述或问题")
+    if task == "followup" and not question:
+        raise ValueError("缺少问题")
 
-    prompt = build_eyes_prompt(task, item=item, context=context, question=question)
-    fallback = spec["fallback"].format(item=item, context=context, question=question)
-    max_tokens = spec["max_tokens"]
     t0 = time.time()
+    session_begin(session_id, frame_id)
 
-    if task == "followup":
+    age = frame_age_seconds(captured_at)
+    if age is not None and age > FRAME_MAX_AGE and task not in ("chat", "followup"):
+        raise ValueError("画面已过期，请重新拍一张再看")
+
+    if task == "chat":
+        if any(w in question for w in REALTIME_WORDS):
+            session_remember(session_id, question, CHAT_REALTIME_REPLY)
+            return {
+                "task": task,
+                "source": "rule",
+                "answer": CHAT_REALTIME_REPLY,
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
         if not vlm_health():
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
         with VLM_LOCK:
-            out = call_vlm(None, prompt, max_tokens, temperature=0.1)
+            out = call_vlm(
+                None,
+                prompt_for("chat", context=history_text(session_id), question=question),
+                spec["max_tokens"],
+                temperature=temperature_for(task),
+            )
+        answer = out["answer"] or spec["fallback"]
+        session_remember(session_id, question, answer)
         return {
             "task": task,
             "source": "vlm",
-            "answer": out["answer"] or fallback,
+            "answer": answer,
+            "latency_ms": int((time.time() - t0) * 1000),
+        }
+
+    if task == "followup":
+        ctx = session_context(session_id, context)
+        prompt = build_eyes_prompt("followup", context=ctx, question=question)
+        img = None
+        if image_vlm_b64 or image_b64:
+            try:
+                img = image_to_jpeg_b64(decode_image(image_vlm_b64 or image_b64))
+            except Exception:  # noqa: BLE001
+                img = None
+        if not vlm_health():
+            raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+        with VLM_LOCK:
+            out = call_vlm(img, prompt, spec["max_tokens"], temperature=temperature_for(task))
+        answer = out["answer"] or spec["fallback"]
+        session_remember(session_id, question, answer, visual=bool(img), frame_id=frame_id)
+        return {
+            "task": task,
+            "source": "vlm",
+            "answer": answer,
+            "has_image": bool(img),
             "latency_ms": int((time.time() - t0) * 1000),
         }
 
@@ -494,17 +959,43 @@ def run_eyes(task, item="", context="", question="", image_b64=""):
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"图片解析失败：{exc}")
 
+    if task == "date":
+        if ocr_engine is None:
+            raise RuntimeError("OCR 未初始化：" + str(init_error["ocr"]))
+        save_debug_image("date.png", img)
+        with OCR_LOCK:
+            res = ocr_engine(img)
+        parsed = parse_date_label(parse_ocr_result(res))
+        if parsed is None:
+            return {
+                "task": task,
+                "source": "ocr",
+                "answer": spec["fallback"],
+                "fields": {},
+                "missing": [name for name, _ in DATE_FIELD_RULES],
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
+        session_remember(session_id, "读日期", parsed["answer"], visual=True, frame_id=frame_id)
+        return {
+            "task": task,
+            "source": "ocr",
+            "answer": parsed["answer"],
+            "fields": parsed["fields"],
+            "missing": parsed["missing"],
+            "latency_ms": int((time.time() - t0) * 1000),
+        }
+
     if task == "text" and ocr_engine is not None:
-        img_path = DATA_DIR / "eyes-text.png"
-        img.save(img_path)
+        save_debug_image("text.png", img)
         try:
             with OCR_LOCK:
-                res = ocr_engine(str(img_path))
+                res = ocr_engine(img)
             text = pick_main_text_block(parse_ocr_result(res))
         except Exception as exc:  # noqa: BLE001
             print("[eyes] OCR 失败，改用 VLM：", exc)
             text = ""
         if text:
+            session_remember(session_id, "读文字", text, visual=True, frame_id=frame_id)
             return {
                 "task": task,
                 "source": "ocr",
@@ -512,25 +1003,137 @@ def run_eyes(task, item="", context="", question="", image_b64=""):
                 "latency_ms": int((time.time() - t0) * 1000),
             }
 
-    img_b64 = image_to_jpeg_b64(img)
+    vlm_img = image_vlm_b64 or image_b64
+    try:
+        img_b64 = image_to_jpeg_b64(decode_image(vlm_img))
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"图片解析失败：{exc}")
     if not vlm_health():
         raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
     with VLM_LOCK:
-        out = call_vlm(img_b64, prompt, max_tokens, temperature=0.1)
+        out = call_vlm(img_b64, prompt_for(task, item, context, question), spec["max_tokens"], temperature=temperature_for(task))
+    answer = settle_eyes_answer(task, out["answer"], spec["fallback"].format(item=item), item)
+    session_remember(session_id, item or task, answer, visual=True, frame_id=frame_id)
     return {
         "task": task,
         "source": "vlm",
-        "answer": settle_eyes_answer(task, out["answer"], fallback, item),
+        "answer": answer,
         "latency_ms": int((time.time() - t0) * 1000),
     }
+
+
+@app.post("/api/talk")
+def api_talk():
+    """流式分句输出：边生成边推句，前端逐句合成播放。"""
+    if over_budget():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
+
+    body = request.get_json(force=True, silent=True) or {}
+    task = body.get("task", "chat")
+    spec = EYES_TASKS.get(task)
+    if spec is None or task == "date":
+        leave()
+        return jsonify({"error": f"任务不支持流式：{task}"}), 400
+
+    item = str(body.get("item") or "").strip()
+    question = str(body.get("question") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    frame_id = str(body.get("frame_id") or "").strip()
+    session_begin(session_id, frame_id)
+    context = session_context(session_id, body.get("context"))
+
+    img_b64 = None
+    if task != "chat":
+        src = body.get("image_vlm") or body.get("image")
+        if src:
+            try:
+                img_b64 = image_to_jpeg_b64(decode_image(src))
+            except Exception:  # noqa: BLE001
+                img_b64 = None
+    if task not in ("chat", "followup") and not img_b64:
+        leave()
+        return jsonify({"error": "图片解析失败：缺少图片"}), 400
+
+    age = frame_age_seconds(str(body.get("captured_at") or "").strip())
+    if age is not None and age > FRAME_MAX_AGE and task not in ("chat", "followup"):
+        leave()
+        return jsonify({"error": "画面已过期，请重新拍一张再看"}), 400
+    if not vlm_health():
+        leave()
+        return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
+
+    if task == "chat" and any(w in question for w in REALTIME_WORDS):
+        def gen_rule():
+            try:
+                session_remember(session_id, question, CHAT_REALTIME_REPLY)
+                chunk = json.dumps({"sentence": CHAT_REALTIME_REPLY}, ensure_ascii=False)
+                yield f"data: {chunk}\n\n"
+                chunk = json.dumps({"done": True, "answer": CHAT_REALTIME_REPLY}, ensure_ascii=False)
+                yield f"data: {chunk}\n\n"
+            finally:
+                leave()
+
+        return Response(
+            stream_with_context(gen_rule()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    prompt = prompt_for(task, item, context, question)
+    max_tokens = spec["max_tokens"]
+
+    def generate():
+        buf, full = "", ""
+        if not VLM_LOCK.acquire(timeout=30):
+            yield f"data: {json.dumps({'error': '设备正忙，请稍后再试'}, ensure_ascii=False)}\n\n"
+            leave()
+            return
+        inner = None
+        try:
+            inner = stream_vlm(prompt, img_b64, max_tokens, temperature=temperature_for(task))
+            for delta in inner:
+                buf += delta
+                full += delta
+                while True:
+                    m = re.search(r"[。！？]", buf)
+                    if not m:
+                        break
+                    sentence, buf = buf[: m.end()], buf[m.end() :]
+                    if sentence.strip():
+                        yield f"data: {json.dumps({'sentence': sentence.strip()}, ensure_ascii=False)}\n\n"
+                if len(buf) >= 60:
+                    yield f"data: {json.dumps({'sentence': buf.strip()}, ensure_ascii=False)}\n\n"
+                    buf = ""
+            if buf.strip():
+                yield f"data: {json.dumps({'sentence': buf.strip()}, ensure_ascii=False)}\n\n"
+            answer = settle_eyes_answer(task, full, spec["fallback"].format(item=item), item)
+            session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
+            yield f"data: {json.dumps({'done': True, 'answer': answer}, ensure_ascii=False)}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            if inner is not None:
+                inner.close()
+            VLM_LOCK.release()
+            leave()
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/eyes")
 def api_eyes():
     if over_budget():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
-    body = request.get_json(force=True, silent=True) or {}
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
+        body = request.get_json(force=True, silent=True) or {}
         return jsonify(
             run_eyes(
                 body.get("task", "scene"),
@@ -538,6 +1141,10 @@ def api_eyes():
                 context=str(body.get("context") or "").strip(),
                 question=str(body.get("question") or "").strip(),
                 image_b64=body.get("image", ""),
+                image_vlm_b64=body.get("image_vlm", ""),
+                frame_id=str(body.get("frame_id") or "").strip(),
+                session_id=str(body.get("session_id") or "").strip(),
+                captured_at=str(body.get("captured_at") or "").strip(),
             )
         )
     except ValueError as exc:
@@ -546,6 +1153,8 @@ def api_eyes():
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"识别失败：{exc}"}), 500
+    finally:
+        leave()
 
 
 DEFAULT_WAKE = "小V"
@@ -604,14 +1213,29 @@ def extract_item(cmd):
     return ""
 
 
+def extract_compare(cmd):
+    m = re.search(r"(?:比较|对比)(?:一下)?(.+)", cmd)
+    if m:
+        return re.sub(r"[吗呢啊吧，。]", "", m.group(1)).strip()
+    return ""
+
+
 def parse_voice_intent(cmd):
     """规则匹配意图，不额外加载模型。"""
     if any(w in cmd for w in ("卫生间", "洗手间", "厕所", "WC", "wc", "toilet", "Toilet")):
         return "toilet", ""
     if "出口" in cmd:
         return "exit", ""
+    if any(w in cmd for w in ("日期", "生产", "保质期", "过期", "批号")):
+        return "date", ""
     if any(w in cmd for w in ("读", "念", "什么字", "写的什么", "文字", "上面的字")):
         return "text", ""
+    if any(w in cmd for w in ("比较", "对比", "哪个更")):
+        return "compare", extract_compare(cmd)
+    if any(w in cmd for w in ("详细", "仔细说", "具体说", "多说说", "多讲")):
+        return "detail", ""
+    if any(w in cmd for w in ("聊", "烦", "难受", "难过", "开心", "累", "陪我", "新闻", "天气", "心情")):
+        return "chat", ""
     if "找" in cmd or "有没有" in cmd:
         item = extract_item(cmd)
         return ("item", item) if item else ("scene", "")
@@ -656,22 +1280,46 @@ def api_voice():
 
     intent, item = parse_voice_intent(cmd)
     context = str(body.get("context") or "").strip()
-    if intent == "followup" and not context:
+    frame_id = str(body.get("frame_id") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    captured_at = str(body.get("captured_at") or "").strip()
+    img = body.get("image", "")
+    img_vlm = body.get("image_vlm", "")
+
+    if intent != "chat" and intent != "followup" and not (img or img_vlm):
         return jsonify(
-            {"text": text, "intent": intent, "answer": "先看一下画面再说", "latency_ms": int((time.time() - t0) * 1000)}
+            {
+                "text": text,
+                "intent": intent,
+                "answer": "还没有画面，请先拍一张或打开相机",
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
         )
 
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
         if intent == "followup":
-            result = run_eyes("followup", context=context, question=cmd)
+            result = run_eyes(
+                "followup", context=context, question=cmd,
+                image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id,
+                session_id=session_id, captured_at=captured_at,
+            )
+        elif intent == "chat":
+            result = run_eyes("chat", question=cmd, frame_id=frame_id, session_id=session_id)
         else:
-            result = run_eyes(intent, item=item, image_b64=body.get("image", ""))
+            result = run_eyes(
+                intent, item=item, image_b64=img, image_vlm_b64=img_vlm,
+                frame_id=frame_id, session_id=session_id, captured_at=captured_at,
+            )
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"识别失败：{exc}"}), 500
+    finally:
+        leave()
 
     return jsonify(
         {
@@ -689,24 +1337,27 @@ def api_voice():
 def api_ocr():
     if ocr_engine is None:
         return jsonify({"error": "OCR 未初始化：" + str(init_error["ocr"])}), 503
-    body = request.get_json(force=True, silent=True) or {}
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
-        img = decode_image(body.get("image", ""))
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"图片解析失败：{exc}"}), 400
+        body = request.get_json(force=True, silent=True) or {}
+        try:
+            img = decode_image(body.get("image", ""))
+        except Exception as exc:  # noqa: BLE001
+            return jsonify({"error": f"图片解析失败：{exc}"}), 400
 
-    img_path = DATA_DIR / "last-ocr.png"
-    img.save(img_path)
-    try:
+        save_debug_image("ocr.png", img)
         t0 = time.time()
         with OCR_LOCK:
-            res = ocr_engine(str(img_path))
+            res = ocr_engine(img)
         latency = int((time.time() - t0) * 1000)
         lines = parse_ocr_result(res)
         full_text = "\n".join(item["text"] for item in lines)
         return jsonify({"text": full_text, "lines": lines, "latency_ms": latency})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"OCR 失败：{exc}"}), 500
+    finally:
+        leave()
 
 
 @app.post("/api/tts")
@@ -715,11 +1366,13 @@ def api_tts():
     text = (body.get("text") or "").strip()
     if not text:
         return jsonify({"error": "文本为空"}), 400
-    if len(text) > 160:
-        text = text[:160]
+    if len(text) > 200:
+        return jsonify({"error": "单句过长，请按句子分段合成", "max_len": 200}), 400
     engine = (body.get("engine") or "melo").lower()
     sid = int(body.get("sid", 45))
     speed = float(body.get("speed", 1.0))
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
         t0 = time.time()
         with TTS_LOCK:
@@ -753,6 +1406,8 @@ def api_tts():
         return resp
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"TTS 失败：{exc}"}), 500
+    finally:
+        leave()
 
 
 @app.get("/api/sample/<path:name>")
