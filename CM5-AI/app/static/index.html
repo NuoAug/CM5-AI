@@ -262,22 +262,11 @@
         </div>
 
         <div class="subpanel" id="sub-tts">
-          <p class="hint">默认 Piper 中文神经语音（zh_CN-huayan-medium，22.05 kHz，按需启动子进程）；Kokoro 音色多但明显更慢，按需切换。</p>
+          <p class="hint">Piper 中文神经语音（zh_CN-huayan-medium，22.05 kHz，按需启动子进程）。</p>
           <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
           <div class="row tts-box">
-            <select id="tts-engine">
-              <option value="piper">Piper 中文（默认）</option>
-              <option value="kokoro">Kokoro-82M（多音色，慢）</option>
-            </select>
-            <select id="tts-sid">
-              <option value="45">Kokoro 音色 45</option>
-              <option value="46">Kokoro 音色 46</option>
-              <option value="47">Kokoro 音色 47</option>
-              <option value="48">Kokoro 音色 48</option>
-              <option value="49">Kokoro 音色 49</option>
-              <option value="50">Kokoro 音色 50</option>
-            </select>
-            <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" />
+            <span class="hint" style="align-self:center;margin:0">语速</span>
+            <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" style="max-width:120px" />
             <button class="primary" id="btn-tts">合成并播放</button>
           </div>
           <audio id="audio" controls></audio>
@@ -493,10 +482,10 @@ $('copy-ocr').onclick = async () => {
   catch (e) { toast('复制失败，请手动选择'); }
 };
 
-async function synthTts(text, engine) {
+async function synthTts(text) {
   const r = await fetch('/api/tts', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, engine: engine || $('tts-engine').value, sid: Number($('tts-sid').value), speed: Number($('tts-speed').value) })
+    body: JSON.stringify({ text, engine: 'piper', speed: Number($('tts-speed').value) })
   });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
   return {

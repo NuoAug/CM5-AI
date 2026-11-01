@@ -3,7 +3,7 @@
 CM5 边缘 AI 本地测试服务
 - VLM：调用本机 llama-server（MiniCPM-V 4.7 1B，OpenAI 兼容接口）
 - OCR：RapidOCR + PP-OCRv6_small（ONNX Runtime）
-- TTS：Piper 中文神经语音（zh_CN-huayan-medium，子进程按需合成），可选 Kokoro-82M-v1.1-zh（int8）
+- TTS：Piper 中文神经语音（zh_CN-huayan-medium，子进程按需合成）
 """
 
 import base64
@@ -34,7 +34,6 @@ import sherpa_onnx
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 OCR_DIR = MODELS / "ocr" / "pp-ocrv6-small"
-TTS_DIR = MODELS / "tts" / "kokoro-int8-multi-lang-v1_1"
 PIPER_DIR = MODELS / "tts" / "piper-zh_CN-huayan-medium"
 PIPER_BIN = Path(
     os.environ.get("PIPER_BIN")
@@ -52,7 +51,6 @@ SAMPLES_DIR = ROOT / "samples"
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0").strip().lower() in ("1", "true", "yes")
 
 # 线程数可配置：默认值与现状一致，CM5 上按实测再调，不做绑核
-TTS_THREADS = int(os.environ.get("TTS_THREADS", "4"))
 ASR_THREADS = int(os.environ.get("ASR_THREADS", "4"))
 OCR_INTRA_THREADS = int(os.environ.get("OCR_INTRA_THREADS", "4"))
 OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
@@ -108,10 +106,9 @@ VLM_LOCK = threading.Lock()
 ASR_LOCK = threading.Lock()
 
 ocr_engine = None
-kokoro_engine = None
 asr_engine = None
 asr_last_used = 0.0
-init_error = {"ocr": None, "kokoro": None, "asr": None}
+init_error = {"ocr": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
 
@@ -749,31 +746,6 @@ def piper_tts(text, speed=1.0):
     return resp
 
 
-def load_kokoro():
-    global kokoro_engine
-    if kokoro_engine is not None:
-        return kokoro_engine
-    cfg = sherpa_onnx.OfflineTtsConfig(
-        model=sherpa_onnx.OfflineTtsModelConfig(
-            kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(
-                model=str(TTS_DIR / "model.int8.onnx"),
-                voices=str(TTS_DIR / "voices.bin"),
-                tokens=str(TTS_DIR / "tokens.txt"),
-                data_dir=str(TTS_DIR / "espeak-ng-data"),
-                lexicon=str(TTS_DIR / "lexicon-us-en.txt") + "," + str(TTS_DIR / "lexicon-zh.txt"),
-            ),
-            num_threads=TTS_THREADS,
-        ),
-        rule_fsts=",".join(
-            str(TTS_DIR / name) for name in ("number-zh.fst", "phone-zh.fst", "date-zh.fst")
-        ),
-        max_num_sentences=1,
-    )
-    kokoro_engine = sherpa_onnx.OfflineTts(cfg)
-    log.info("[init] Kokoro ready")
-    return kokoro_engine
-
-
 def init_asr():
     """按需加载：只有出现语音请求时才占用内存。"""
     global asr_engine
@@ -996,8 +968,6 @@ def status():
                 "ready": not piper_error(),
                 "engine": "piper",
                 "error": piper_error() or None,
-                "kokoro_ready": kokoro_engine is not None,
-                "kokoro_error": init_error["kokoro"],
             },
             "memory": {
                 "model_gb": round(vlm_rss / 1024 ** 3, 2),
@@ -1575,44 +1545,14 @@ def api_tts():
     if len(text) > 200:
         return jsonify({"error": "单句过长，请按句子分段合成", "max_len": 200}), 400
     engine = (body.get("engine") or "piper").lower()
-    sid = int(body.get("sid", 45))
     speed = float(body.get("speed", 1.0))
-    if engine not in ("piper", "kokoro"):
+    if engine != "piper":
         return jsonify({"error": f"未知 TTS 引擎：{engine}"}), 400
     if not try_enter():
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
-        t0 = time.time()
-        if engine == "piper":
-            with TTS_LOCK:
-                return piper_tts(text, speed)
         with TTS_LOCK:
-            try:
-                synth = load_kokoro()
-            except Exception as exc:  # noqa: BLE001
-                init_error["kokoro"] = str(exc)
-                return jsonify({"error": "Kokoro 初始化失败：" + str(exc)}), 503
-            audio = synth.generate(text, sid=sid, speed=speed)
-            sr = synth.sample_rate
-        gen_ms = int((time.time() - t0) * 1000)
-        samples = np.clip(np.asarray(audio.samples, dtype=np.float32) * 32767, -32768, 32767)
-        pcm = samples.astype(np.int16).tobytes()
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sr)
-            wf.writeframes(pcm)
-        buf.seek(0)
-        log.info(
-            "tts engine=%s chars=%d gen=%sms audio=%.2fs",
-            engine, len(text), gen_ms, len(audio.samples) / sr,
-        )
-        resp = send_file(buf, mimetype="audio/wav", as_attachment=False, download_name="tts.wav")
-        resp.headers["X-Gen-Ms"] = str(gen_ms)
-        resp.headers["X-Audio-Seconds"] = str(round(len(audio.samples) / sr, 2))
-        resp.headers["X-TTS-Engine"] = engine
-        return resp
+            return piper_tts(text, speed)
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001

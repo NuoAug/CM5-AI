@@ -274,7 +274,6 @@ class ResourceConfigTests(unittest.TestCase):
     def test_thread_config_positive(self):
         self.assertGreaterEqual(server.OCR_INTRA_THREADS, 1)
         self.assertGreaterEqual(server.OCR_INTER_THREADS, 1)
-        self.assertGreaterEqual(server.TTS_THREADS, 1)
         self.assertGreaterEqual(server.ASR_THREADS, 1)
 
 

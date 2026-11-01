@@ -47,7 +47,6 @@ AI-Deployment/
 | 场景 / 空间 / VQA | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091 |
 | 中文 OCR | RapidOCR + PP-OCRv6_small | ONNX | det / rec / cls 三个模型 |
 | 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎，子进程按需合成，约 63 MB |
-| 备选 TTS | Kokoro-82M-zh | int8 | 音色多但明显更慢 |
 | 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置 60 秒释放 |
 
 模型文件不随仓库分发，需自行下载到 `models/` 对应目录。Piper 中文音色的 MODEL_CARD 标注 `License: Unknown`，商用或再分发前需自行确认授权；Piper 二进制本身的许可证也需复核。
@@ -174,7 +173,7 @@ $env:MEM_BUDGET_GB = "3.2"
 |---|---|---|
 | `DATA_DIR` | `CM5-AI/data` | 覆盖数据目录，Windows 默认路径不变 |
 | `DEBUG_SNAPSHOT` | `0` | 设为 `1` 才写调试快照，文件名带时间戳与线程号，避免并发串图 |
-| `TTS_THREADS` / `ASR_THREADS` | 4 / 4 | sherpa 各模块线程数 |
+| `ASR_THREADS` | 4 | sherpa 语音识别线程数 |
 | `OCR_INTRA_THREADS` / `OCR_INTER_THREADS` | 4 / 1 | RapidOCR 的 ORT 线程，注意 `OMP_NUM_THREADS` 不控制 ORT 线程池 |
 | `FRAME_MAX_AGE` | 20 | 画面过期秒数 |
 | `MEM_BUDGET_GB` | 3.6 | 模型侧内存预算 |
@@ -186,8 +185,6 @@ $env:MEM_BUDGET_GB = "3.2"
 所有播报统一走服务端 Piper（`/api/tts`，`engine=piper`）。每次合成启动一次 `piper.exe` 子进程，输出 22.05 kHz WAV 后进程退出，不在服务进程常驻模型。Piper 可执行或音色文件缺失时接口返回 503，页面仍显示文字但没有声音。语音播报期间仍然暂停麦克风采集。
 
 合成结果写入 `data/tts-cache/`（上限 50 MB，超出按时间删最旧），固定短语和重复播报第二次为 0 ms；前端在当前句播放时提前合成下一句，句间不再等待 Piper 进程启动。首句仍有约 0.6–1.2 s 合成等待。
-
-「语音播报」页签仍保留 Kokoro-82M 作为手动对比入口，但它只影响该页签的手动合成，自动播报固定使用 Piper。
 
 **真机 A/B 候选（均未执行，待 CM5 实测）**
 
@@ -252,3 +249,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.23 | 新增 `logs/app.log`：请求日志带任务/意图/画面 md5/来源/延迟/回答，按 2 MB × 3 轮转 |
 | v1.0.24 | TTS 由 MeloTTS 换成 Piper 中文神经语音（zh_CN-huayan-medium，子进程按需合成），移除 MeloTTS 引擎 |
 | v1.0.25 | Piper 播报优化：磁盘缓存固定短语（上限 50 MB）+ 前端提前合成下一句，减少句间卡顿 |
+| v1.0.26 | 移除 Kokoro 引擎、音色选择与模型文件，语音播报只保留 Piper |
