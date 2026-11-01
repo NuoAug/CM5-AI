@@ -18,7 +18,7 @@ foreach ($p in @($vlm, $model, $mmproj, $python)) {
 $vlmArgs = @(
     "-m", $model,
     "--mmproj", $mmproj,
-    "-c", "2048",
+    "-c", "1024",
     "-t", "8",
     "-ngl", "0",
     "--parallel", "1",

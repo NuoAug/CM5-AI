@@ -7,6 +7,7 @@ CM5 边缘 AI 本地测试服务
 """
 
 import base64
+import gc
 import io
 import json
 import os
@@ -47,6 +48,7 @@ ocr_engine = None
 tts_engine = None
 kokoro_engine = None
 asr_engine = None
+asr_last_used = 0.0
 init_error = {"ocr": None, "tts": None, "kokoro": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
@@ -264,6 +266,7 @@ def load_kokoro():
 
 
 def init_asr():
+    """按需加载：只有出现语音请求时才占用内存。"""
     global asr_engine
     try:
         asr_engine = sherpa_onnx.OfflineRecognizer.from_paraformer(
@@ -274,10 +277,39 @@ def init_asr():
             feature_dim=80,
             decoding_method="greedy_search",
         )
+        init_error["asr"] = None
         print("[init] ASR ready")
     except Exception as exc:  # noqa: BLE001
         init_error["asr"] = str(exc)
         print("[init] ASR failed:", exc)
+
+
+def ensure_asr():
+    global asr_engine, asr_last_used
+    with ASR_LOCK:
+        if asr_engine is None:
+            init_asr()
+        if asr_engine is None:
+            raise RuntimeError("ASR 初始化失败：" + str(init_error["asr"]))
+        asr_last_used = time.time()
+        return asr_engine
+
+
+ASR_IDLE_SECONDS = 60
+
+
+def asr_idle_reaper():
+    """闲置一段时间后释放 ASR，把内存还给系统。"""
+    global asr_engine
+    while True:
+        time.sleep(20)
+        if asr_engine is None or time.time() - asr_last_used < ASR_IDLE_SECONDS:
+            continue
+        with ASR_LOCK:
+            if asr_engine is not None and time.time() - asr_last_used >= ASR_IDLE_SECONDS:
+                asr_engine = None
+                gc.collect()
+                print("[asr] 空闲释放")
 
 
 def decode_image(data: str) -> Image.Image:
@@ -383,7 +415,7 @@ def status():
         {
             "vlm": {"up": vlm_health(), "url": VLM_URL},
             "ocr": {"ready": ocr_engine is not None, "error": init_error["ocr"]},
-            "asr": {"ready": asr_engine is not None, "error": init_error["asr"]},
+            "asr": {"ready": asr_engine is not None, "lazy": True, "error": init_error["asr"]},
             "tts": {
                 "ready": tts_engine is not None,
                 "engine": "melo",
@@ -546,13 +578,11 @@ def decode_wav(data_b64):
 
 
 def asr_transcribe(samples):
-    if asr_engine is None:
-        raise RuntimeError("ASR 未初始化：" + str(init_error["asr"]))
-    with ASR_LOCK:
-        stream = asr_engine.create_stream()
-        stream.accept_waveform(16000, samples)
-        asr_engine.decode_stream(stream)
-        return (stream.result.text or "").strip()
+    engine = ensure_asr()
+    stream = engine.create_stream()
+    stream.accept_waveform(16000, samples)
+    engine.decode_stream(stream)
+    return (stream.result.text or "").strip()
 
 
 def extract_item(cmd):
@@ -583,8 +613,6 @@ def parse_voice_intent(cmd):
 
 @app.post("/api/voice")
 def api_voice():
-    if asr_engine is None:
-        return jsonify({"error": "ASR 未初始化：" + str(init_error["asr"])}), 503
     if over_budget():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     body = request.get_json(force=True, silent=True) or {}
@@ -599,6 +627,8 @@ def api_voice():
 
     try:
         text = asr_transcribe(samples)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
 
@@ -722,6 +752,6 @@ def sample(name: str):
 if __name__ == "__main__":
     threading.Thread(target=init_ocr, daemon=True).start()
     threading.Thread(target=init_tts, daemon=True).start()
-    threading.Thread(target=init_asr, daemon=True).start()
+    threading.Thread(target=asr_idle_reaper, daemon=True).start()
     time.sleep(1)
     app.run(host="127.0.0.1", port=8090, threaded=True, debug=False)
