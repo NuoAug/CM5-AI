@@ -753,11 +753,29 @@ function onAudio(e) {
   }
 }
 
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+}
+
 async function startVoice() {
   $('btn-voice').disabled = true;
   voiceState('正在打开麦克风…', true);
   try {
-    vstream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('当前页面无法访问麦克风，需要用 localhost 或 HTTPS 打开');
+    }
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    if (devices.length && !devices.some((d) => d.kind === 'audioinput')) {
+      throw new Error('系统里没有检测到麦克风设备');
+    }
+    vstream = await withTimeout(
+      navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }),
+      8000,
+      '麦克风授权超时，请在系统设置里允许浏览器使用麦克风'
+    );
     vctx = new AudioContext({ sampleRate: 16000 });
     await vctx.resume();
     vSampleRate = vctx.sampleRate || 16000;
