@@ -1,11 +1,11 @@
 # 大体积模型与运行时，不入库
-edge-ai/models/
-edge-ai/runtime/
-edge-ai/app/.venv/
+CM5-AI/models/
+CM5-AI/runtime/
+CM5-AI/app/.venv/
 
 # 运行产物
-edge-ai/logs/
-edge-ai/data/
-edge-ai/app/__pycache__/
+CM5-AI/logs/
+CM5-AI/data/
+CM5-AI/app/__pycache__/
 __pycache__/
 *.pyc

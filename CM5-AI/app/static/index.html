@@ -521,7 +521,7 @@ $('btn-eyes-followup').onclick = () => runEyes('followup', $('btn-eyes-followup'
 $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
 $('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-followup').click(); };
 
-let vctx = null, vproc = null, vstream = null, vOn = false;
+let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
 let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
 
 const WAKE_KEY = 'edge-ai-wake';
@@ -539,11 +539,10 @@ function voiceState(text, on) {
   $('voice-state').classList.toggle('on', !!on);
 }
 
-function encodeWav(chunks) {
+function encodeWav(chunks, sr) {
   const len = chunks.reduce((s, c) => s + c.length, 0);
   const buf = new ArrayBuffer(44 + len * 2);
   const view = new DataView(buf);
-  const sr = 16000;
   view.setUint32(0, 0x46464952, true);
   view.setUint32(4, 36 + len * 2, true);
   view.setUint32(8, 0x45564157, true);
@@ -577,12 +576,12 @@ function blobToDataUrl(blob) {
 }
 
 async function sendUtterance(chunks) {
-  const duration = chunks.reduce((s, c) => s + c.length, 0) / 16000;
+  const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
   if (duration < 0.5) return;
   vBusy = true;
   voiceState('识别中…', true);
   try {
-    const audio = await blobToDataUrl(encodeWav(chunks));
+    const audio = await blobToDataUrl(encodeWav(chunks, vSampleRate));
     const j = await postJSON('/api/voice', { audio, image: state.imageVlm, context: state.lastEyes, wake: currentWake() });
     if (j.intent === 'none') {
       voiceState(`没听到「${currentWake()}」，继续监听`, true);
@@ -608,11 +607,12 @@ function onAudio(e) {
   for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
   const rms = Math.sqrt(sum / data.length);
   if (rms > 0.02) {
+    if (!vSpeaking) voiceState('听到声音，说完停一下…', true);
     vSpeaking = true;
     vSilence = 0;
     vChunks.push(new Float32Array(data));
   } else if (vSpeaking) {
-    vSilence += data.length / 16000;
+    vSilence += data.length / vSampleRate;
     vChunks.push(new Float32Array(data));
     if (vSilence > 0.7) {
       const chunks = vChunks;
@@ -631,6 +631,7 @@ async function startVoice() {
     vstream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
     vctx = new AudioContext({ sampleRate: 16000 });
     await vctx.resume();
+    vSampleRate = vctx.sampleRate || 16000;
     const src = vctx.createMediaStreamSource(vstream);
     vproc = vctx.createScriptProcessor(1024, 1, 1);
     vproc.onaudioprocess = onAudio;

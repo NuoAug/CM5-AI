@@ -583,7 +583,7 @@ def decode_wav(data_b64):
             np.arange(len(samples)),
             samples,
         ).astype(np.float32)
-    return samples
+    return samples, sr
 
 
 def asr_transcribe(samples):
@@ -628,7 +628,7 @@ def api_voice():
     t0 = time.time()
 
     try:
-        samples = decode_wav(body.get("audio", ""))
+        samples, src_sr = decode_wav(body.get("audio", ""))
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"音频解析失败：{exc}"}), 400
     if len(samples) < 4800:
@@ -640,6 +640,7 @@ def api_voice():
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
+    print(f"[voice] src_sr={src_sr} dur={len(samples) / 16000:.1f}s text={text}")
 
     pattern = wake_pattern(body.get("wake"))
     if not pattern.search(text):

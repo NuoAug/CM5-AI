@@ -24,7 +24,7 @@ AI-Deployment/
 ├─ .gitignore
 ├─ docs/
 │  └─ CM5-边缘AI模型选型报告-2026-10-31.md   选型依据与对比结论
-└─ edge-ai/
+└─ CM5-AI/
    ├─ 启动测试台.bat      双击启动 VLM + 网页服务
    ├─ 停止测试台.bat      双击停止
    ├─ app/
@@ -55,15 +55,15 @@ AI-Deployment/
 
 ## 启动
 
-双击 `edge-ai\启动测试台.bat`，或命令行执行：
+双击 `CM5-AI\启动测试台.bat`，或命令行执行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "edge-ai\app\start.ps1"
+powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 ```
 
 启动后访问 http://127.0.0.1:8090 。VLM 冷启动约 30–60 秒，状态灯变绿即可用。
 
-停止：双击 `edge-ai\停止测试台.bat`。
+停止：双击 `CM5-AI\停止测试台.bat`。
 
 ## 页面功能
 
