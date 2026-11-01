@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import os
+import re
 import threading
 import time
 import wave
@@ -28,6 +29,7 @@ MODELS = ROOT / "models"
 OCR_DIR = MODELS / "ocr" / "pp-ocrv6-small"
 TTS_DIR = MODELS / "tts" / "kokoro-int8-multi-lang-v1_1"
 TTS_MELO_DIR = MODELS / "tts" / "vits-melo-tts-zh_en"
+ASR_DIR = MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09"
 VLM_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8091")
 DATA_DIR = ROOT / "data"
 SAMPLES_DIR = ROOT / "samples"
@@ -39,11 +41,13 @@ app = Flask(__name__, static_folder="static", static_url_path="/static")
 OCR_LOCK = threading.Lock()
 TTS_LOCK = threading.Lock()
 VLM_LOCK = threading.Lock()
+ASR_LOCK = threading.Lock()
 
 ocr_engine = None
 tts_engine = None
 kokoro_engine = None
-init_error = {"ocr": None, "tts": None, "kokoro": None}
+asr_engine = None
+init_error = {"ocr": None, "tts": None, "kokoro": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
 
@@ -259,6 +263,23 @@ def load_kokoro():
     return kokoro_engine
 
 
+def init_asr():
+    global asr_engine
+    try:
+        asr_engine = sherpa_onnx.OfflineRecognizer.from_paraformer(
+            paraformer=str(ASR_DIR / "model.int8.onnx"),
+            tokens=str(ASR_DIR / "tokens.txt"),
+            num_threads=4,
+            sample_rate=16000,
+            feature_dim=80,
+            decoding_method="greedy_search",
+        )
+        print("[init] ASR ready")
+    except Exception as exc:  # noqa: BLE001
+        init_error["asr"] = str(exc)
+        print("[init] ASR failed:", exc)
+
+
 def decode_image(data: str) -> Image.Image:
     if not data:
         raise ValueError("缺少图片数据")
@@ -362,6 +383,7 @@ def status():
         {
             "vlm": {"up": vlm_health(), "url": VLM_URL},
             "ocr": {"ready": ocr_engine is not None, "error": init_error["ocr"]},
+            "asr": {"ready": asr_engine is not None, "error": init_error["asr"]},
             "tts": {
                 "ready": tts_engine is not None,
                 "engine": "melo",
@@ -408,23 +430,15 @@ def api_vlm():
         return jsonify({"error": f"VLM 调用失败：{exc}"}), 500
 
 
-@app.post("/api/eyes")
-def api_eyes():
-    if over_budget():
-        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
-    body = request.get_json(force=True, silent=True) or {}
-    task = body.get("task", "scene")
+def run_eyes(task, item="", context="", question="", image_b64=""):
+    """统一执行入口，HTTP 路由和语音链路都走这里。"""
     spec = EYES_TASKS.get(task)
     if spec is None:
-        return jsonify({"error": f"未知任务：{task}"}), 400
-
-    item = str(body.get("item") or "").strip()
-    context = str(body.get("context") or "").strip()
-    question = str(body.get("question") or "").strip()
+        raise ValueError(f"未知任务：{task}")
     if task == "item" and not item:
-        return jsonify({"error": "缺少物品名称"}), 400
+        raise ValueError("缺少物品名称")
     if task == "followup" and not (context and question):
-        return jsonify({"error": "缺少描述或问题"}), 400
+        raise ValueError("缺少描述或问题")
 
     prompt = build_eyes_prompt(task, item=item, context=context, question=question)
     fallback = spec["fallback"].format(item=item, context=context, question=question)
@@ -433,25 +447,20 @@ def api_eyes():
 
     if task == "followup":
         if not vlm_health():
-            return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
-        try:
-            with VLM_LOCK:
-                out = call_vlm(None, prompt, max_tokens, temperature=0.1)
-            return jsonify(
-                {
-                    "task": task,
-                    "source": "vlm",
-                    "answer": out["answer"] or fallback,
-                    "latency_ms": int((time.time() - t0) * 1000),
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            return jsonify({"error": f"追问失败：{exc}"}), 500
+            raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+        with VLM_LOCK:
+            out = call_vlm(None, prompt, max_tokens, temperature=0.1)
+        return {
+            "task": task,
+            "source": "vlm",
+            "answer": out["answer"] or fallback,
+            "latency_ms": int((time.time() - t0) * 1000),
+        }
 
     try:
-        img = decode_image(body.get("image", ""))
+        img = decode_image(image_b64)
     except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"图片解析失败：{exc}"}), 400
+        raise ValueError(f"图片解析失败：{exc}")
 
     if task == "text" and ocr_engine is not None:
         img_path = DATA_DIR / "eyes-text.png"
@@ -464,31 +473,175 @@ def api_eyes():
             print("[eyes] OCR 失败，改用 VLM：", exc)
             text = ""
         if text:
-            return jsonify(
-                {
-                    "task": task,
-                    "source": "ocr",
-                    "answer": text,
-                    "latency_ms": int((time.time() - t0) * 1000),
-                }
-            )
+            return {
+                "task": task,
+                "source": "ocr",
+                "answer": text,
+                "latency_ms": int((time.time() - t0) * 1000),
+            }
 
     img_b64 = image_to_jpeg_b64(img)
     if not vlm_health():
-        return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
+        raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+    with VLM_LOCK:
+        out = call_vlm(img_b64, prompt, max_tokens, temperature=0.1)
+    return {
+        "task": task,
+        "source": "vlm",
+        "answer": settle_eyes_answer(task, out["answer"], fallback, item),
+        "latency_ms": int((time.time() - t0) * 1000),
+    }
+
+
+@app.post("/api/eyes")
+def api_eyes():
+    if over_budget():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
+    body = request.get_json(force=True, silent=True) or {}
     try:
-        with VLM_LOCK:
-            out = call_vlm(img_b64, prompt, max_tokens, temperature=0.1)
         return jsonify(
-            {
-                "task": task,
-                "source": "vlm",
-                "answer": settle_eyes_answer(task, out["answer"], fallback, item),
-                "latency_ms": int((time.time() - t0) * 1000),
-            }
+            run_eyes(
+                body.get("task", "scene"),
+                item=str(body.get("item") or "").strip(),
+                context=str(body.get("context") or "").strip(),
+                question=str(body.get("question") or "").strip(),
+                image_b64=body.get("image", ""),
+            )
         )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"识别失败：{exc}"}), 500
+
+
+WAKE_PATTERN = re.compile(r"小\s*[v薇微威伟]", re.I)
+
+
+def decode_wav(data_b64):
+    if not data_b64:
+        raise ValueError("缺少音频数据")
+    if data_b64.startswith("data:"):
+        data_b64 = data_b64.split(",", 1)[1]
+    raw = base64.b64decode(data_b64)
+    with wave.open(io.BytesIO(raw), "rb") as wf:
+        sr = wf.getframerate()
+        channels = wf.getnchannels()
+        width = wf.getsampwidth()
+        frames = wf.readframes(wf.getnframes())
+    if width != 2:
+        raise ValueError("只支持 16-bit PCM 音频")
+    samples = np.frombuffer(frames, dtype=np.int16).astype(np.float32) / 32768.0
+    if channels > 1:
+        samples = samples.reshape(-1, channels).mean(axis=1)
+    if sr != 16000 and len(samples):
+        n = int(len(samples) * 16000 / sr)
+        samples = np.interp(
+            np.linspace(0, len(samples), n, endpoint=False),
+            np.arange(len(samples)),
+            samples,
+        ).astype(np.float32)
+    return samples
+
+
+def asr_transcribe(samples):
+    if asr_engine is None:
+        raise RuntimeError("ASR 未初始化：" + str(init_error["asr"]))
+    with ASR_LOCK:
+        stream = asr_engine.create_stream()
+        stream.accept_waveform(16000, samples)
+        asr_engine.decode_stream(stream)
+        return (stream.result.text or "").strip()
+
+
+def extract_item(cmd):
+    for pattern in (r"找(?:一下|一找)?(.+)", r"有没有(.+)"):
+        m = re.search(pattern, cmd)
+        if m:
+            name = re.sub(r"[吗呢啊吧]", "", m.group(1)).strip()
+            if name:
+                return name
+    return ""
+
+
+def parse_voice_intent(cmd):
+    """规则匹配意图，不额外加载模型。"""
+    if any(w in cmd for w in ("卫生间", "洗手间", "厕所", "WC", "wc", "toilet", "Toilet")):
+        return "toilet", ""
+    if "出口" in cmd:
+        return "exit", ""
+    if any(w in cmd for w in ("读", "念", "什么字", "写的什么", "文字", "上面的字")):
+        return "text", ""
+    if "找" in cmd or "有没有" in cmd:
+        item = extract_item(cmd)
+        return ("item", item) if item else ("scene", "")
+    if any(w in cmd for w in ("有什么", "看看", "前面", "周围", "描述")):
+        return "scene", ""
+    return "followup", ""
+
+
+@app.post("/api/voice")
+def api_voice():
+    if asr_engine is None:
+        return jsonify({"error": "ASR 未初始化：" + str(init_error["asr"])}), 503
+    if over_budget():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
+    body = request.get_json(force=True, silent=True) or {}
+    t0 = time.time()
+
+    try:
+        samples = decode_wav(body.get("audio", ""))
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"音频解析失败：{exc}"}), 400
+    if len(samples) < 4800:
+        return jsonify({"text": "", "intent": "short", "answer": ""})
+
+    try:
+        text = asr_transcribe(samples)
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"语音识别失败：{exc}"}), 500
+
+    if not WAKE_PATTERN.search(text):
+        return jsonify(
+            {"text": text, "intent": "none", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
+        )
+
+    cmd = re.sub(r"[，。！？、,.!?\s]", "", WAKE_PATTERN.sub("", text))
+    if not cmd or len(cmd) <= 3:
+        return jsonify(
+            {"text": text, "intent": "wake", "answer": "我在，请说", "latency_ms": int((time.time() - t0) * 1000)}
+        )
+
+    intent, item = parse_voice_intent(cmd)
+    context = str(body.get("context") or "").strip()
+    if intent == "followup" and not context:
+        return jsonify(
+            {"text": text, "intent": intent, "answer": "先看一下画面再说", "latency_ms": int((time.time() - t0) * 1000)}
+        )
+
+    try:
+        if intent == "followup":
+            result = run_eyes("followup", context=context, question=cmd)
+        else:
+            result = run_eyes(intent, item=item, image_b64=body.get("image", ""))
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        return jsonify({"error": f"识别失败：{exc}"}), 500
+
+    return jsonify(
+        {
+            "text": text,
+            "intent": intent,
+            "item": item,
+            "source": result["source"],
+            "answer": result["answer"],
+            "latency_ms": int((time.time() - t0) * 1000),
+        }
+    )
 
 
 @app.post("/api/ocr")
@@ -569,5 +722,6 @@ def sample(name: str):
 if __name__ == "__main__":
     threading.Thread(target=init_ocr, daemon=True).start()
     threading.Thread(target=init_tts, daemon=True).start()
+    threading.Thread(target=init_asr, daemon=True).start()
     time.sleep(1)
     app.run(host="127.0.0.1", port=8090, threaded=True, debug=False)

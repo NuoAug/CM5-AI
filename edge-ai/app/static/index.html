@@ -98,6 +98,8 @@
   #out-eyes { font-size: 18px; line-height: 1.8; }
   label.auto { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
   label.auto input { accent-color: var(--cyan); }
+  .voice-state { color: var(--muted); font-size: 13px; align-self: center; }
+  .voice-state.on { color: var(--cyan); }
   .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
   .meta b { color: var(--cyan); font-weight: 600; }
   .ocr-lines { margin-top: 12px; border-top: 1px solid var(--line); }
@@ -201,6 +203,10 @@
         <div class="row">
           <input type="text" id="eyes-followup" placeholder="追问上一句描述，例如 左边那个是台阶吗" style="flex:1;min-width:220px" />
           <button id="btn-eyes-followup">追问</button>
+        </div>
+        <div class="row">
+          <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
+          <span id="voice-state" class="voice-state">未开启 · 先说「小V 小V」再说指令</span>
         </div>
       </div>
 
@@ -513,6 +519,134 @@ $('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
 $('btn-eyes-followup').onclick = () => runEyes('followup', $('btn-eyes-followup'));
 $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
 $('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-followup').click(); };
+
+let vctx = null, vproc = null, vstream = null, vOn = false;
+let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
+
+function voiceState(text, on) {
+  $('voice-state').textContent = text;
+  $('voice-state').classList.toggle('on', !!on);
+}
+
+function encodeWav(chunks) {
+  const len = chunks.reduce((s, c) => s + c.length, 0);
+  const buf = new ArrayBuffer(44 + len * 2);
+  const view = new DataView(buf);
+  const sr = 16000;
+  view.setUint32(0, 0x46464952, true);
+  view.setUint32(4, 36 + len * 2, true);
+  view.setUint32(8, 0x45564157, true);
+  view.setUint32(12, 0x20746d66, true);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sr, true);
+  view.setUint32(28, sr * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  view.setUint32(36, 0x61746164, true);
+  view.setUint32(40, len * 2, true);
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      view.setInt16(off, s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.readAsDataURL(blob);
+  });
+}
+
+async function sendUtterance(chunks) {
+  const duration = chunks.reduce((s, c) => s + c.length, 0) / 16000;
+  if (duration < 0.5) return;
+  vBusy = true;
+  voiceState('识别中…', true);
+  try {
+    const audio = await blobToDataUrl(encodeWav(chunks));
+    const j = await postJSON('/api/voice', { audio, image: state.imageVlm, context: state.lastEyes });
+    if (j.intent === 'none') {
+      voiceState('没听到「小V 小V」，继续监听', true);
+      return;
+    }
+    $('out-eyes').classList.remove('empty');
+    $('out-eyes').textContent = j.answer || '（空回答）';
+    $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
+    if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
+    voiceState('监听中 · 说「小V 小V」', true);
+    if ($('eyes-auto-tts').checked && j.answer) speakText(j.answer);
+  } catch (e) {
+    voiceState('出错：' + e.message, false);
+  } finally {
+    vBusy = false;
+  }
+}
+
+function onAudio(e) {
+  if (!vOn || vBusy) return;
+  const data = e.inputBuffer.getChannelData(0);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+  const rms = Math.sqrt(sum / data.length);
+  if (rms > 0.02) {
+    vSpeaking = true;
+    vSilence = 0;
+    vChunks.push(new Float32Array(data));
+  } else if (vSpeaking) {
+    vSilence += data.length / 16000;
+    vChunks.push(new Float32Array(data));
+    if (vSilence > 0.7) {
+      const chunks = vChunks;
+      vChunks = [];
+      vSpeaking = false;
+      vSilence = 0;
+      sendUtterance(chunks);
+    }
+  }
+}
+
+async function startVoice() {
+  $('btn-voice').disabled = true;
+  voiceState('正在打开麦克风…', true);
+  try {
+    vstream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    vctx = new AudioContext({ sampleRate: 16000 });
+    await vctx.resume();
+    const src = vctx.createMediaStreamSource(vstream);
+    vproc = vctx.createScriptProcessor(1024, 1, 1);
+    vproc.onaudioprocess = onAudio;
+    src.connect(vproc);
+    vproc.connect(vctx.destination);
+    vOn = true;
+    $('btn-voice').textContent = '关闭语音唤醒';
+    voiceState('监听中 · 说「小V 小V」', true);
+  } catch (e) {
+    stopVoice();
+    voiceState('麦克风打开失败：' + e.message, false);
+  } finally {
+    $('btn-voice').disabled = false;
+  }
+}
+
+function stopVoice() {
+  vOn = false;
+  if (vproc) { vproc.disconnect(); vproc.onaudioprocess = null; vproc = null; }
+  if (vctx) { vctx.close(); vctx = null; }
+  if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
+  vChunks = []; vSpeaking = false; vSilence = 0;
+  $('btn-voice').textContent = '开启语音唤醒';
+  voiceState('未开启 · 先说「小V 小V」再说指令', false);
+}
+
+$('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
