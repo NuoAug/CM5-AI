@@ -206,7 +206,8 @@
         </div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
-          <span id="voice-state" class="voice-state">未开启 · 先说「小V 小V」再说指令</span>
+          <input type="text" id="wake-word" placeholder="唤醒词" style="width:120px;flex:0 0 auto" />
+          <span id="voice-state" class="voice-state">未开启 · 先说「小V」再说指令</span>
         </div>
       </div>
 
@@ -523,6 +524,16 @@ $('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-follo
 let vctx = null, vproc = null, vstream = null, vOn = false;
 let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
 
+const WAKE_KEY = 'edge-ai-wake';
+function currentWake() {
+  return ($('wake-word').value || '小V').trim();
+}
+$('wake-word').value = localStorage.getItem(WAKE_KEY) || '小V';
+$('wake-word').oninput = () => {
+  localStorage.setItem(WAKE_KEY, $('wake-word').value.trim());
+  if (!vOn) voiceState(`未开启 · 先说「${currentWake()}」再说指令`, false);
+};
+
 function voiceState(text, on) {
   $('voice-state').textContent = text;
   $('voice-state').classList.toggle('on', !!on);
@@ -572,16 +583,16 @@ async function sendUtterance(chunks) {
   voiceState('识别中…', true);
   try {
     const audio = await blobToDataUrl(encodeWav(chunks));
-    const j = await postJSON('/api/voice', { audio, image: state.imageVlm, context: state.lastEyes });
+    const j = await postJSON('/api/voice', { audio, image: state.imageVlm, context: state.lastEyes, wake: currentWake() });
     if (j.intent === 'none') {
-      voiceState('没听到「小V 小V」，继续监听', true);
+      voiceState(`没听到「${currentWake()}」，继续监听`, true);
       return;
     }
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
-    voiceState('监听中 · 说「小V 小V」', true);
+    voiceState(`监听中 · 说「${currentWake()}」`, true);
     if ($('eyes-auto-tts').checked && j.answer) speakText(j.answer);
   } catch (e) {
     voiceState('出错：' + e.message, false);
@@ -627,7 +638,7 @@ async function startVoice() {
     vproc.connect(vctx.destination);
     vOn = true;
     $('btn-voice').textContent = '关闭语音唤醒';
-    voiceState('监听中 · 说「小V 小V」', true);
+    voiceState(`监听中 · 说「${currentWake()}」`, true);
   } catch (e) {
     stopVoice();
     voiceState('麦克风打开失败：' + e.message, false);
@@ -643,7 +654,7 @@ function stopVoice() {
   if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
   vChunks = []; vSpeaking = false; vSilence = 0;
   $('btn-voice').textContent = '开启语音唤醒';
-  voiceState('未开启 · 先说「小V 小V」再说指令', false);
+  voiceState(`未开启 · 先说「${currentWake()}」再说指令`, false);
 }
 
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());

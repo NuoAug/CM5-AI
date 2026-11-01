@@ -548,7 +548,16 @@ def api_eyes():
         return jsonify({"error": f"识别失败：{exc}"}), 500
 
 
-WAKE_PATTERN = re.compile(r"小\s*[v薇微威伟]", re.I)
+DEFAULT_WAKE = "小V"
+
+
+def wake_pattern(wake):
+    """默认唤醒词兼容常见同音识别；自定义时按字面匹配。"""
+    wake = (wake or DEFAULT_WAKE).strip()
+    if re.fullmatch(r"小[vV]", wake, re.I):
+        return re.compile(r"小\s*[v薇微威伟]", re.I)
+    chars = [re.escape(c) for c in wake if not c.isspace()]
+    return re.compile(r"\s*".join(chars), re.I)
 
 
 def decode_wav(data_b64):
@@ -632,12 +641,13 @@ def api_voice():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
 
-    if not WAKE_PATTERN.search(text):
+    pattern = wake_pattern(body.get("wake"))
+    if not pattern.search(text):
         return jsonify(
             {"text": text, "intent": "none", "answer": "", "latency_ms": int((time.time() - t0) * 1000)}
         )
 
-    cmd = re.sub(r"[，。！？、,.!?\s]", "", WAKE_PATTERN.sub("", text))
+    cmd = re.sub(r"[，。！？、,.!?\s]", "", pattern.sub("", text))
     if not cmd or len(cmd) <= 3:
         return jsonify(
             {"text": text, "intent": "wake", "answer": "我在，请说", "latency_ms": int((time.time() - t0) * 1000)}
