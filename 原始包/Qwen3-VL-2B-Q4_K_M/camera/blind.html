@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>盲人出行辅助 · Qwen3-VL-2B</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0b0d; color: #f4f4f5; font: 18px/1.5 "Microsoft YaHei", system-ui, sans-serif; }
+  header { padding: 12px 16px; background: #16161a; border-bottom: 1px solid #2a2a30; position: sticky; top: 0; z-index: 5; }
+  .state { font-size: 17px; color: #9ae6b4; min-height: 26px; }
+  .state.err { color: #fc8181; }
+  main { position: relative; background: #000; }
+  video, img#shot { display: block; width: 100%; max-height: 46vh; object-fit: contain; background: #000; }
+  img#shot { display: none; }
+  .out { padding: 14px 16px 6px; }
+  .txt { font-size: 26px; line-height: 1.6; font-weight: 600; white-space: pre-wrap; word-break: break-word; }
+  .txt .meta { font-size: 15px; font-weight: 400; color: #8b8b96; }
+  .btns { display: flex; gap: 10px; padding: 10px 16px 14px; }
+  button { flex: 1; font: 700 20px/1 "Microsoft YaHei", system-ui, sans-serif; padding: 18px 12px; border-radius: 14px; border: 1px solid #35353d; background: #1d1d22; color: #f4f4f5; }
+  button:disabled { opacity: .45; }
+  button.primary { background: #f6a623; border-color: #f6a623; color: #1a1a1a; }
+  .chips { display: flex; gap: 8px; padding: 0 16px 18px; flex-wrap: wrap; }
+  .chip { font-size: 16px; padding: 12px 14px; border-radius: 999px; background: #1d1d22; border: 1px solid #35353d; color: #e4e4e7; }
+  .chip.on { background: #f6a623; color: #1a1a1a; border-color: #f6a623; }
+  details { padding: 0 16px 20px; color: #a1a1aa; font-size: 15px; }
+  details summary { cursor: pointer; }
+</style>
+</head>
+<body>
+<header><div id="state" class="state">正在检查…</div></header>
+
+<main>
+  <video id="v" playsinline muted autoplay></video>
+  <img id="shot" alt="刚拍到的画面">
+</main>
+
+<section class="out">
+  <div id="txt" class="txt">点下面的「开始自动识别」，它会每隔几秒拍一次并念给你听。</div>
+</section>
+
+<div class="btns">
+  <button id="start" class="primary">开始自动识别</button>
+  <button id="once" disabled>再说一次</button>
+  <button id="stop" disabled>暂停</button>
+</div>
+
+<div class="chips" id="chips"></div>
+
+<details>
+  <summary>想调什么？</summary>
+  <p>· 自动识别的间隔是 <b id="ivtext">4 秒</b>。<br>
+     · 说话靠浏览器自带语音，没声音就点一下页面上任意位置再试。<br>
+     · 需要戴耳机/骨传导时，声音只走系统默认输出。<br>
+     · 全程本机识别，不联网。</p>
+</details>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const v = $('v'), shot = $('shot');
+
+// ---- 提示词：盲人出行辅助 ----
+// 只做「事实性描述」：不写任何通行结论，避免小模型把策略词复读成答案。
+// 通行判断交给下面的 policyPrefix()，由代码按关键词决定，可解释、可复现。
+const BASE_PROMPT = [
+  '用一两句中文口语说清楚这张图里正前方有什么、离拍摄的人有多近（很近/较近/较远）。',
+  '只说画面里看得见的东西，没看见的不要提；不报数字，不说几米、不说读秒。'
+].join('\n');
+
+const TOPICS = [
+  { id: 'walk', label: '前面能走吗', q: '正前方能不能直接走？' },
+  { id: 'cross', label: '能过马路吗', q: '这里能不能过马路？有斑马线或信号灯就说，没有就说没有看到。' },
+  { id: 'light', label: '红绿灯颜色', q: '画面里有没有信号灯？有就说颜色，没有就说没有看到信号灯。' },
+  { id: 'edge', label: '路沿台阶', q: '脚下和前方有没有台阶、路沿、坑洼或者没盖的井盖？' },
+  { id: 'enter', label: '找入口', q: '我要进的门口或者通道在哪个方向？怎么走过去？' },
+];
+let topic = TOPICS[0];
+
+// ---- 状态 ----
+let stream = null, busy = false, running = false, lastUrl = null, dead = false;
+const GAP_MS = 600;          // 一句话说完之后，再等这么久才抓下一帧
+
+function setState(t, isErr) {
+  $('state').textContent = t;
+  $('state').className = 'state' + (isErr ? ' err' : '');
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// ---- 说话 ----
+let zhVoice = null;
+function pickVoice() {
+  const vs = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+  zhVoice = vs.find((x) => /zh[-_]?CN|Chinese|中文|普通话/i.test(x.name + x.lang)) || vs.find((x) => /zh/i.test(x.lang)) || null;
+}
+if (window.speechSynthesis) { pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+// 通行结论由代码给，不让模型说 —— 2B 模型会照抄提示词里的安全词。
+// 有具体东西挡在前面就一律「注意」，只有明确说空/畅通才放「可以走」——宁可多提醒。
+const SOLID = /人|孩子|小孩|儿童|男|女|老师|车|电动|自行|摩托|桌|椅|凳|台阶|路沿|马路牙|墙|门|杆|柱|摊|箱|包|球|狗|水|坑|井盖|施工|障碍|栏杆|推车|婴儿车/;
+function policyPrefix(text) {
+  if (!topic || topic.id !== 'walk') return '';
+  if (/看不清|没看清|不清楚|无法判断/.test(text)) return '可能没看清：';
+  // 先把「离拍摄的人很近」这类描述距离的说法、「人行道」这类可以走的词剔掉，再看有没有实体挡路。
+  const probe = text.replace(/拍摄的人|拍摄者|离你|近/gu, '')
+    .replace(/人行道|斑马线|盲道/gu, '')
+    .replace(/没有[人车东西障碍物啥]*|无人|没人/gu, '');
+  if (SOLID.test(probe)) return '注意：';
+  if (/空|畅通|没有|没什么|无人/gu.test(probe)) return '可以走：';
+  return '注意：';
+}
+
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+// 说话返回 Promise：念完（或超时、或被浏览器打断）才 resolve，主循环靠它控制节奏。
+function speak(text) {
+  if (!window.speechSynthesis) return sleep(Math.min(9000, Math.max(2500, text.length * 240)));
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    u.rate = 1.15;
+    u.pitch = 1;
+    if (zhVoice) u.voice = zhVoice;
+    const guardMs = Math.min(25000, Math.max(5000, text.length * 320));
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = () => { if (done) return; done = true; clearTimeout(tid); resolve(); };
+      const tid = setTimeout(finish, guardMs);
+      u.onend = finish;
+      u.onerror = finish;
+      try { speechSynthesis.speak(u); } catch { finish(); }
+    });
+  } catch { return sleep(3000); }
+}
+
+function show(html) { $('txt').innerHTML = html; }
+
+// ---- 后端探测 ----
+async function probe() {
+  try { const r = await fetch('/status', { cache: 'no-store' }); return await r.json(); } catch { return null; }
+}
+async function refreshState() {
+  const j = await probe();
+  if (!j) {
+    if (!dead) { dead = true; setState('网页后端已断开：重新双击「盲人导航识别.bat」，再按 F5 刷新', true); }
+    return;
+  }
+  if (dead) dead = false;
+  if (!j.ok) setState('模型还没启动：先双击包里的「启动.bat」，等它说「服务已就绪」', true);
+  else if (!stream) setState('就绪 · 点「开始自动识别」');
+}
+refreshState();
+setInterval(refreshState, 5000);
+
+// ---- 摄像头 ----
+async function openCam() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false
+    });
+    v.srcObject = stream;
+    setState('摄像头已开 · 正在自动识别');
+    return true;
+  } catch (e) {
+    setState('打不开摄像头：' + e.message + '（检查是否被别的程序占用 / 浏览器权限）', true);
+    speak('打不开摄像头，请检查权限');
+    return false;
+  }
+}
+
+function grab() {
+  // 给识别用的小图：640 宽，够看路况又省时间
+  const vw = v.videoWidth || 1280, vh = v.videoHeight || 720;
+  const w = 640, h = Math.round(vh * (640 / vw));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(v, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.72);
+}
+
+async function ask(dataUrl) {
+  if (busy) return;
+  busy = true;
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/ask', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image: dataUrl, prompt: BASE_PROMPT + '\n\n现在的问题：' + topic.q + '\n\n只回答一句中文，不要分点、不要解释。', temperature: 0.05, max_tokens: 96 })
+    });
+    const j = await r.json();
+    const ms = Math.round(performance.now() - t0);
+    busy = false;   // 念的时候也允许手动再问一次
+    if (!j.ok) {
+      show('<span class="err">' + esc(j.error || '识别失败') + '</span>');
+      await speak('识别失败');
+    } else {
+      const head = policyPrefix(j.text);
+      const spoken = (head ? head : '') + j.text;
+      show((head ? '<b>' + esc(head) + '</b>' : '') + esc(j.text) + '\n<span class="meta">' + ms + ' 毫秒 · ' + j.tokens + ' tokens</span>');
+      await speak(spoken);
+    }
+  } catch (e) {
+    const j = await probe();
+    if (j) { show('<span class="err">请求失败：' + esc(e.message) + '</span>'); speak('请求失败'); }
+    else { show('<span class="err">网页后端不在了（那个黑色窗口被关了）。重新双击「盲人导航识别.bat」，再按 F5。</span>'); speak('识别服务已断开，请重新启动'); }
+  } finally {
+    busy = false;
+  }
+}
+
+// ---- 主循环：抓帧 → 识别 → 念完 → 再抓下一帧（不覆盖、不抢话）----
+async function tick() {
+  if (!stream) return;
+  lastUrl = grab();
+  shot.src = lastUrl; shot.style.display = 'block'; v.style.display = 'none';
+  setTimeout(() => { shot.style.display = 'none'; v.style.display = 'block'; }, 350);
+  await ask(lastUrl);
+}
+
+async function loop() {
+  running = true;
+  while (running) {
+    await tick();               // ask() 内部等这句话念完
+    if (!running) break;
+    await sleep(GAP_MS);
+  }
+}
+
+$('start').onclick = async () => {
+  if (!stream && !(await openCam())) return;
+  $('start').disabled = true; $('stop').disabled = false; $('once').disabled = false;
+  if (running) return;
+  if (window.speechSynthesis) try { speechSynthesis.cancel(); } catch { }
+  loop();
+};
+
+$('stop').onclick = () => {
+  running = false;
+  if (window.speechSynthesis) try { speechSynthesis.cancel(); } catch { }
+  $('start').disabled = false; $('stop').disabled = true;
+  setState('已暂停 · 点「开始自动识别」继续');
+};
+
+$('once').onclick = () => { if (stream || lastUrl) tick(); };
+
+// ---- 快捷问题 ----
+const chips = $('chips');
+TOPICS.forEach((t, i) => {
+  const b = document.createElement('button');
+  b.className = 'chip' + (i === 0 ? ' on' : '');
+  b.textContent = t.label;
+  b.onclick = () => {
+    topic = t;
+    [...chips.children].forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    if (stream) tick();
+  };
+  chips.appendChild(b);
+});
+
+// 定时器在页面隐藏时也跑，方便挂手机；如果想省电可以自己暂停
+</script>
+</body>
+</html>

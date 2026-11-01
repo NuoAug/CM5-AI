@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>摄像头识别 · Qwen3-VL-2B</title>
+<style>
+  :root { color-scheme: light }
+  * { box-sizing: border-box }
+  body { margin:0; font:15px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:#faf6ef; color:#2d2a26 }
+  header { padding:14px 18px; border-bottom:1px solid #eadfcb; display:flex; align-items:center; gap:12px; background:#fffdf8 }
+  header b { font-size:16px } header span { color:#8a7f6d; font-size:13px }
+  main { display:grid; grid-template-columns:minmax(320px,1fr) minmax(320px,1fr); gap:16px; padding:16px; height:calc(100vh - 60px) }
+  .card { background:#fff; border:1px solid #eadfcb; border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:12px; min-height:0 }
+  video, img.shot { width:100%; border-radius:10px; background:#000; aspect-ratio:4/3; object-fit:cover }
+  img.shot { display:none }
+  .row { display:flex; gap:10px; flex-wrap:wrap }
+  button { font:inherit; padding:9px 16px; border-radius:10px; border:1px solid #e0d3bb; background:#fff; cursor:pointer }
+  button.primary { background:#f5a623; border-color:#e0940f; color:#3a2a06; font-weight:600 }
+  button:disabled { opacity:.45; cursor:not-allowed }
+  textarea { width:100%; min-height:56px; resize:vertical; font:inherit; padding:8px 10px; border:1px solid #e0d3bb; border-radius:10px }
+  #ans { flex:1; overflow:auto; white-space:pre-wrap; background:#fbf7f0; border:1px solid #eadfcb; border-radius:10px; padding:12px; min-height:120px }
+  .meta { color:#8a7f6d; font-size:12.5px }
+  .err { color:#b42318 }
+</style>
+</head>
+<body>
+<header><b>摄像头识别</b><span>本地 Qwen3-VL-2B · 拍照后直接问模型</span></header>
+<main>
+  <section class="card">
+    <video id="v" autoplay playsinline muted></video>
+    <img id="shot" class="shot" alt="刚拍的照片">
+    <div class="row">
+      <button id="open" class="primary">打开摄像头</button>
+      <button id="snap" disabled>拍照并识别</button>
+      <button id="retry" disabled>回到取景</button>
+    </div>
+    <div class="meta" id="camstate">摄像头未开启</div>
+  </section>
+  <section class="card">
+    <textarea id="prompt">用中文简洁描述这张图里有什么，注意人物、动作、场景。</textarea>
+    <div class="row"><button id="ask" disabled class="primary">用这张图再问一次</button></div>
+    <div id="ans" class="meta">识别结果会显示在这里。</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const v = $('v'), shot = $('shot');
+let stream = null, lastDataUrl = null, busy = false;
+
+function setState(t, isErr) { $('camstate').textContent = t; $('camstate').className = 'meta' + (isErr ? ' err' : ''); }
+function show(html) { $('ans').innerHTML = html; }
+function esc(s) { return s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+$('open').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false });
+    v.srcObject = stream; v.style.display = 'block'; shot.style.display = 'none';
+    $('snap').disabled = false; $('retry').disabled = true;
+    const label = stream.getVideoTracks()[0].label || '默认设备';
+    setState('摄像头已开启（' + label + '）');
+  } catch (e) {
+    setState('打不开摄像头：' + e.message + '（检查是否被别的程序占用 / 浏览器权限）', true);
+  }
+};
+
+function grab() {
+  const w = v.videoWidth || 1280, h = v.videoHeight || 720;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(v, 0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.9);
+}
+
+async function ask(dataUrl, prompt) {
+  if (busy) return;
+  busy = true; $('snap').disabled = true; $('ask').disabled = true;
+  show('<span class="meta">正在识别…</span>');
+  const t0 = performance.now();
+  try {
+    const r = await fetch('/ask', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ image: dataUrl, prompt })
+    });
+    const j = await r.json();
+    const ms = Math.round(performance.now() - t0);
+    if (!j.ok) show('<span class="err">' + esc(j.error || '识别失败') + '</span>');
+    else show(esc(j.text) + '\n\n<span class="meta">' + ms + ' ms · ' + j.tokens + ' tokens</span>');
+  } catch (e) {
+    const j = await probe();
+    if (j) show('<span class="err">请求失败：' + esc(e.message) + '</span>');
+    else show('<span class="err">网页后端不在了（那个黑色窗口被关了）。重新双击「摄像头识别.bat」，再按 F5 刷新本页。</span>');
+  } finally {
+    busy = false; $('snap').disabled = !stream; $('ask').disabled = !lastDataUrl;
+  }
+}
+
+$('snap').onclick = () => {
+  if (!stream) return;
+  lastDataUrl = grab();
+  shot.src = lastDataUrl;
+  shot.style.display = 'block'; v.style.display = 'none';
+  $('retry').disabled = false; $('ask').disabled = false;
+  ask(lastDataUrl, $('prompt').value.trim());
+};
+$('retry').onclick = () => { shot.style.display = 'none'; v.style.display = 'block'; $('retry').disabled = true; };
+$('ask').onclick = () => { if (lastDataUrl) ask(lastDataUrl, $('prompt').value.trim()); };
+
+async function probe() {
+  try {
+    const r = await fetch('/status', { cache: 'no-store' });
+    return await r.json();
+  } catch { return null; }
+}
+
+let dead = false;
+async function refreshState() {
+  const j = await probe();
+  if (!j) {
+    if (!dead) { dead = true; setState('网页后端已断开：重新双击「摄像头识别.bat」，再按 F5 刷新', true); }
+    $('snap').disabled = true; $('ask').disabled = true;
+    return;
+  }
+  if (dead) { dead = false; $('snap').disabled = !stream; $('ask').disabled = !lastDataUrl; }
+  if (!j.ok) setState('模型还没启动：先双击包里的「启动.bat」，等它说「服务已就绪」再回来', true);
+  else if (!stream && !$('camstate').textContent.startsWith('打不开摄像头')) setState('就绪 · 点「打开摄像头」开始');
+}
+
+if (location.protocol === 'file:') {
+  setState('别直接双击这个 html —— 请双击包里的「摄像头识别.bat」，它会用 http 打开', true);
+  document.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+}
+
+refreshState();
+setInterval(refreshState, 5000);
+</script>
+</body>
+</html>

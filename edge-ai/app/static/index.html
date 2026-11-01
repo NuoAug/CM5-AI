@@ -1,0 +1,526 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CM5 边缘 AI 功能测试台</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2b;
+    --panel2: #16223a;
+    --line: #24314d;
+    --text: #e8eefc;
+    --muted: #93a4c3;
+    --cyan: #4dd0e1;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 10% -10%, #172554 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--line);
+    background: rgba(9, 15, 28, 0.82); backdrop-filter: blur(10px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
+  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .status { display: flex; gap: 10px; flex-wrap: wrap; }
+  .pill {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 12px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); font-size: 12px; color: var(--muted);
+  }
+  .pill.over { border-color: var(--red); color: var(--red); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+  .dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  .dot.off { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  main {
+    display: grid; grid-template-columns: 390px minmax(0, 1fr); gap: 20px;
+    padding: 22px 28px 40px; max-width: 1500px; margin: 0 auto;
+  }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: linear-gradient(180deg, rgba(22,34,58,.94), rgba(15,24,42,.94));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  }
+  .left { display: flex; flex-direction: column; gap: 16px; }
+  h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
+  h2 span { color: var(--cyan); margin-right: 6px; }
+  .drop {
+    border: 1px dashed #34507d; border-radius: 12px; padding: 22px 14px; text-align: center;
+    color: var(--muted); font-size: 13px; cursor: pointer; transition: .2s;
+    background: rgba(13, 24, 43, .5);
+  }
+  .drop:hover, .drop.drag { border-color: var(--cyan); color: var(--text); background: rgba(77,208,225,.07); }
+  #preview { width: 100%; border-radius: 10px; margin-top: 12px; display: none; background: #08101d; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button {
+    border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    padding: 9px 13px; border-radius: 9px; cursor: pointer; font-size: 13px;
+    transition: .15s; font-family: inherit;
+  }
+  button:hover { border-color: var(--cyan); color: var(--cyan); }
+  button.primary {
+    background: linear-gradient(135deg, #0e7490, #155e75); border-color: #22d3ee55; color: #e0fbff;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.12); }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tab { padding: 9px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 13px; }
+  .tab.active { background: rgba(77,208,225,.13); border-color: var(--cyan); color: var(--cyan); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0 0 12px; }
+  .prompt {
+    width: 100%; min-height: 74px; resize: vertical; background: #0c1627; color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font-family: inherit;
+    font-size: 13px; line-height: 1.6;
+  }
+  .result {
+    margin-top: 14px; background: #09111f; border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; min-height: 96px; font-size: 14px; line-height: 1.75; white-space: pre-wrap; word-break: break-word;
+  }
+  .result.empty { color: #5f7192; }
+  .eyes-btn { padding: 12px 18px; font-size: 14px; }
+  #out-eyes { font-size: 18px; line-height: 1.8; }
+  label.auto { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  label.auto input { accent-color: var(--cyan); }
+  .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .meta b { color: var(--cyan); font-weight: 600; }
+  .ocr-lines { margin-top: 12px; border-top: 1px solid var(--line); }
+  .ocr-line { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid #1b2942; font-size: 13px; }
+  .ocr-line span:last-child { color: var(--green); font-size: 12px; white-space: nowrap; }
+  .tts-box { display: flex; gap: 10px; flex-wrap: wrap; }
+  .tts-box select, .tts-box input { flex: 1 1 150px; width: auto; }
+  .tts-box button { flex: 0 0 auto; }
+  input[type="number"], select, textarea {
+    background: #0c1627; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 11px; font-family: inherit; font-size: 13px; width: 100%;
+  }
+  audio { width: 100%; margin-top: 12px; }
+  #video { width: 100%; border-radius: 10px; margin-top: 12px; display: none; }
+  .loading { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff33; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { color: #5f7192; font-size: 12px; text-align: center; padding: 0 20px 30px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+    background: #1f2b45; border: 1px solid #38507a; color: #fff; padding: 10px 16px; border-radius: 10px;
+    opacity: 0; pointer-events: none; transition: .25s; font-size: 13px; max-width: 80vw; z-index: 99;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .tips { color: var(--muted); font-size: 12px; line-height: 1.8; }
+  .tips b { color: var(--text); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>CM5 边缘 AI 功能测试台</h1>
+    <p>MiniCPM-V 4.7 1B + PP-OCRv6_small + Kokoro-82M-zh · 本机调试版</p>
+  </div>
+  <div class="status">
+    <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
+    <div class="pill"><span class="dot" id="dot-ocr"></span>OCR</div>
+    <div class="pill"><span class="dot" id="dot-tts"></span>TTS</div>
+    <div class="pill" id="mem-pill">模型内存 <span id="mem-text">--</span></div>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="card">
+      <h2><span>1</span>选择图片</h2>
+      <div class="drop" id="drop">
+        点击选择图片，或把图片拖到这里<br />
+        <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden />
+      <canvas id="preview"></canvas>
+      <video id="video" autoplay playsinline></video>
+      <div class="row">
+        <button class="primary" id="btn-file">上传图片</button>
+        <button id="btn-sample-cat">示例：猫</button>
+        <button id="btn-sample-ocr">示例：中文标牌</button>
+      </div>
+      <div class="row">
+        <button id="btn-cam">打开摄像头</button>
+        <button id="btn-shot" disabled>拍照</button>
+      </div>
+    </div>
+
+    <div class="card tips">
+      <b>建议测试顺序</b><br />
+      1. 选“示例：猫” → 场景识别 → 空间关系 → 图像问答<br />
+      2. 选“示例：中文标牌” → 中文 OCR → 朗读文字<br />
+      3. 任意结果点“朗读” → 检查离线中文播报<br /><br />
+      <b>说明</b><br />
+      当前是本机 Windows 调试版，延迟不代表 CM5；部署到树莓派后模型与接口不变，只换运行时。
+    </div>
+  </section>
+
+  <section class="right">
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">AI 眼睛</button>
+      <button type="button" class="tab" data-tab="scene" id="tab-scene">场景识别</button>
+      <button type="button" class="tab" data-tab="spatial" id="tab-spatial">空间关系</button>
+      <button type="button" class="tab" data-tab="vqa" id="tab-vqa">图像问答</button>
+      <button type="button" class="tab" data-tab="ocr" id="tab-ocr">中文 OCR</button>
+      <button type="button" class="tab" data-tab="tts" id="tab-tts">语音播报</button>
+    </div>
+
+    <div class="card">
+      <div class="panel active" id="panel-eyes">
+        <h2><span>眼睛</span>AI 眼睛</h2>
+        <p class="hint">面向视障使用的单句播报。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
+        <div class="row">
+          <button class="primary eyes-btn" id="btn-eyes-scene">看前方</button>
+          <button class="eyes-btn" id="btn-eyes-toilet">找卫生间</button>
+          <button class="eyes-btn" id="btn-eyes-exit">找出口</button>
+          <button class="eyes-btn" id="btn-eyes-text">读文字</button>
+          <label class="auto"><input type="checkbox" id="eyes-auto-tts" checked /> 自动朗读</label>
+        </div>
+        <div class="row">
+          <input type="text" id="eyes-item" placeholder="要找的东西，例如 水杯 / 门 / 楼梯" style="flex:1;min-width:200px" />
+          <button id="btn-eyes-item">找物品</button>
+        </div>
+        <div class="result empty" id="out-eyes">等待提问…</div>
+        <div class="meta" id="meta-eyes"></div>
+        <div class="row">
+          <input type="text" id="eyes-followup" placeholder="追问上一句描述，例如 左边那个是台阶吗" style="flex:1;min-width:220px" />
+          <button id="btn-eyes-followup">追问</button>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-scene">
+        <h2><span>2</span>场景识别</h2>
+        <p class="hint">输出：主要物体、场景类型、明显异常。适合“画面里有什么”。</p>
+        <textarea class="prompt" id="prompt-scene">请用中文描述这张图片：1) 画面里有哪些主要物体（最多 8 个，每个只列一次，不要重复）；2) 这是什么场景；3) 有没有明显的危险或异常。只描述看得见的内容，不要猜测。</textarea>
+        <div class="row">
+          <button class="primary" id="btn-scene">开始识别</button>
+          <button class="ghost" id="tts-scene" disabled>朗读结果</button>
+        </div>
+        <div class="result empty" id="out-scene">等待识别…</div>
+        <div class="meta" id="meta-scene"></div>
+      </div>
+
+      <div class="panel" id="panel-spatial">
+        <h2><span>2</span>空间关系</h2>
+        <p class="hint">强制输出 JSON，检查左右、上下、遮挡。2B 级模型会出错，建议多试几张。</p>
+        <div class="row">
+          <button class="primary" id="btn-spatial-left">左右关系</button>
+          <button id="btn-spatial-occlusion">遮挡判断</button>
+          <button id="btn-spatial-depth">前后 / 上下</button>
+          <button class="ghost" id="tts-spatial" disabled>朗读结果</button>
+        </div>
+        <div class="result empty" id="out-spatial">等待提问…</div>
+        <div class="meta" id="meta-spatial"></div>
+      </div>
+
+      <div class="panel" id="panel-vqa">
+        <h2><span>2</span>图像问答</h2>
+        <p class="hint">自由提问，例如“桌子上有几个杯子？”“这个人手里拿的是什么？”</p>
+        <div class="row">
+          <input type="text" id="vqa-q" placeholder="输入问题，回车提交" style="flex:1;min-width:220px" />
+          <button class="primary" id="btn-vqa">提问</button>
+          <button class="ghost" id="tts-vqa" disabled>朗读回答</button>
+        </div>
+        <div class="result empty" id="out-vqa">等待提问…</div>
+        <div class="meta" id="meta-vqa"></div>
+      </div>
+
+      <div class="panel" id="panel-ocr">
+        <h2><span>2</span>中文 OCR</h2>
+        <p class="hint">RapidOCR + PP-OCRv6_small，适合截图、说明书、路牌等印刷体。</p>
+        <div class="row">
+          <button class="primary" id="btn-ocr">识别文字</button>
+          <button class="ghost" id="tts-ocr" disabled>朗读文字</button>
+          <button class="ghost" id="copy-ocr" disabled>复制文本</button>
+        </div>
+        <div class="result empty" id="out-ocr">等待识别…</div>
+        <div class="meta" id="meta-ocr"></div>
+        <div class="ocr-lines" id="ocr-lines"></div>
+      </div>
+
+      <div class="panel" id="panel-tts">
+        <h2><span>2</span>语音播报</h2>
+        <p class="hint">默认 MeloTTS（VITS fp32，本机实测 RTF≈0.35，快）；Kokoro 音色多但明显更慢，按需切换。</p>
+        <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
+        <div class="row tts-box">
+          <select id="tts-engine">
+            <option value="melo">MeloTTS（快，默认）</option>
+            <option value="kokoro">Kokoro-82M（多音色，慢）</option>
+          </select>
+          <select id="tts-sid">
+            <option value="45">Kokoro 音色 45</option>
+            <option value="46">Kokoro 音色 46</option>
+            <option value="47">Kokoro 音色 47</option>
+            <option value="48">Kokoro 音色 48</option>
+            <option value="49">Kokoro 音色 49</option>
+            <option value="50">Kokoro 音色 50</option>
+          </select>
+          <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" />
+          <button class="primary" id="btn-tts">合成并播放</button>
+        </div>
+        <audio id="audio" controls></audio>
+        <div class="meta" id="meta-tts"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 edge-ai/models 与 edge-ai/runtime</footer>
+<div id="toast"></div>
+
+<script>
+const state = { image: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function setBusy(btn, busy, text) {
+  if (!btn) return;
+  if (busy) { btn.dataset.old = btn.textContent; btn.disabled = true; btn.innerHTML = '<span class="loading"></span>' + (text || '处理中…'); }
+  else { btn.disabled = false; btn.textContent = btn.dataset.old || text || '完成'; }
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status'); const s = await r.json();
+    $('dot-vlm').className = 'dot ' + (s.vlm.up ? 'on' : 'off');
+    $('dot-ocr').className = 'dot ' + (s.ocr.ready ? 'on' : 'off');
+    $('dot-tts').className = 'dot ' + (s.tts.ready ? 'on' : 'off');
+    $('mem-text').textContent = `${s.memory.sum_gb} / ${s.memory.budget_gb} GB`;
+    $('mem-pill').classList.toggle('over', s.memory.over_budget);
+  } catch (e) { /* ignore */ }
+}
+setInterval(refreshStatus, 5000); refreshStatus();
+
+async function loadImageFromBlob(blob) {
+  const img = new Image();
+  const url = URL.createObjectURL(blob);
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+  const max = 800;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = $('preview');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  canvas.style.display = 'block';
+  state.image = canvas.toDataURL('image/jpeg', 0.85);
+  const vlmSide = 512;
+  const vScale = Math.min(1, vlmSide / Math.max(img.width, img.height));
+  const vCanvas = document.createElement('canvas');
+  vCanvas.width = Math.round(img.width * vScale);
+  vCanvas.height = Math.round(img.height * vScale);
+  vCanvas.getContext('2d').drawImage(img, 0, 0, vCanvas.width, vCanvas.height);
+  state.imageVlm = vCanvas.toDataURL('image/jpeg', 0.85);
+  URL.revokeObjectURL(url);
+}
+
+async function loadImageFromUrl(url) {
+  const r = await fetch(url); if (!r.ok) throw new Error('示例图加载失败');
+  await loadImageFromBlob(await r.blob());
+}
+
+$('btn-file').onclick = () => $('file').click();
+$('drop').onclick = () => $('file').click();
+$('file').onchange = async (e) => {
+  if (e.target.files[0]) { await loadImageFromBlob(e.target.files[0]); toast('图片已载入'); }
+};
+$('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('drag'); };
+$('drop').ondragleave = () => $('drop').classList.remove('drag');
+$('drop').ondrop = async (e) => {
+  e.preventDefault(); $('drop').classList.remove('drag');
+  if (e.dataTransfer.files[0]) { await loadImageFromBlob(e.dataTransfer.files[0]); toast('图片已载入'); }
+};
+$('btn-sample-cat').onclick = async () => { await loadImageFromUrl('/api/sample/cats.jpg'); toast('已载入示例：猫'); };
+$('btn-sample-ocr').onclick = async () => { await loadImageFromUrl('/api/sample/ocr-test.png'); toast('已载入示例：中文标牌'); };
+
+let stream = null;
+$('btn-cam').onclick = async () => {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    const v = $('video'); v.srcObject = stream; v.style.display = 'block'; $('btn-shot').disabled = false;
+    toast('摄像头已打开');
+  } catch (e) { toast('摄像头打开失败：' + e.message); }
+};
+$('btn-shot').onclick = async () => {
+  const v = $('video'); if (!v.videoWidth) return toast('摄像头还没准备好');
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+  await loadImageFromBlob(blob); toast('拍照完成');
+};
+
+async function postJSON(url, body) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+async function runVlm(mode, prompt, outId, metaId, btn, targetKey) {
+  if (!state.image) return toast('请先选择图片');
+  setBusy(btn, true, '推理中…');
+  $(outId).classList.add('empty'); $(outId).textContent = '模型推理中，本机约需数秒…';
+  try {
+    const body = { image: state.imageVlm, mode, prompt };
+    if (mode === 'spatial') body.max_tokens = 300;
+    const j = await postJSON('/api/vlm', body);
+    $(outId).classList.remove('empty'); $(outId).textContent = j.answer || '（空回答）';
+    $(metaId).innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b> · 模式 <b>${mode}</b>`;
+    state[targetKey] = j.answer || '';
+    const ttsBtn = $({scene:'tts-scene',spatial:'tts-spatial',vqa:'tts-vqa'}[mode]);
+    if (ttsBtn) ttsBtn.disabled = false;
+  } catch (e) {
+    $(outId).textContent = '失败：' + e.message;
+  } finally { setBusy(btn, false, '重新识别'); }
+}
+
+$('btn-scene').onclick = () => runVlm('scene', $('prompt-scene').value, 'out-scene', 'meta-scene', $('btn-scene'), 'lastScene');
+$('btn-spatial-left').onclick = () => runVlm('spatial', $('prompt-spatial')?.value || undefined, 'out-spatial', 'meta-spatial', $('btn-spatial-left'), 'lastSpatial');
+$('btn-spatial-occlusion').onclick = () => runVlm('spatial', '请只输出 JSON：判断画面中主要物体是否被遮挡、谁遮挡谁，并给出每个物体的 position（left/center/right/top/bottom）。不确定填 unknown，不要猜。', 'out-spatial', 'meta-spatial', $('btn-spatial-occlusion'), 'lastSpatial');
+$('btn-spatial-depth').onclick = () => runVlm('spatial', '请只输出 JSON：判断画面中主要物体的前后、上下关系，并说明判断依据（例如谁更大、谁在下方）。不确定填 unknown，不要猜。', 'out-spatial', 'meta-spatial', $('btn-spatial-depth'), 'lastSpatial');
+
+async function runVqa() {
+  if (!state.image) return toast('请先选择图片');
+  const q = $('vqa-q').value.trim(); if (!q) return toast('请输入问题');
+  const btn = $('btn-vqa'); setBusy(btn, true, '推理中…');
+  $('out-vqa').classList.add('empty'); $('out-vqa').textContent = '模型推理中，本机约需数秒…';
+  try {
+    const j = await postJSON('/api/vlm', { image: state.imageVlm, mode: 'vqa', prompt: q, max_tokens: 220 });
+    $('out-vqa').classList.remove('empty'); $('out-vqa').textContent = j.answer || '（空回答）';
+    $('meta-vqa').innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
+    state.lastVqa = j.answer || ''; $('tts-vqa').disabled = false;
+  } catch (e) { $('out-vqa').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '提问'); }
+}
+$('btn-vqa').onclick = runVqa;
+$('vqa-q').onkeydown = (e) => { if (e.key === 'Enter') runVqa(); };
+
+$('btn-ocr').onclick = async () => {
+  if (!state.image) return toast('请先选择图片');
+  const btn = $('btn-ocr'); setBusy(btn, true, '识别中…');
+  $('out-ocr').textContent = 'OCR 识别中…'; $('ocr-lines').innerHTML = '';
+  try {
+    const j = await postJSON('/api/ocr', { image: state.image });
+    $('out-ocr').classList.remove('empty');
+    $('out-ocr').textContent = j.text || '（未识别到文字）';
+    $('meta-ocr').innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b> · 行数 <b>${j.lines.length}</b>`;
+    state.lastOcr = j.text || '';
+    $('tts-ocr').disabled = !j.text; $('copy-ocr').disabled = !j.text;
+    $('ocr-lines').innerHTML = j.lines.map(x => `<div class="ocr-line"><span>${escapeHtml(x.text)}</span><span>${x.score == null ? '' : (x.score*100).toFixed(1)+'%'}</span></div>`).join('');
+  } catch (e) { $('out-ocr').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '重新识别'); }
+};
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot'}[c])); }
+
+$('copy-ocr').onclick = async () => {
+  try { await navigator.clipboard.writeText(state.lastOcr); toast('已复制'); }
+  catch (e) { toast('复制失败，请手动选择'); }
+};
+
+async function synthTts(text) {
+  const r = await fetch('/api/tts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, engine: $('tts-engine').value, sid: Number($('tts-sid').value), speed: Number($('tts-speed').value) })
+  });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+  return {
+    url: URL.createObjectURL(await r.blob()),
+    gen: r.headers.get('X-Gen-Ms'), dur: r.headers.get('X-Audio-Seconds'), eng: r.headers.get('X-TTS-Engine')
+  };
+}
+
+async function speakText(text) {
+  if (!text) return;
+  try {
+    const t = await synthTts(text);
+    const audio = $('audio'); audio.src = t.url; audio.play();
+  } catch (e) { toast('朗读失败：' + e.message); }
+}
+
+async function playTts(text) {
+  if (!text) return toast('没有可朗读的文本');
+  const btn = $('btn-tts'); setBusy(btn, true, '合成中…');
+  $('meta-tts').textContent = 'TTS 合成中，本机约需数秒…';
+  try {
+    const t0 = performance.now();
+    const t = await synthTts(text);
+    const audio = $('audio'); audio.src = t.url; audio.play();
+    $('meta-tts').innerHTML = `引擎 <b>${t.eng || '?'}</b> · 合成 <b>${t.gen ? (t.gen/1000).toFixed(2)+' s' : ((performance.now()-t0)/1000).toFixed(2)+' s'}</b> · 音频 <b>${t.dur || '?'} s</b>`;
+  } catch (e) { $('meta-tts').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '合成并播放'); }
+}
+$('btn-tts').onclick = () => playTts($('tts-text').value.trim());
+$('tts-scene').onclick = () => playTts(state.lastScene);
+$('tts-spatial').onclick = () => playTts(state.lastSpatial);
+$('tts-vqa').onclick = () => playTts(state.lastVqa);
+$('tts-ocr').onclick = () => playTts(state.lastOcr);
+
+async function runEyes(task, btn) {
+  if (task !== 'followup' && !state.image) return toast('请先选择图片');
+  const body = { task };
+  if (task === 'item') {
+    const item = $('eyes-item').value.trim();
+    if (!item) return toast('请输入要找的东西');
+    body.item = item;
+  }
+  if (task === 'followup') {
+    if (!state.lastEyes) return toast('先看一次画面再追问');
+    const q = $('eyes-followup').value.trim();
+    if (!q) return toast('请输入追问内容');
+    body.context = state.lastEyes;
+    body.question = q;
+  } else {
+    body.image = state.imageVlm;
+  }
+  setBusy(btn, true, '识别中…');
+  $('out-eyes').classList.add('empty'); $('out-eyes').textContent = '识别中，本机约需数秒…';
+  try {
+    const j = await postJSON('/api/eyes', body);
+    $('out-eyes').classList.remove('empty');
+    $('out-eyes').textContent = j.answer || '（空回答）';
+    $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
+    if (task !== 'followup') state.lastEyes = j.answer || '';
+    if ($('eyes-auto-tts').checked) speakText(j.answer);
+  } catch (e) { $('out-eyes').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '重试'); }
+}
+
+$('btn-eyes-scene').onclick = () => runEyes('scene', $('btn-eyes-scene'));
+$('btn-eyes-toilet').onclick = () => runEyes('toilet', $('btn-eyes-toilet'));
+$('btn-eyes-exit').onclick = () => runEyes('exit', $('btn-eyes-exit'));
+$('btn-eyes-text').onclick = () => runEyes('text', $('btn-eyes-text'));
+$('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
+$('btn-eyes-followup').onclick = () => runEyes('followup', $('btn-eyes-followup'));
+$('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
+$('eyes-followup').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-followup').click(); };
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
+  };
+});
+</script>
+</body>
+</html>
