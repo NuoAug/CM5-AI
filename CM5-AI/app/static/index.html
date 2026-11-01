@@ -83,6 +83,11 @@
   .tab.active { background: rgba(77,208,225,.13); border-color: var(--cyan); color: var(--cyan); }
   .panel { display: none; }
   .panel.active { display: block; }
+  .subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .subtab { padding: 7px 12px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12.5px; }
+  .subtab.active { background: rgba(77,208,225,.1); border-color: var(--line); color: var(--cyan); }
+  .subpanel { display: none; }
+  .subpanel.active { display: block; }
   .hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0 0 12px; }
   .prompt {
     width: 100%; min-height: 74px; resize: vertical; background: #0c1627; color: var(--text);
@@ -123,15 +128,13 @@
     opacity: 0; pointer-events: none; transition: .25s; font-size: 13px; max-width: 80vw; z-index: 99;
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
-  .tips { color: var(--muted); font-size: 12px; line-height: 1.8; }
-  .tips b { color: var(--text); }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">
     <h1>CM5 边缘 AI 功能测试台</h1>
-    <p>MiniCPM-V 4.7 1B + PP-OCRv6_small + Kokoro-82M-zh · 本机调试版</p>
+    <p>MiniCPM-V 4.7 1B · PP-OCRv6 · Paraformer · MeloTTS · 本机调试版</p>
   </div>
   <div class="status">
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
@@ -144,7 +147,7 @@
 <main>
   <section class="left">
     <div class="card">
-      <h2><span>1</span>选择图片</h2>
+      <h2>选择图片</h2>
       <div class="drop" id="drop">
         点击选择图片，或把图片拖到这里<br />
         <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
@@ -162,30 +165,17 @@
         <button id="btn-shot" disabled>拍照</button>
       </div>
     </div>
-
-    <div class="card tips">
-      <b>建议测试顺序</b><br />
-      1. 选“示例：猫” → 场景识别 → 空间关系 → 图像问答<br />
-      2. 选“示例：中文标牌” → 中文 OCR → 朗读文字<br />
-      3. 任意结果点“朗读” → 检查离线中文播报<br /><br />
-      <b>说明</b><br />
-      当前是本机 Windows 调试版，延迟不代表 CM5；部署到树莓派后模型与接口不变，只换运行时。
-    </div>
   </section>
 
   <section class="right">
     <div class="tabs">
-      <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">AI 眼睛</button>
-      <button type="button" class="tab" data-tab="scene" id="tab-scene">场景识别</button>
-      <button type="button" class="tab" data-tab="spatial" id="tab-spatial">空间关系</button>
-      <button type="button" class="tab" data-tab="vqa" id="tab-vqa">图像问答</button>
-      <button type="button" class="tab" data-tab="ocr" id="tab-ocr">中文 OCR</button>
-      <button type="button" class="tab" data-tab="tts" id="tab-tts">语音播报</button>
+      <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">语音交互</button>
+      <button type="button" class="tab" data-tab="debug" id="tab-debug">调试工具</button>
     </div>
 
     <div class="card">
       <div class="panel active" id="panel-eyes">
-        <h2><span>眼睛</span>AI 眼睛</h2>
+        <h2>语音交互</h2>
         <p class="hint">面向视障使用的单句播报。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
         <div class="row">
           <button class="primary eyes-btn" id="btn-eyes-scene">看前方</button>
@@ -220,84 +210,89 @@
         </div>
       </div>
 
-      <div class="panel" id="panel-scene">
-        <h2><span>2</span>场景识别</h2>
-        <p class="hint">输出：主要物体、场景类型、明显异常。适合“画面里有什么”。</p>
-        <textarea class="prompt" id="prompt-scene">请用中文描述这张图片：1) 画面里有哪些主要物体（最多 8 个，每个只列一次，不要重复）；2) 这是什么场景；3) 有没有明显的危险或异常。只描述看得见的内容，不要猜测。</textarea>
-        <div class="row">
-          <button class="primary" id="btn-scene">开始识别</button>
-          <button class="ghost" id="tts-scene" disabled>朗读结果</button>
+      <div class="panel" id="panel-debug">
+        <div class="subtabs">
+          <button type="button" class="subtab active" data-sub="scene">场景识别</button>
+          <button type="button" class="subtab" data-sub="spatial">空间关系</button>
+          <button type="button" class="subtab" data-sub="vqa">图像问答</button>
+          <button type="button" class="subtab" data-sub="ocr">中文 OCR</button>
+          <button type="button" class="subtab" data-sub="tts">语音播报</button>
         </div>
-        <div class="result empty" id="out-scene">等待识别…</div>
-        <div class="meta" id="meta-scene"></div>
-      </div>
 
-      <div class="panel" id="panel-spatial">
-        <h2><span>2</span>空间关系</h2>
-        <p class="hint">强制输出 JSON，检查左右、上下、遮挡。2B 级模型会出错，建议多试几张。</p>
-        <div class="row">
-          <button class="primary" id="btn-spatial-left">左右关系</button>
-          <button id="btn-spatial-occlusion">遮挡判断</button>
-          <button id="btn-spatial-depth">前后 / 上下</button>
-          <button class="ghost" id="tts-spatial" disabled>朗读结果</button>
+        <div class="subpanel active" id="sub-scene">
+          <p class="hint">输出：主要物体、场景类型、明显异常。适合“画面里有什么”。</p>
+          <textarea class="prompt" id="prompt-scene">请用中文描述这张图片：1) 画面里有哪些主要物体（最多 8 个，每个只列一次，不要重复）；2) 这是什么场景；3) 有没有明显的危险或异常。只描述看得见的内容，不要猜测。</textarea>
+          <div class="row">
+            <button class="primary" id="btn-scene">开始识别</button>
+            <button class="ghost" id="tts-scene" disabled>朗读结果</button>
+          </div>
+          <div class="result empty" id="out-scene">等待识别…</div>
+          <div class="meta" id="meta-scene"></div>
         </div>
-        <div class="result empty" id="out-spatial">等待提问…</div>
-        <div class="meta" id="meta-spatial"></div>
-      </div>
 
-      <div class="panel" id="panel-vqa">
-        <h2><span>2</span>图像问答</h2>
-        <p class="hint">自由提问，例如“桌子上有几个杯子？”“这个人手里拿的是什么？”</p>
-        <div class="row">
-          <input type="text" id="vqa-q" placeholder="输入问题，回车提交" style="flex:1;min-width:220px" />
-          <button class="primary" id="btn-vqa">提问</button>
-          <button class="ghost" id="tts-vqa" disabled>朗读回答</button>
+        <div class="subpanel" id="sub-spatial">
+          <p class="hint">强制输出 JSON，检查左右、上下、遮挡。2B 级模型会出错，建议多试几张。</p>
+          <div class="row">
+            <button class="primary" id="btn-spatial-left">左右关系</button>
+            <button id="btn-spatial-occlusion">遮挡判断</button>
+            <button id="btn-spatial-depth">前后 / 上下</button>
+            <button class="ghost" id="tts-spatial" disabled>朗读结果</button>
+          </div>
+          <div class="result empty" id="out-spatial">等待提问…</div>
+          <div class="meta" id="meta-spatial"></div>
         </div>
-        <div class="result empty" id="out-vqa">等待提问…</div>
-        <div class="meta" id="meta-vqa"></div>
-      </div>
 
-      <div class="panel" id="panel-ocr">
-        <h2><span>2</span>中文 OCR</h2>
-        <p class="hint">RapidOCR + PP-OCRv6_small，适合截图、说明书、路牌等印刷体。</p>
-        <div class="row">
-          <button class="primary" id="btn-ocr">识别文字</button>
-          <button class="ghost" id="tts-ocr" disabled>朗读文字</button>
-          <button class="ghost" id="copy-ocr" disabled>复制文本</button>
+        <div class="subpanel" id="sub-vqa">
+          <p class="hint">自由提问，例如“桌子上有几个杯子？”“这个人手里拿的是什么？”</p>
+          <div class="row">
+            <input type="text" id="vqa-q" placeholder="输入问题，回车提交" style="flex:1;min-width:220px" />
+            <button class="primary" id="btn-vqa">提问</button>
+            <button class="ghost" id="tts-vqa" disabled>朗读回答</button>
+          </div>
+          <div class="result empty" id="out-vqa">等待提问…</div>
+          <div class="meta" id="meta-vqa"></div>
         </div>
-        <div class="result empty" id="out-ocr">等待识别…</div>
-        <div class="meta" id="meta-ocr"></div>
-        <div class="ocr-lines" id="ocr-lines"></div>
-      </div>
 
-      <div class="panel" id="panel-tts">
-        <h2><span>2</span>语音播报</h2>
-        <p class="hint">默认 MeloTTS（VITS fp32，本机实测 RTF≈0.35，快）；Kokoro 音色多但明显更慢，按需切换。</p>
-        <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
-        <div class="row tts-box">
-          <select id="tts-engine">
-            <option value="melo">MeloTTS（快，默认）</option>
-            <option value="kokoro">Kokoro-82M（多音色，慢）</option>
-          </select>
-          <select id="tts-sid">
-            <option value="45">Kokoro 音色 45</option>
-            <option value="46">Kokoro 音色 46</option>
-            <option value="47">Kokoro 音色 47</option>
-            <option value="48">Kokoro 音色 48</option>
-            <option value="49">Kokoro 音色 49</option>
-            <option value="50">Kokoro 音色 50</option>
-          </select>
-          <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" />
-          <button class="primary" id="btn-tts">合成并播放</button>
+        <div class="subpanel" id="sub-ocr">
+          <p class="hint">RapidOCR + PP-OCRv6_small，适合截图、说明书、路牌等印刷体。</p>
+          <div class="row">
+            <button class="primary" id="btn-ocr">识别文字</button>
+            <button class="ghost" id="tts-ocr" disabled>朗读文字</button>
+            <button class="ghost" id="copy-ocr" disabled>复制文本</button>
+          </div>
+          <div class="result empty" id="out-ocr">等待识别…</div>
+          <div class="meta" id="meta-ocr"></div>
+          <div class="ocr-lines" id="ocr-lines"></div>
         </div>
-        <audio id="audio" controls></audio>
-        <div class="meta" id="meta-tts"></div>
+
+        <div class="subpanel" id="sub-tts">
+          <p class="hint">默认 MeloTTS（VITS fp32，本机实测 RTF≈0.35，快）；Kokoro 音色多但明显更慢，按需切换。</p>
+          <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
+          <div class="row tts-box">
+            <select id="tts-engine">
+              <option value="melo">MeloTTS（快，默认）</option>
+              <option value="kokoro">Kokoro-82M（多音色，慢）</option>
+            </select>
+            <select id="tts-sid">
+              <option value="45">Kokoro 音色 45</option>
+              <option value="46">Kokoro 音色 46</option>
+              <option value="47">Kokoro 音色 47</option>
+              <option value="48">Kokoro 音色 48</option>
+              <option value="49">Kokoro 音色 49</option>
+              <option value="50">Kokoro 音色 50</option>
+            </select>
+            <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" />
+            <button class="primary" id="btn-tts">合成并播放</button>
+          </div>
+          <audio id="audio" controls></audio>
+          <div class="meta" id="meta-tts"></div>
+        </div>
       </div>
     </div>
   </section>
 </main>
 
-<footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 edge-ai/models 与 edge-ai/runtime</footer>
+<footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 CM5-AI/models 与 CM5-AI/runtime</footer>
 <div id="toast"></div>
 
 <script src="/static/app-core.js"></script>
@@ -840,6 +835,14 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
+  };
+});
+
+document.querySelectorAll('.subtab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.subpanel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active'); $('sub-' + tab.dataset.sub).classList.add('active');
   };
 });
 </script>
