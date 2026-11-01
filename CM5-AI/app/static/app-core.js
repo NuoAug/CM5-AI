@@ -71,7 +71,7 @@ function playUrl(url) {
 
 async function speakSentence(text) {
   let url = null;
-  try { url = (await synthTts(text, 'melo')).url; } catch (e) { return; }
+  try { url = (await synthTts(text, 'piper')).url; } catch (e) { return; }
   if (!url) return;
   await playUrl(url);
   URL.revokeObjectURL(url);

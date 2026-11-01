@@ -86,8 +86,8 @@ async function run() {
   // 8. 播放 URL 会被回收
   check('音频 URL 已回收', revoked.length >= 3, 'revoked=' + revoked.length);
 
-  // 9. 播报固定请求 MeloTTS，不再走浏览器系统语音
-  check('播报固定使用 MeloTTS', lastTtsEngine === 'melo', 'engine=' + lastTtsEngine);
+  // 9. 播报固定请求 Piper，不再走浏览器系统语音
+  check('播报固定使用 Piper', lastTtsEngine === 'piper', 'engine=' + lastTtsEngine);
 
   const failed = results.filter((r) => !r.pass);
   out.className = failed.length ? 'bad' : 'ok';

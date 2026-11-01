@@ -134,7 +134,7 @@
 <header>
   <div class="brand">
     <h1>CM5 边缘 AI 功能测试台</h1>
-    <p>MiniCPM-V 4.7 1B · PP-OCRv6 · Paraformer · MeloTTS · 本机调试版</p>
+    <p>MiniCPM-V 4.7 1B · PP-OCRv6 · Paraformer · Piper · 本机调试版</p>
   </div>
   <div class="status">
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
@@ -262,11 +262,11 @@
         </div>
 
         <div class="subpanel" id="sub-tts">
-          <p class="hint">默认 MeloTTS（VITS fp32，本机实测 RTF≈0.35，快）；Kokoro 音色多但明显更慢，按需切换。</p>
+          <p class="hint">默认 Piper 中文神经语音（zh_CN-huayan-medium，22.05 kHz，按需启动子进程）；Kokoro 音色多但明显更慢，按需切换。</p>
           <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
           <div class="row tts-box">
             <select id="tts-engine">
-              <option value="melo">MeloTTS（快，默认）</option>
+              <option value="piper">Piper 中文（默认）</option>
               <option value="kokoro">Kokoro-82M（多音色，慢）</option>
             </select>
             <select id="tts-sid">
@@ -819,14 +819,14 @@ function stopVoice() {
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
 
 $('btn-voice-test').onclick = async () => {
-  voiceState('MeloTTS 合成中…', true);
+  voiceState('Piper 合成中…', true);
   try {
-    const t = await synthTts('你好，我是你的AI助手，现在可以听到我说话吗', 'melo');
+    const t = await synthTts('你好，我是你的AI助手，现在可以听到我说话吗', 'piper');
     await playUrl(t.url);
     URL.revokeObjectURL(t.url);
-    voiceState('MeloTTS 播放完成', true);
+    voiceState('Piper 播放完成', true);
   } catch (e) {
-    voiceState('MeloTTS 播放失败：' + e.message, false);
+    voiceState('Piper 播放失败：' + e.message, false);
   }
 };
 

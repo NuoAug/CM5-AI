@@ -28,13 +28,18 @@ def check_deps():
 
 
 def check_models():
+    piper_model = Path(
+        os.environ.get("PIPER_MODEL")
+        or (MODELS / "tts" / "piper-zh_CN-huayan-medium" / "zh_CN-huayan-medium.onnx")
+    )
     required = [
         MODELS / "vlm" / "minicpm-v-4.7-1b" / "MiniCPM-V-4_7-1B-Q4_K_M.gguf",
         MODELS / "vlm" / "minicpm-v-4.7-1b" / "mmproj-model-f16.gguf",
         MODELS / "ocr" / "pp-ocrv6-small" / "PP-OCRv6_det_small.onnx",
         MODELS / "ocr" / "pp-ocrv6-small" / "PP-OCRv6_rec_small.onnx",
         MODELS / "ocr" / "pp-ocrv6-small" / "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
-        MODELS / "tts" / "vits-melo-tts-zh_en" / "model.onnx",
+        piper_model,
+        piper_model.with_suffix(".onnx.json"),
         MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09" / "model.int8.onnx",
     ]
     missing = [str(p.relative_to(ROOT)) for p in required if not p.exists()]
@@ -49,6 +54,12 @@ def check_llama():
     ]
     found = next((p for p in candidates if p.exists()), None)
     record("llama-server 可执行", found is not None, str(found.relative_to(ROOT)) if found else "未找到")
+
+
+def check_piper():
+    name = "piper.exe" if os.name == "nt" else "piper"
+    exe = Path(os.environ.get("PIPER_BIN") or (ROOT / "runtime" / "piper" / "piper" / name))
+    record("piper 可执行", exe.exists(), str(exe.relative_to(ROOT)) if exe.exists() else "未找到")
 
 
 def check_ports():
@@ -83,6 +94,7 @@ def main():
     check_deps()
     check_models()
     check_llama()
+    check_piper()
     check_ports()
     check_data_dir()
     failed = [name for name, ok in RESULTS if not ok]

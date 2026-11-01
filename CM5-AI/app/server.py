@@ -3,7 +3,7 @@
 CM5 边缘 AI 本地测试服务
 - VLM：调用本机 llama-server（MiniCPM-V 4.7 1B，OpenAI 兼容接口）
 - OCR：RapidOCR + PP-OCRv6_small（ONNX Runtime）
-- TTS：sherpa-onnx；默认 MeloTTS 中文（VITS fp32），可选 Kokoro-82M-v1.1-zh（int8）
+- TTS：Piper 中文神经语音（zh_CN-huayan-medium，子进程按需合成），可选 Kokoro-82M-v1.1-zh（int8）
 """
 
 import base64
@@ -14,6 +14,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import tempfile
 import threading
 import time
 import wave
@@ -33,7 +35,15 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 OCR_DIR = MODELS / "ocr" / "pp-ocrv6-small"
 TTS_DIR = MODELS / "tts" / "kokoro-int8-multi-lang-v1_1"
-TTS_MELO_DIR = MODELS / "tts" / "vits-melo-tts-zh_en"
+PIPER_DIR = MODELS / "tts" / "piper-zh_CN-huayan-medium"
+PIPER_BIN = Path(
+    os.environ.get("PIPER_BIN")
+    or (ROOT / "runtime" / "piper" / "piper" / ("piper.exe" if os.name == "nt" else "piper"))
+)
+PIPER_MODEL = Path(
+    os.environ.get("PIPER_MODEL")
+    or (PIPER_DIR / "zh_CN-huayan-medium.onnx")
+)
 ASR_DIR = MODELS / "asr" / "sherpa-onnx-paraformer-zh-small-2024-03-09"
 VLM_URL = os.environ.get("VLM_URL", "http://127.0.0.1:8091")
 DATA_DIR = Path(os.environ.get("DATA_DIR") or (ROOT / "data"))
@@ -96,11 +106,10 @@ VLM_LOCK = threading.Lock()
 ASR_LOCK = threading.Lock()
 
 ocr_engine = None
-tts_engine = None
 kokoro_engine = None
 asr_engine = None
 asr_last_used = 0.0
-init_error = {"ocr": None, "tts": None, "kokoro": None, "asr": None}
+init_error = {"ocr": None, "kokoro": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
 
@@ -655,30 +664,59 @@ def init_ocr():
         log.error("[init] OCR failed: %s", exc)
 
 
-def init_tts():
-    global tts_engine
+def piper_error():
+    """Piper 可执行或音色缺失时返回原因，否则返回空串。"""
+    missing = []
+    if not PIPER_BIN.exists():
+        missing.append(f"可执行文件 {PIPER_BIN}")
+    if not PIPER_MODEL.exists():
+        missing.append(f"模型 {PIPER_MODEL}")
+    if not PIPER_MODEL.with_suffix(".onnx.json").exists():
+        missing.append("模型配置 .onnx.json")
+    return "；".join(missing)
+
+
+def piper_tts(text, speed=1.0):
+    """调用 Piper 子进程合成 wav；用完即退，不在服务进程常驻模型。"""
+    err = piper_error()
+    if err:
+        raise RuntimeError("Piper 未就绪：" + err)
     try:
-        cfg = sherpa_onnx.OfflineTtsConfig(
-            model=sherpa_onnx.OfflineTtsModelConfig(
-                vits=sherpa_onnx.OfflineTtsVitsModelConfig(
-                    model=str(TTS_MELO_DIR / "model.onnx"),
-                    lexicon=str(TTS_MELO_DIR / "lexicon.txt"),
-                    tokens=str(TTS_MELO_DIR / "tokens.txt"),
-                    dict_dir=str(TTS_MELO_DIR / "dict"),
-                ),
-                num_threads=TTS_THREADS,
-            ),
-            rule_fsts=",".join(
-                str(TTS_MELO_DIR / name)
-                for name in ("phone.fst", "date.fst", "number.fst", "new_heteronym.fst")
-            ),
-            max_num_sentences=1,
+        length_scale = 1.0 / max(0.5, min(2.0, float(speed or 1.0)))
+    except (TypeError, ValueError):
+        length_scale = 1.0
+    fd, tmp = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    t0 = time.time()
+    try:
+        proc = subprocess.run(
+            [
+                str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", tmp,
+                "--length_scale", f"{length_scale:.3f}",
+            ],
+            input=text.encode("utf-8"),
+            capture_output=True,
+            timeout=90,
+            cwd=str(PIPER_BIN.parent),
         )
-        tts_engine = sherpa_onnx.OfflineTts(cfg)
-        log.info("[init] MeloTTS ready, sample_rate=%s", tts_engine.sample_rate)
-    except Exception as exc:  # noqa: BLE001
-        init_error["tts"] = str(exc)
-        log.error("[init] MeloTTS failed: %s", exc)
+        if proc.returncode != 0 or os.path.getsize(tmp) < 1024:
+            tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
+            raise RuntimeError(f"Piper 合成失败：{tail}")
+        data = Path(tmp).read_bytes()
+        with wave.open(io.BytesIO(data), "rb") as wf:
+            duration = wf.getnframes() / float(wf.getframerate() or 1)
+        gen_ms = int((time.time() - t0) * 1000)
+        log.info("tts engine=piper chars=%d gen=%sms audio=%.2fs", len(text), gen_ms, duration)
+        resp = Response(data, mimetype="audio/wav")
+        resp.headers["X-Gen-Ms"] = str(gen_ms)
+        resp.headers["X-Audio-Seconds"] = str(round(duration, 2))
+        resp.headers["X-TTS-Engine"] = "piper"
+        return resp
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def load_kokoro():
@@ -925,10 +963,10 @@ def status():
             "ocr": {"ready": ocr_engine is not None, "error": init_error["ocr"]},
             "asr": {"ready": asr_engine is not None, "lazy": True, "error": init_error["asr"]},
             "tts": {
-                "ready": tts_engine is not None,
-                "engine": "melo",
+                "ready": not piper_error(),
+                "engine": "piper",
+                "error": piper_error() or None,
                 "kokoro_ready": kokoro_engine is not None,
-                "error": init_error["tts"],
                 "kokoro_error": init_error["kokoro"],
             },
             "memory": {
@@ -1506,34 +1544,27 @@ def api_tts():
         return jsonify({"error": "文本为空"}), 400
     if len(text) > 200:
         return jsonify({"error": "单句过长，请按句子分段合成", "max_len": 200}), 400
-    engine = (body.get("engine") or "melo").lower()
+    engine = (body.get("engine") or "piper").lower()
     sid = int(body.get("sid", 45))
     speed = float(body.get("speed", 1.0))
-    if engine == "melo" and tts_engine is None:
-        with TTS_LOCK:
-            if tts_engine is None:
-                init_tts()
-        if tts_engine is None:
-            return jsonify({"error": "MeloTTS 未初始化：" + str(init_error["tts"])}), 503
+    if engine not in ("piper", "kokoro"):
+        return jsonify({"error": f"未知 TTS 引擎：{engine}"}), 400
     if not try_enter():
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
         t0 = time.time()
+        if engine == "piper":
+            with TTS_LOCK:
+                return piper_tts(text, speed)
         with TTS_LOCK:
-            if engine == "kokoro":
-                try:
-                    synth = load_kokoro()
-                except Exception as exc:  # noqa: BLE001
-                    init_error["kokoro"] = str(exc)
-                    return jsonify({"error": "Kokoro 初始化失败：" + str(exc)}), 503
-                audio = synth.generate(text, sid=sid, speed=speed)
-                sr = synth.sample_rate
-            else:
-                if tts_engine is None:
-                    return jsonify({"error": "MeloTTS 未初始化：" + str(init_error["tts"])}), 503
-                audio = tts_engine.generate(text, sid=0, speed=speed)
-                sr = tts_engine.sample_rate
-            gen_ms = int((time.time() - t0) * 1000)
+            try:
+                synth = load_kokoro()
+            except Exception as exc:  # noqa: BLE001
+                init_error["kokoro"] = str(exc)
+                return jsonify({"error": "Kokoro 初始化失败：" + str(exc)}), 503
+            audio = synth.generate(text, sid=sid, speed=speed)
+            sr = synth.sample_rate
+        gen_ms = int((time.time() - t0) * 1000)
         samples = np.clip(np.asarray(audio.samples, dtype=np.float32) * 32767, -32768, 32767)
         pcm = samples.astype(np.int16).tobytes()
         buf = io.BytesIO()
@@ -1552,6 +1583,8 @@ def api_tts():
         resp.headers["X-Audio-Seconds"] = str(round(len(audio.samples) / sr, 2))
         resp.headers["X-TTS-Engine"] = engine
         return resp
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"TTS 失败：{exc}"}), 500
     finally:
@@ -1568,8 +1601,8 @@ if __name__ == "__main__":
         "start vlm=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s data=%s log=%s",
         VLM_URL, MEM_BUDGET_GB, FRAME_MAX_AGE, DEBUG_SNAPSHOT, DATA_DIR, LOG_FILE,
     )
+    log.info("piper=%s", "ready" if not piper_error() else piper_error())
     threading.Thread(target=init_ocr, daemon=True).start()
-    threading.Thread(target=init_tts, daemon=True).start()
     threading.Thread(target=asr_idle_reaper, daemon=True).start()
     time.sleep(1)
     app.run(host="127.0.0.1", port=8090, threaded=True, debug=False)
