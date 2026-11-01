@@ -171,6 +171,7 @@ EYES_TASKS = {
     "text": {
         "prompt": (
             "只读出画面里最大、最清楚的那块文字，按原文顺序念，不改写、不解释、不翻译；"
+            "孤立数字和年份不要扩写成生产日期、保质期或型号；"
             "看不清就说“看不清”。"
         ),
         "max_tokens": 64,
@@ -1220,8 +1221,20 @@ def extract_compare(cmd):
     return ""
 
 
+CAMERA_OFF = re.compile(
+    r"(?:不要|别|不用)(?:再)?(?:打开|开启|用)?(?:摄像头|相机|镜头)"
+    r"|(?:关闭|关掉|停用)(?:摄像头|相机)|别看了|不看东西"
+)
+TOPIC_SWITCH = re.compile(r"换个话题|聊点别的|只聊天|继续聊天|不看东西")
+DEFINITION = re.compile(r"是什么意思|什么意思|怎么理解|如何定义")
+
+
 def parse_voice_intent(cmd):
     """规则匹配意图，不额外加载模型。"""
+    if CAMERA_OFF.search(cmd) or TOPIC_SWITCH.search(cmd):
+        return "chat", ""
+    if DEFINITION.search(cmd) and "眼前" not in cmd and "手里" not in cmd:
+        return "chat", ""
     if any(w in cmd for w in ("卫生间", "洗手间", "厕所", "WC", "wc", "toilet", "Toilet")):
         return "toilet", ""
     if "出口" in cmd:

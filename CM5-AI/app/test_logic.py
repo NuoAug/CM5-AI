@@ -60,6 +60,22 @@ class IntentTests(unittest.TestCase):
     def test_scene(self):
         self.assertEqual(server.parse_voice_intent("前面有什么"), ("scene", ""))
 
+    def test_camera_off_goes_chat(self):
+        intent, _ = server.parse_voice_intent("不要打开摄像头")
+        self.assertEqual(intent, "chat")
+
+    def test_topic_switch_goes_chat(self):
+        intent, _ = server.parse_voice_intent("换个话题，不看东西")
+        self.assertEqual(intent, "chat")
+
+    def test_definition_question_goes_chat(self):
+        intent, _ = server.parse_voice_intent("这个是什么意思")
+        self.assertEqual(intent, "chat")
+
+    def test_definition_with_physical_target_keeps_vision(self):
+        intent, _ = server.parse_voice_intent("眼前这个是什么意思")
+        self.assertNotEqual(intent, "chat")
+
 
 def _box(x0, y0, x1, y1):
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
