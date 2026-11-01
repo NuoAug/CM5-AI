@@ -689,6 +689,55 @@ def prune_tts_cache(max_bytes=50 * 1024 * 1024):
         log.warning("tts cache prune failed: %s", exc)
 
 
+def smooth_piper_wav(wav_bytes, max_pause=0.15, long_pause=0.28):
+    """压掉 Piper 输出里过长的句内停顿，让播报更连贯；短停顿保持不变。"""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            params = wf.getparams()
+            samples = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+        sr = params.framerate
+        if not sr or samples.size == 0:
+            return wav_bytes
+        frame = max(1, int(sr * 0.02))
+        count = len(samples) // frame
+        rms = np.array([
+            np.sqrt(np.mean(samples[i * frame:(i + 1) * frame].astype(np.float32) ** 2))
+            for i in range(count)
+        ])
+        quiet = rms < 200
+        out = []
+        i = 0
+        while i < count:
+            if quiet[i]:
+                j = i
+                while j < count and quiet[j]:
+                    j += 1
+                if (j - i) * 0.02 >= long_pause:
+                    keep = int(max_pause * sr)
+                    out.append(samples[i * frame:i * frame + keep])
+                else:
+                    out.append(samples[i * frame:j * frame])
+                i = j
+            else:
+                j = i
+                while j < count and not quiet[j]:
+                    j += 1
+                out.append(samples[i * frame:j * frame])
+                i = j
+        out.append(samples[count * frame:])
+        merged = np.concatenate(out) if out else samples
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
+            wf.setnchannels(params.nchannels)
+            wf.setsampwidth(params.sampwidth)
+            wf.setframerate(params.framerate)
+            wf.writeframes(merged.astype(np.int16).tobytes())
+        return buf.getvalue()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("piper silence smoothing failed: %s", exc)
+        return wav_bytes
+
+
 def piper_tts(text, speed=1.0):
     """调用 Piper 子进程合成 wav；带磁盘缓存，固定短语第二次 0 ms。"""
     err = piper_error()
@@ -699,7 +748,7 @@ def piper_tts(text, speed=1.0):
     except (TypeError, ValueError):
         length_scale = 1.0
     key = hashlib.sha1(
-        f"piper|{PIPER_MODEL.name}|{PIPER_MODEL.stat().st_size}|{length_scale:.3f}|{text}".encode("utf-8")
+        f"piper-v2|{PIPER_MODEL.name}|{PIPER_MODEL.stat().st_size}|{length_scale:.3f}|{text}".encode("utf-8")
     ).hexdigest()[:16]
     cache_path = TTS_CACHE_DIR / f"piper-{key}.wav"
     hit = cache_path.exists() and cache_path.stat().st_size > 1024
@@ -714,6 +763,7 @@ def piper_tts(text, speed=1.0):
                 [
                     str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", tmp,
                     "--length_scale", f"{length_scale:.3f}",
+                    "--sentence_silence", "0.12",
                 ],
                 input=text.encode("utf-8"),
                 capture_output=True,
@@ -723,7 +773,7 @@ def piper_tts(text, speed=1.0):
             if proc.returncode != 0 or os.path.getsize(tmp) < 1024:
                 tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
                 raise RuntimeError(f"Piper 合成失败：{tail}")
-            data = Path(tmp).read_bytes()
+            data = smooth_piper_wav(Path(tmp).read_bytes())
             cache_path.write_bytes(data)
             prune_tts_cache()
         finally:

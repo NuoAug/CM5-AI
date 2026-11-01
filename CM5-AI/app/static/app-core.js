@@ -107,11 +107,26 @@ async function pumpPlayer(gen) {
   }
 }
 
+function chunkSentences(text, maxLen = 180) {
+  const parts = splitSentences(text);
+  const chunks = [];
+  let buf = '';
+  for (const part of parts) {
+    if (buf && (buf + part).length > maxLen) {
+      chunks.push(buf);
+      buf = '';
+    }
+    buf += part;
+  }
+  if (buf) chunks.push(buf);
+  return chunks;
+}
+
 async function speakAll(text) {
   if (!text) return;
   stopPlayer();
   const gen = player.gen;
-  splitSentences(text).forEach((s) => player.queue.push(s));
+  chunkSentences(text).forEach((s) => player.queue.push(s));
   await pumpPlayer(gen);
 }
 

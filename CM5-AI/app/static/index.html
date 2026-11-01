@@ -269,7 +269,6 @@
             <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" style="max-width:120px" />
             <button class="primary" id="btn-tts">合成并播放</button>
           </div>
-          <audio id="audio" controls></audio>
           <div class="meta" id="meta-tts"></div>
         </div>
       </div>
@@ -279,6 +278,7 @@
 
 <footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 CM5-AI/models 与 CM5-AI/runtime</footer>
 <div id="toast"></div>
+<audio id="audio" hidden></audio>
 
 <script src="/static/app-core.js"></script>
 <script>
@@ -584,6 +584,7 @@ async function sendChat(q, btn) {
     const decoder = new TextDecoder();
     let buffer = '';
     let text = '';
+    let answerText = '';
     out.textContent = '';
     while (true) {
       const { value, done } = await reader.read();
@@ -601,14 +602,15 @@ async function sendChat(q, btn) {
         if (payload.sentence) {
           text += payload.sentence;
           out.textContent = text;
-          if ($('eyes-auto-tts').checked) {
-            player.queue.push(payload.sentence);
-            pumpPlayer(it.gen);
-          }
         }
-        if (payload.done && payload.answer) out.textContent = payload.answer;
+        if (payload.done && payload.answer) {
+          answerText = payload.answer;
+          out.textContent = payload.answer;
+        }
       }
     }
+    // 等整段回答生成完再一次性播报，避免流式逐句合成造成的句间停顿
+    if ($('eyes-auto-tts').checked) speakAll(answerText || text);
     $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
