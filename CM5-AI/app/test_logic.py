@@ -5,6 +5,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 import server
+import guide
 
 
 class SettleTests(unittest.TestCase):
@@ -275,6 +276,53 @@ class ResourceConfigTests(unittest.TestCase):
         self.assertGreaterEqual(server.OCR_INTRA_THREADS, 1)
         self.assertGreaterEqual(server.OCR_INTER_THREADS, 1)
         self.assertGreaterEqual(server.ASR_THREADS, 1)
+
+
+class GuideDecisionTests(unittest.TestCase):
+    def metrics(self, **kw):
+        base = {"left": 80.0, "center": 90.0, "right": 80.0, "near": 95.0, "mid": 80.0, "road": 0.0, "stairs": 0.0, "person": 0.0}
+        base.update(kw)
+        return base
+
+    def test_clear_corridor_is_straight(self):
+        self.assertEqual(guide.decide(self.metrics()), ("straight", "clear"))
+
+    def test_road_stops(self):
+        self.assertEqual(guide.decide(self.metrics(road=20.0)), ("stop", "road"))
+
+    def test_stairs_stop_before_others(self):
+        self.assertEqual(guide.decide(self.metrics(stairs=5.0, road=30.0)), ("stop", "stairs"))
+
+    def test_person_stops(self):
+        self.assertEqual(guide.decide(self.metrics(person=9.0)), ("stop", "person"))
+
+    def test_near_blocked(self):
+        self.assertEqual(guide.decide(self.metrics(near=45.0)), ("stop", "blocked"))
+
+    def test_ahead_blocked(self):
+        self.assertEqual(guide.decide(self.metrics(mid=25.0)), ("stop", "ahead"))
+
+    def test_left_lane_used_when_center_blocked(self):
+        self.assertEqual(
+            guide.decide(self.metrics(center=59.0, left=70.0, right=40.0)),
+            ("left", "obstacle"),
+        )
+
+    def test_right_lane_used_when_left_worse(self):
+        self.assertEqual(
+            guide.decide(self.metrics(center=59.0, left=35.0, right=65.0)),
+            ("right", "obstacle"),
+        )
+
+    def test_both_sides_blocked_stops(self):
+        self.assertEqual(
+            guide.decide(self.metrics(center=59.0, left=40.0, right=40.0)),
+            ("stop", "blocked"),
+        )
+
+    def test_threshold_boundaries(self):
+        self.assertEqual(guide.decide(self.metrics(road=15.0)), ("stop", "road"))
+        self.assertEqual(guide.decide(self.metrics(center=60.0)), ("straight", "clear"))
 
 
 if __name__ == "__main__":

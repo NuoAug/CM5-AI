@@ -19,7 +19,7 @@ def record(name, ok, detail=""):
 
 def check_deps():
     missing = []
-    for mod in ("flask", "numpy", "psutil", "requests", "PIL", "rapidocr", "sherpa_onnx"):
+    for mod in ("flask", "numpy", "psutil", "requests", "PIL", "rapidocr", "sherpa_onnx", "onnxruntime"):
         try:
             __import__(mod)
         except Exception:
@@ -62,6 +62,17 @@ def check_piper():
     record("piper 可执行", exe.exists(), str(exe.relative_to(ROOT)) if exe.exists() else "未找到")
 
 
+def check_guide():
+    model = Path(
+        os.environ.get("GUIDE_MODEL")
+        or (MODELS / "guide" / "segformer-b0-ade" / "model.onnx")
+    )
+    if model.exists():
+        print("PASS 引导模型  " + str(model.relative_to(ROOT)))
+    else:
+        print("WARN 引导模型未下载，无盲道引导不可用（不影响其它功能）")
+
+
 def check_ports():
     busy = []
     for port in (8090, 8091):
@@ -95,6 +106,7 @@ def main():
     check_models()
     check_llama()
     check_piper()
+    check_guide()
     check_ports()
     check_data_dir()
     failed = [name for name, ok in RESULTS if not ok]

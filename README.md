@@ -28,10 +28,11 @@ AI-Deployment/
    ├─ 启动测试台.bat      双击启动；关闭窗口即停止
    ├─ app/
    │  ├─ server.py        Flask 服务，端口 8090
+   │  ├─ guide.py         无盲道引导分割与方向决策
    │  ├─ static/index.html 测试页面
    │  ├─ start.ps1 / stop.ps1
    │  └─ requirements.txt
-   ├─ models/             模型文件（VLM / OCR / ASR / TTS）
+   ├─ models/             模型文件（VLM / OCR / ASR / TTS / 引导分割）
    ├─ runtime/            llama.cpp、Piper、Python、MinGW
    ├─ samples/            测试图（猫、中文标牌、场景与盲道示例）
    ├─ logs/               运行日志，不入库
@@ -90,6 +91,8 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 **调试工具**（二级页签）：场景识别、空间关系、图像问答、中文 OCR、语音播报，用于单独调试各模块。
 
+**无盲道引导**（试验）：打开摄像头后连续判断近处可走区域，只播报直行 / 向左一点 / 向右一点 / 停下；载入静态图时只跑一帧。详见下文「无盲道引导」。
+
 「选择图片」内置 14 个示例：猫、中文标牌、楼梯、走廊、斑马线、桌面物品、电梯、超市货架，以及直行、圆点转向、过街、被占用、站内、破损 6 种盲道场景；示例图均为 AI 生成，仅用于界面与模型测试。下拉选择即载入，「清除图片」清空预览与已载入画面；摄像头按钮为开/关切换，载入示例或上传图片会自动关闭摄像头，避免取帧时仍用摄像头画面。
 
 ## 接口
@@ -102,9 +105,52 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`sid`、`speed` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
+| `/api/guide` | POST | `image`（JPEG base64），返回 `direction` / `reason` / `metrics` / `latency_ms` |
 
 `task` 取值：`scene`、`toilet`、`exit`、`item`、`text`、`followup`。
 图片统一用 `data:image/jpeg;base64,` 形式。
+
+## 无盲道引导（试验）
+
+没有盲道时，用轻量语义分割判断近处可走地面，只输出四个方向：直行、向左一点、向右一点、停下。不做目的地导航。
+
+**算法**
+- 模型：SegFormer-B0（ADE20K，ONNX 动态输入），输入 384×288，ONNX Runtime CPU 2 线程，首次请求时加载
+- 可走类别：floor / sidewalk / rug / path；road 单独判危险，不并入可走区域
+- 危险优先：台阶、扶梯、楼梯 > 2%，人 > 8%，道路 > 15% 直接停；近处可走 < 50% 或中距 < 30% 也停
+- 方向：中列可走 ≥ 60% 判直行，否则选左/右列 ≥ 55% 中更高的一侧；两侧都不够就停
+- 前端约 3 fps 轮询，连续 2 帧一致才切换方向；语音最短间隔 4 秒，固定短语命中 Piper 缓存
+
+**使用**
+1. 打开摄像头，或载入一张示例图
+2. 切到「无盲道引导」，点「开始引导」
+3. 摄像头模式持续引导；静态图只跑一帧，用于验证阈值
+4. 切走页签、关闭摄像头或清除图片会自动停止
+
+**模型文件**（不入库）
+- 下载：`https://hf-mirror.com/lquint/segformer-b0-finetuned-ade-512-512-onnx/resolve/main/onnx/model.onnx`
+- 放到 `CM5-AI/models/guide/segformer-b0-ade/model.onnx`，约 15.3 MB
+- SHA256：`9DEED8464DCA9F1A1F36B23D4F67FF1AB7D59CCFF4DB96EA247F6AB2B3C240F9`
+- 许可：导出仓库未单独声明；原模型为 NVIDIA SegFormer，采用 NVIDIA Source Code License，仅限非商业研究/评估，商用前需替换
+
+**已验证（Windows 开发机，ONNX Runtime 2 线程，含本机 HTTP）**
+
+| 样本 | 结果 |
+|---|---|
+| 走廊 | 直行（中列 77.9%） |
+| 楼梯 | 停下（台阶） |
+| 斑马线 | 停下（道路） |
+| 盲道直行 | 直行 |
+| 超市货架 | 停下（近处无法通行） |
+
+单帧端到端 97–103 ms；模型加载后本服务内存 0.54 → 0.82 GB。CM5 上的延迟与内存待实测。
+
+**已知问题**
+- 站内灰色地面近处被判成道路，近处可走 49.1%，会保守停车
+- 「盲道被占用」样本中间留缝，模型判直行；窄缝阻挡还没量化
+- 只用单目 2D 分割，测不到路缘高度、玻璃和悬空物；不支持过马路、楼梯、扶梯
+- 引导循环与 VLM 同时跑会抢四核 CPU；真机导航时应让 VLM 空闲，CM5 的 3 fps 目标待实测
+- 真机 CSI 摄像头取帧（Camera Module 3 Wide，`/picam/shot`）尚未接入，当前测试台用浏览器摄像头
 
 ## 内存预算
 
@@ -181,6 +227,8 @@ $env:MEM_BUDGET_GB = "3.2"
 | `MEM_BUDGET_GB` | 3.6 | 模型侧内存预算 |
 | `PIPER_BIN` | `runtime/piper/piper/piper.exe` | Piper 可执行文件路径，Pi 端指向 aarch64 版 |
 | `PIPER_MODEL` | `models/tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx` | Piper 中文音色模型路径 |
+| `GUIDE_MODEL` | `models/guide/segformer-b0-ade/model.onnx` | 无盲道引导分割模型路径 |
+| `GUIDE_THREADS` | 2 | 引导分割的 ONNX Runtime 线程数 |
 
 **播报方式（v1.0.24）**
 
@@ -257,3 +305,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.29 | 新增 6 张盲道示例图：直行、圆点转向、过街、被占用、站内、破损 |
 | v1.0.30 | 示例图下拉改为选中即载入，新增「清除图片」与摄像头开/关切换 |
 | v1.0.31 | 示例下拉的「选择示例图…」占位项设为不可选，只在未载入时显示 |
+| v1.1.0 | 新增无盲道引导（试验）：SegFormer-B0 分割 + 保守方向决策，测试台新增引导页签 |

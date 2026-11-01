@@ -31,6 +31,8 @@ from PIL import Image
 from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
 
+import guide
+
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 OCR_DIR = MODELS / "ocr" / "pp-ocrv6-small"
@@ -1019,6 +1021,7 @@ def status():
                 "engine": "piper",
                 "error": piper_error() or None,
             },
+            "guide": guide.status(),
             "memory": {
                 "model_gb": round(vlm_rss / 1024 ** 3, 2),
                 "app_gb": round(app_rss / 1024 ** 3, 2),
@@ -1582,6 +1585,37 @@ def api_ocr():
         return jsonify({"text": full_text, "lines": lines, "latency_ms": latency})
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"OCR 失败：{exc}"}), 500
+    finally:
+        leave()
+
+
+@app.post("/api/guide")
+def api_guide():
+    if over_budget():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        image = body.get("image", "")
+        img = decode_image(image)
+        frame_id = str(body.get("frame_id") or "").strip()
+        result = guide.guide_frame(img)
+        m = result["metrics"]
+        log.info(
+            "guide direction=%s reason=%s frame=%s image=%s lanes=%.1f/%.1f/%.1f near=%.1f mid=%.1f road=%.1f stairs=%.1f person=%.1f latency=%sms",
+            result["direction"], result["reason"], frame_id, b64_md5(image),
+            m["left"], m["center"], m["right"], m["near"], m["mid"],
+            m["road"], m["stairs"], m["person"], result["latency_ms"],
+        )
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except Exception as exc:  # noqa: BLE001
+        log.exception("guide failed")
+        return jsonify({"error": f"引导识别失败：{exc}"}), 500
     finally:
         leave()
 

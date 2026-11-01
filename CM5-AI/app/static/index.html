@@ -188,6 +188,7 @@
     <div class="tabs">
       <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">语音交互</button>
       <button type="button" class="tab" data-tab="debug" id="tab-debug">调试工具</button>
+      <button type="button" class="tab" data-tab="guide" id="tab-guide">无盲道引导</button>
     </div>
 
     <div class="card">
@@ -220,6 +221,18 @@
           <button id="btn-voice-test">语音试听</button>
           <span id="voice-state" class="voice-state">未开启 · 先说「小冰小冰」再说指令</span>
         </div>
+      </div>
+
+      <div class="panel" id="panel-guide">
+        <h2>无盲道引导（试验）</h2>
+        <p class="hint">用轻量分割模型判断近处可走地面，只给直行 / 偏左 / 偏右 / 停下。不能替代盲杖，不支持过马路、楼梯、扶梯；请在有陪同的平坦场地测试。</p>
+        <div class="row">
+          <button class="primary" id="btn-guide-start">开始引导</button>
+          <button id="btn-guide-stop" disabled>停止引导</button>
+          <label class="auto"><input type="checkbox" id="guide-voice" checked /> 语音提示</label>
+        </div>
+        <div class="result empty" id="out-guide">未开始</div>
+        <div class="meta" id="meta-guide"></div>
       </div>
 
       <div class="panel" id="panel-debug">
@@ -394,6 +407,7 @@ $('sample-image').onchange = async () => {
   }
 };
 $('btn-clear').onclick = () => {
+  if (guideState.running) stopGuide();
   state.image = null; state.imageVlm = null; state.imageFull = null;
   const canvas = $('preview');
   canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
@@ -405,6 +419,7 @@ $('btn-clear').onclick = () => {
 
 let stream = null;
 function closeCamera() {
+  if (guideState.running) stopGuide();
   if (stream) {
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -436,6 +451,116 @@ $('btn-shot').onclick = async () => {
   $('sample-image').value = '';
   toast('拍照完成');
 };
+
+// ---------- 无盲道引导（试验） ----------
+const GUIDE_LABEL = { straight: '直行', left: '向左一点', right: '向右一点', stop: '停下' };
+const GUIDE_REASON = { clear: '可走', obstacle: '需要绕行', road: '道路', stairs: '台阶', person: '有人', ahead: '前方障碍', blocked: '无法通行' };
+const guideState = { running: false, timer: null, busy: false, once: false, candidate: null, count: 0, spoken: '', spokenAt: 0 };
+
+function guidePhrase(j) {
+  if (j.direction === 'left') return '向左一点';
+  if (j.direction === 'right') return '向右一点';
+  if (j.direction === 'straight') return '继续直行';
+  return {
+    road: '前方是道路，请停下',
+    stairs: '前方有台阶，请停下',
+    person: '前方有人，请停下',
+    ahead: '前方有障碍，请停下',
+    blocked: '前方无法通行，请停下',
+  }[j.reason] || '请停下';
+}
+
+async function captureGuideFrame() {
+  const v = $('video');
+  let canvas = null;
+  if (v.style.display === 'block' && v.videoWidth) {
+    canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth; canvas.height = v.videoHeight;
+    canvas.getContext('2d').drawImage(v, 0, 0);
+  } else if (state.imageFull || state.image) {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = state.imageFull || state.image; });
+    canvas = document.createElement('canvas');
+    canvas.width = img.width; canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+  }
+  return canvas ? canvasDataUrl(canvas, 512, 0.8) : null;
+}
+
+function stopGuide(keepText) {
+  guideState.running = false;
+  guideState.busy = false;
+  if (guideState.timer) { clearTimeout(guideState.timer); guideState.timer = null; }
+  $('btn-guide-start').disabled = false;
+  $('btn-guide-stop').disabled = true;
+  if (!keepText) {
+    $('out-guide').textContent = '已停止';
+    $('meta-guide').textContent = '';
+  }
+}
+
+function startGuide() {
+  if (guideState.running) return;
+  const live = $('video').style.display === 'block' && $('video').videoWidth;
+  if (!live && !(state.imageFull || state.image)) {
+    toast('请先打开摄像头或载入图片');
+    return;
+  }
+  guideState.running = true;
+  guideState.once = !live;
+  guideState.candidate = null; guideState.count = 0;
+  guideState.spoken = ''; guideState.spokenAt = 0;
+  $('btn-guide-start').disabled = true;
+  $('btn-guide-stop').disabled = false;
+  $('out-guide').classList.remove('empty');
+  $('out-guide').textContent = '识别中…';
+  $('meta-guide').textContent = '';
+  guideTick();
+}
+
+async function guideTick() {
+  if (!guideState.running || guideState.busy) return;
+  guideState.busy = true;
+  try {
+    const image = await captureGuideFrame();
+    if (!guideState.running) return;
+    if (!image) { stopGuide(); toast('没有可用画面'); return; }
+    const j = await postJSON('/api/guide', { image, frame_id: currentFrame.id || 'guide' });
+    if (!guideState.running) return;
+    applyGuide(j);
+    if (guideState.once) { stopGuide(true); return; }
+    guideState.timer = setTimeout(guideTick, 250);
+  } catch (e) {
+    stopGuide();
+    $('out-guide').textContent = '引导失败：' + e.message;
+    return;
+  } finally {
+    guideState.busy = false;
+  }
+}
+
+function applyGuide(j) {
+  const m = j.metrics;
+  $('out-guide').textContent = `${GUIDE_LABEL[j.direction] || j.direction}（${GUIDE_REASON[j.reason] || j.reason}）`;
+  $('meta-guide').textContent =
+    `左 ${m.left}% · 中 ${m.center}% · 右 ${m.right}% · 近 ${m.near}% · 中距 ${m.mid}% · ` +
+    `道路 ${m.road}% · 台阶 ${m.stairs}% · 人 ${m.person}% · ${j.latency_ms}ms`;
+  const urgent = j.reason === 'road' || j.reason === 'stairs' || j.reason === 'person';
+  if (j.direction === guideState.candidate) guideState.count += 1;
+  else { guideState.candidate = j.direction; guideState.count = 1; }
+  if (!urgent && guideState.count < (guideState.once ? 1 : 2)) return;
+  const phrase = guidePhrase(j);
+  const now = Date.now();
+  const changed = phrase !== guideState.spoken;
+  if ($('guide-voice').checked && (urgent || changed) && now - guideState.spokenAt >= 4000) {
+    guideState.spoken = phrase;
+    guideState.spokenAt = now;
+    speakAll(phrase);
+  }
+}
+
+$('btn-guide-start').onclick = startGuide;
+$('btn-guide-stop').onclick = () => stopGuide();
 
 async function postJSON(url, body, signal) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
@@ -885,6 +1010,7 @@ $('btn-voice-test').onclick = async () => {
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
+    if (tab.dataset.tab !== 'guide' && guideState.running) stopGuide();
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
