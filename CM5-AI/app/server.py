@@ -1202,21 +1202,11 @@ def api_eyes():
         leave()
 
 
-DEFAULT_WAKE = "小V"
-
-# 默认唤醒词的常见同音识别：小/晓 + V 的各类音译写法
-WAKE_HEAD = "小晓"
-WAKE_TAIL = "vV薇微威伟维唯为围未味魏卫玮炜纬伪萎韦违巍"
+# 唤醒词固定为「小冰」，兼容常见同音识别：小/晓/筱 + bing/bin 的多种写法
+WAKE_HEAD = "小晓筱"
+WAKE_TAIL = "冰兵并病丙饼秉炳柄禀斌宾滨彬缤濒"
 WAKE_SEP = r"[\s，,。.、！!？?·]*"
-
-
-def wake_pattern(wake):
-    """默认唤醒词兼容常见同音识别；自定义时按字面匹配，允许字间停顿或标点。"""
-    wake = (wake or DEFAULT_WAKE).strip()
-    if re.fullmatch(r"小[vV]", wake, re.I):
-        return re.compile(rf"[{WAKE_HEAD}]{WAKE_SEP}[{WAKE_TAIL}]", re.I)
-    chars = [re.escape(c) for c in wake if not c.isspace()]
-    return re.compile(WAKE_SEP.join(chars), re.I)
+WAKE_PATTERN = re.compile(rf"[{WAKE_HEAD}]{WAKE_SEP}[{WAKE_TAIL}]", re.I)
 
 
 ACK_ONLY = re.compile(r"^(?:喂|哎|嗯|你好|您好|在吗|在不在|听得到吗|能听到吗)$")
@@ -1331,7 +1321,7 @@ def api_voice():
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
     print(f"[voice] src_sr={src_sr} dur={len(samples) / 16000:.1f}s text={text}", flush=True)
 
-    pattern = wake_pattern(body.get("wake"))
+    pattern = WAKE_PATTERN
     armed = bool(body.get("armed"))
     if not armed and not pattern.search(text):
         return jsonify(

@@ -81,19 +81,16 @@ class IntentTests(unittest.TestCase):
 
 
 class WakeTests(unittest.TestCase):
-    def test_default_wake_homophones(self):
-        pat = server.wake_pattern("小V")
-        for text in ("小V 前面有什么", "小微前面有什么", "小维你看一下", "小威", "晓V你好", "小 v"):
+    def test_wake_homophones(self):
+        pat = server.WAKE_PATTERN
+        for text in ("小冰 前面有什么", "晓冰", "小兵", "小并", "小病", "小斌", "小彬", "小滨", "小 冰", "小，冰", "小冰小冰前面有什么"):
             self.assertRegex(text, pat)
 
-    def test_default_wake_ignores_plain_speech(self):
-        pat = server.wake_pattern("小V")
-        self.assertIsNone(pat.search("前面有什么"))
+    def test_wake_ignores_plain_speech(self):
+        self.assertIsNone(server.WAKE_PATTERN.search("前面有什么"))
 
-    def test_custom_wake_literal(self):
-        pat = server.wake_pattern("你好眼睛")
-        self.assertIsNone(pat.search("你好 现在"))
-        self.assertRegex("你好眼睛，读一下", pat)
+    def test_wake_strips_all_occurrences(self):
+        self.assertEqual(server.WAKE_PATTERN.sub("", "小冰小冰，前面有什么"), "，前面有什么")
 
     def test_ack_is_wake_only(self):
         self.assertTrue(server.ACK_ONLY.fullmatch("你好"))

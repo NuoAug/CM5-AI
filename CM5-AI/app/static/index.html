@@ -201,9 +201,8 @@
         </div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
-          <input type="text" id="wake-word" placeholder="唤醒词" style="width:120px;flex:0 0 auto" />
           <button id="btn-voice-test">语音试听</button>
-          <span id="voice-state" class="voice-state">未开启 · 先说「小V」再说指令</span>
+          <span id="voice-state" class="voice-state">未开启 · 先说「小冰小冰」再说指令</span>
         </div>
       </div>
 
@@ -649,16 +648,7 @@ let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false, vArmedUntil = 
 const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
 const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
 const ARMED_MS = 15000;     // 唤醒后等待指令的时间
-
-const WAKE_KEY = 'edge-ai-wake';
-function currentWake() {
-  return ($('wake-word').value || '小V').trim();
-}
-$('wake-word').value = localStorage.getItem(WAKE_KEY) || '小V';
-$('wake-word').oninput = () => {
-  localStorage.setItem(WAKE_KEY, $('wake-word').value.trim());
-  if (!vOn) voiceState(`未开启 · 先说「${currentWake()}」再说指令`, false);
-};
+const WAKE_WORD = '小冰小冰';    // 显示用唤醒词；服务端同时接受单个「小冰」及同音词
 
 function voiceState(text, on) {
   $('voice-state').textContent = text;
@@ -722,7 +712,7 @@ async function sendUtterance(chunks) {
   try {
     const audio = await blobToDataUrl(encodeWav(boostChunks(chunks), vSampleRate));
     const frame = await captureFrame();
-    const body = { audio, context: state.lastEyes, wake: currentWake(), session_id: sessionId, armed: performance.now() < vArmedUntil };
+    const body = { audio, context: state.lastEyes, session_id: sessionId, armed: performance.now() < vArmedUntil };
     if (frame) {
       body.image = frame.full;
       body.image_vlm = frame.small;
@@ -733,7 +723,7 @@ async function sendUtterance(chunks) {
     const j = await postJSON('/api/voice', body, it.signal);
     if (it.gen !== interactionGen) return;
     if (j.intent === 'none') {
-      voiceState(`没听到「${currentWake()}」·识别到「${j.text || '空'}」`, true);
+      voiceState(`没听到「${WAKE_WORD}」·识别到「${j.text || '空'}」`, true);
       return;
     }
     if (j.intent === 'wake') vArmedUntil = performance.now() + ARMED_MS;
@@ -741,7 +731,7 @@ async function sendUtterance(chunks) {
     $('out-eyes').textContent = j.answer || '（空回答）';
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
-    voiceState(`监听中 · 说「${currentWake()}」`, true);
+    voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
     if ($('eyes-auto-tts').checked && j.answer) speakAll(j.answer);
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
@@ -807,7 +797,7 @@ async function startVoice() {
     vproc.connect(vctx.destination);
     vOn = true;
     $('btn-voice').textContent = '关闭语音唤醒';
-    voiceState(`监听中 · 说「${currentWake()}」`, true);
+    voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
   } catch (e) {
     stopVoice();
     voiceState('麦克风打开失败：' + e.message, false);
@@ -823,7 +813,7 @@ function stopVoice() {
   if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
   vChunks = []; vSpeaking = false; vSilence = 0;
   $('btn-voice').textContent = '开启语音唤醒';
-  voiceState(`未开启 · 先说「${currentWake()}」再说指令`, false);
+  voiceState(`未开启 · 先说「${WAKE_WORD}」再说指令`, false);
 }
 
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());

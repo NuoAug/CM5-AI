@@ -82,10 +82,10 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 视觉按钮在相机开启时会即时抓拍，并带 `frame_id` / `captured_at`；超过 `FRAME_MAX_AGE` 秒的画面会被拒绝并要求重拍。手动上传的静态图标记为「上传」，不会被称为当前视野。
 
-**语音唤醒**：点「开启语音唤醒」授权麦克风后常开监听。先说唤醒词，再说指令，例如
-「小V，前面有什么」「小V，帮我找一下水杯」「小V，卫生间在哪」。
-唤醒词可在输入框改，保存在浏览器本地；默认「小V」兼容小晓、小薇、小微、小威、小伟、小维、小唯、小为、小围、小未、小味、小魏、小卫、小玮、小炜、小纬、小伪、小萎、小韦、小违、小巍等识别结果，字间可带空格或标点。
-唤醒词与指令分开说也可以：只听到唤醒词时回答「我在，请说」，随后 15 秒内直接说指令即可，不必重复唤醒词；超时未说指令则回到需要唤醒词的状态。
+**语音唤醒**：点「开启语音唤醒」授权麦克风后常开监听。先说唤醒词「小冰小冰」，再说指令，例如
+「小冰小冰，前面有什么」「小冰小冰，帮我找一下水杯」「小冰小冰，卫生间在哪」。
+唤醒词固定为「小冰小冰」，不再提供自定义输入；单说「小冰」也能唤醒，兼容小晓/晓冰、小兵、小并、小病、小斌、小彬、小滨等常见同音识别，字间可带空格或标点，连续说两次会一并去掉。
+只听到唤醒词时回答「我在，请说」，随后 15 秒内直接说指令即可，不必重复唤醒词；超时未说指令则回到需要唤醒词的状态。
 每次识别失败界面会显示「识别到「…」」，方便看清 ASR 实际听到了什么；播报期间不采集麦克风，避免把自己的声音当成指令。
 旁边的「语音试听」按钮只播一句测试语，用来确认服务端 MeloTTS 是否真的发声。
 
@@ -97,7 +97,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 |---|---|---|
 | `/api/status` | GET | 无，返回 VLM / OCR / ASR / TTS 状态、内存与模型 CPU 占用 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question` |
-| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`wake`、`armed`（免唤醒窗口内为 true）、`session_id` |
+| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`armed`（免唤醒窗口内为 true）、`session_id` |
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`sid`、`speed` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
@@ -230,3 +230,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.0.16 | 顶栏新增模型 CPU 占用百分比，只统计 llama-server 与本服务进程 |
 | v1.0.17 | 修复 start.ps1 / stop.ps1 缺少 UTF-8 BOM 导致 Windows PowerShell 5.1 双击启动报错 |
 | v1.0.18 | 唤醒同音词扩展、唤醒后等待 15 秒；语音试听改称「AI 助手」；启动窗口输入 stop 停止，移除独立停止 bat |
+| v1.0.19 | 唤醒词固定为「小冰小冰」并扩展同音词，移除自定义唤醒词输入与 `wake` 参数 |
