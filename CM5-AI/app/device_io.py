@@ -363,14 +363,26 @@ class AlsaPlayer:
         return proc.returncode == 0
 
     def stop(self) -> None:
+        """取消/抢占：立即断开播放进程，不等缓冲区排空。"""
         with self._lock:
             proc = self._proc
-        if proc is not None:
+            self._proc = None
+            stream = self._stream_proc
+            self._stream_proc = None
+            self._stream_rate = 0
+            self._stream_channels = 0
+        for item in (proc, stream):
+            if item is None:
+                continue
             try:
-                proc.kill()
+                if item.stdin:
+                    item.stdin.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.end_stream()
+            try:
+                item.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class DeviceSink:
@@ -440,8 +452,8 @@ class DeviceSink:
             self.after_speak()
 
     def stop(self) -> None:
-        with self._lock:
-            self._cancel.set()
+        # 先置取消并立即杀掉播放进程，再拿锁；否则 sink 线程正在 end_stream 排空时会阻塞取消。
+        self._cancel.set()
         self.player.stop()
         with self._lock:
             if self._speaking:

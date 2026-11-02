@@ -143,6 +143,9 @@ asr_last_used = 0.0
 init_error = {"ocr": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
+MEM_MIN_AVAILABLE_MB = float(os.environ.get("MEM_MIN_AVAILABLE_MB", "400"))
+MEM_SAMPLE_TTL = float(os.environ.get("MEM_SAMPLE_TTL", "10"))
+_MEM_CACHE = {"ts": 0.0, "value": None}
 VOICE_SOURCE = os.environ.get("VOICE_SOURCE", "browser").strip().lower()
 GUIDE_SOURCE = os.environ.get("GUIDE_SOURCE", "auto").strip().lower()
 OUTPUT_SINK = os.environ.get("OUTPUT_SINK", "browser").strip().lower()
@@ -154,7 +157,8 @@ DEVICE_SINK = None
 
 def _on_device_frame(img, frame_id, captured_mono, meta):
     """Picamera2 连续帧直接送入服务端引导循环，不经过浏览器。"""
-    if not GUIDE.status().get("running"):
+    st = GUIDE.status()
+    if not st.get("running") or st.get("mode") != "device":
         return
     GUIDE.submit_frame(
         img,
@@ -222,31 +226,49 @@ def stop_device_services():
     DEVICE_CAMERA.stop()
 
 
-def _used_bytes(mem_info):
-    """Windows 用提交内存更稳定；工作集会被系统修剪，读数会虚低。"""
-    return getattr(mem_info, "private", mem_info.rss)
+def _used_bytes(proc):
+    """运行时用 RSS，读取廉价；共享库会重复计入，属保守上界。
+
+    PSS 只在测试报告里用 /proc/<pid>/smaps_rollup 单独测量，不进入请求路径。
+    """
+    try:
+        return proc.memory_info().rss
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return 0
 
 
-def model_memory_bytes():
-    """统计模型侧占用：llama-server + 本服务进程 + 短暂 TTS/播放子进程。"""
-    app = _used_bytes(psutil.Process(os.getpid()).memory_info())
+def model_memory_bytes(fresh: bool = False):
+    """统计模型侧 RSS：llama-server + 本服务进程 + 短暂 TTS/播放子进程。
+
+    默认 10 秒缓存；RSS 读取本身很轻，但避免每 1 秒轮询重复遍历进程。
+    """
+    now = time.monotonic()
+    cached = _MEM_CACHE.get("value")
+    if not fresh and cached is not None and now - _MEM_CACHE.get("ts", 0.0) < MEM_SAMPLE_TTL:
+        return cached
+    app = _used_bytes(psutil.Process(os.getpid()))
     vlm = 0
     tts = 0
     for proc in psutil.process_iter(["name", "memory_info"]):
         try:
             name = (proc.info["name"] or "").lower()
             if name.startswith("llama-server"):
-                vlm += _used_bytes(proc.info["memory_info"])
+                vlm += _used_bytes(proc)
             elif name.startswith(("piper", "aplay", "arecord")):
-                tts += _used_bytes(proc.info["memory_info"])
+                tts += _used_bytes(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
-    return app, vlm, tts
+    value = (app, vlm, tts)
+    _MEM_CACHE.update(ts=now, value=value)
+    return value
 
 
-def over_budget():
-    app, vlm, tts = model_memory_bytes()
-    return (app + vlm + tts) > MEM_BUDGET_GB * 1024 ** 3
+def over_budget(fresh: bool = False):
+    """以整机可用内存为准；RSS 只用于显示，不把共享库重复相加当硬门槛。"""
+    if psutil.virtual_memory().available < MEM_MIN_AVAILABLE_MB * 1024 ** 2:
+        return True
+    app, vlm, tts = model_memory_bytes(fresh=fresh)
+    return (app + vlm + tts) > MEM_BUDGET_GB * 1024 ** 3 * 1.25
 
 
 def release_low_priority_models():
@@ -383,12 +405,11 @@ CHAT_REALTIME_REPLY = "我这边没有联网，查不到今天的实时信息，
 EYES_TASKS = {
     "scene": {
         "prompt": (
-            "看图，用一到两句说清正前方从近到远有什么。"
+            "看图，用一到两句、总共不超过40个字，说清正前方从近到远有什么。"
             "如果画面主要是文字、标牌或屏幕，就照原文读出最醒目的文字，不要编造人物、车辆、台阶或道路。"
-            "没有明显障碍就说“前方没看到明显障碍”。"
-            "不要分点、不要换行。"
+            "最后一句说明有没有明显障碍；没有就说“前方没看到明显障碍”。不要分点、不要换行。"
         ),
-        "max_tokens": 72,
+        "max_tokens": 48,
         "fallback": "看不清",
     },
     "toilet": {
@@ -481,6 +502,40 @@ EYES_TARGET = {
 
 NEG_PATTERN = "没看到|看不到|没发现|看不见|没有看到|没有|不在|没在"
 OBSCURED_NEG = re.compile(r"没(有)?被(挡住|遮挡|遮住|遮盖)")
+
+
+REPEAT_PATTERN = re.compile(r"([\u4e00-\u9fffA-Za-z0-9]{1,16})(?:[，,、]?\1){2,}")
+
+
+def is_degenerate_repetition(text: str) -> bool:
+    """检测小模型常见复读：长文本字符多样性过低，或同一短语连续出现 3 次。"""
+    s = (text or "").strip()
+    body = [c for c in s if c not in "，。；！？,.;!?：: \n"]
+    if len(body) >= 30 and len(set(body)) / len(body) < 0.28:
+        return True
+    return bool(REPEAT_PATTERN.search(s))
+
+
+def collapse_repetition(text: str) -> str:
+    """只收敛明显复读：连续重复短语压成一次；多样性过低时只留第一句。"""
+    s = (text or "").strip()
+    s = REPEAT_PATTERN.sub(r"\1", s)
+    body = [c for c in s if c not in "，。；！？,.;!?：: \n"]
+    if len(body) >= 30 and len(set(body)) / len(body) < 0.28:
+        first = re.split(r"[。；！？!?\n]", s, maxsplit=1)[0].strip()
+        return first if len(first) >= 4 else ""
+    return s
+
+
+def repair_truncated_answer(text: str) -> str:
+    """生成被 max_tokens 截断时，去掉不完整的尾句；只剩几个字时交给兜底句。"""
+    s = (text or "").strip()
+    if not s or s[-1] in "。！？!?":
+        return s
+    cut = max(s.rfind(x) for x in "。！？")
+    if cut >= 8:
+        return s[:cut + 1]
+    return "" if len(s) < 10 else s
 
 
 def settle_eyes_answer(task, answer, fallback, item=""):
@@ -1172,12 +1227,20 @@ def canonical_frame_id(frame_id, image_b64):
 SAFE_CLAIM = re.compile(
     r"没有(明显)?(危险|异常|障碍|问题)|可以(安全)?(走|通行|通过|前进)|无障碍|畅通|安全地"
 )
+OBSTACLE_WORDS = (
+    "自行车", "垃圾桶", "台阶", "楼梯", "路障", "椅子", "桌子", "障碍", "栏杆",
+    "柱子", "箱子", "车辆", "汽车", "电动车", "婴儿车", "手推车",
+)
 
 
 def guard_vision_answer(task, answer):
     """引导提示危险时，禁止 VLM 同时说“没有危险/可以走”。"""
     if not answer or task in ("read_text", "read_date", "toilet", "exit", "item"):
         return answer
+    # 场景/详细描述自己列了障碍物，却仍说“没看到明显障碍”：以列出的物体为准，改成警告。
+    if task in ("scene", "detail") and "没看到明显障碍" in answer and any(w in answer for w in OBSTACLE_WORDS):
+        answer = answer.replace("前方没看到明显障碍", "前方有障碍物，请小心")
+        answer = answer.replace("没有明显障碍", "有障碍物，请小心")
     st = GUIDE.status()
     if not st.get("running"):
         return answer
@@ -1237,6 +1300,10 @@ def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
     answer = (msg.get("content") or "").strip()
     for tag in ("<think>", "</think>"):
         answer = answer.replace(tag, "")
+    answer = collapse_repetition(answer)
+    finish_reason = data["choices"][0].get("finish_reason")
+    if finish_reason == "length":
+        answer = repair_truncated_answer(answer)
     usage = data.get("usage") or {}
     timings = data.get("timings") or {}
     prefill_ms = timings.get("prompt_ms")
@@ -1331,6 +1398,17 @@ def pick_main_text_block(lines):
     return "\n".join(text for _, _, text in keep)
 
 
+def meaningful_ocr_text(text: str) -> bool:
+    """过滤键盘单键、噪声等无意义单字符；单个汉字（如“停”）仍算有效。"""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if any("\u4e00" <= ch <= "\u9fff" for ch in s):
+        return True
+    tokens = re.findall(r"[A-Za-z0-9]+", s)
+    return any(len(t) >= 2 for t in tokens)
+
+
 @app.get("/")
 def index():
     return send_from_directory("static", "index.html")
@@ -1369,12 +1447,15 @@ def status():
             "device": device_status(),
             "traces": {"active": TRACES.active_count(), "summary": TRACES.summary()},
             "memory": {
+                "measure": "rss",
                 "model_gb": round(vlm_rss / 1024 ** 3, 2),
                 "app_gb": round(app_rss / 1024 ** 3, 2),
                 "tts_gb": round(tts_rss / 1024 ** 3, 2),
                 "sum_gb": round(total / 1024 ** 3, 2),
+                "available_mb": round(psutil.virtual_memory().available / 1024 ** 2),
+                "min_available_mb": MEM_MIN_AVAILABLE_MB,
                 "budget_gb": MEM_BUDGET_GB,
-                "over_budget": total > MEM_BUDGET_GB * 1024 ** 3,
+                "over_budget": over_budget(),
             },
             "cpu": {
                 "model_percent": cpu_percent,
@@ -1524,7 +1605,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         img = None
         if (image_vlm_b64 or image_b64) and age is not None and age <= FRAME_MAX_AGE:
             try:
-                img = image_to_jpeg_b64(decode_image(image_vlm_b64 or image_b64))
+                img = vlm_image_b64(image_vlm_b64 or image_b64)
             except Exception:  # noqa: BLE001
                 img = None
         ctx = session_context(session_id, context, include_visual=True)
@@ -1600,6 +1681,9 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
             with OCR_LOCK:
                 res = ocr_engine(img)
             text = pick_main_text_block(parse_ocr_result(res))
+            if not meaningful_ocr_text(text):
+                log.info("[eyes] OCR 只得到无意义短文本 %r，改用 VLM", text)
+                text = ""
         except Exception as exc:  # noqa: BLE001
             log.warning("[eyes] OCR 失败，改用 VLM：%s", exc)
             text = ""
@@ -1783,6 +1867,10 @@ def api_talk():
             piece = (piece or "").strip()
             if not piece or blocked:
                 return None
+            if is_degenerate_repetition(emitted + piece):
+                piece = "画面重复太多，没看清，请再拍一张"
+                blocked = True
+                final = True
             # 守卫看“已播出 + 本段”的累计文本，避免跨段拼出“可以走……不能通行”。
             probe = (emitted + piece)[-500:]
             safe = guard_vision_answer(task, probe)
@@ -1831,6 +1919,7 @@ def api_talk():
                     payload = emit(piece, idx == len(tail))
                     if payload:
                         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            full = collapse_repetition(full)
             answer = settle_eyes_answer(task, full, spec["fallback"].format(item=item), item)
             answer = guard_vision_answer(task, answer)
             session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
@@ -2342,7 +2431,8 @@ def api_guide_stop():
     body = request.get_json(force=True, silent=True) or {}
     reason = (body.get("reason") or "manual").strip()
     status = GUIDE.stop(reason=reason, announce=True)
-    if status.get("mode") == "device":
+    # 设备语音仍需要摄像头抓当前画面；只有摄像头仅因引导而启动时才随引导关闭。
+    if status.get("mode") == "device" and VOICE_SOURCE != "device":
         DEVICE_CAMERA.stop()
     log.info("guide stop reason=%s", reason)
     return jsonify(status)
@@ -2351,6 +2441,26 @@ def api_guide_stop():
 @app.get("/api/device/status")
 def api_device_status():
     return jsonify(device_status())
+
+
+@app.get("/api/camera/still")
+def api_camera_still():
+    """设备端高清抓图，供调试、OCR 验收和回放取样；不重新打开摄像头。"""
+    st = DEVICE_CAMERA.status()
+    if not st.get("running"):
+        return jsonify({"error": "设备摄像头未运行"}), 409
+    img = DEVICE_CAMERA.capture_still()
+    if img is None:
+        return jsonify({"error": DEVICE_CAMERA.status().get("error") or "取帧失败"}), 503
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    fid = f"still-{time.time_ns()}"
+    captured = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return Response(
+        buf.getvalue(),
+        mimetype="image/jpeg",
+        headers={"X-Frame-Id": fid, "X-Captured-At": captured, "Cache-Control": "no-store"},
+    )
 
 
 @app.post("/api/guide/frame")

@@ -61,3 +61,7 @@
 {"text":"引导状态","expect":{"intent":"guide_status"}}
 {"text":"前面通不通","expect":{"intent":"guide_status"}}
 {"text":"能不能走楼梯","expect":{"intent":"unknown"}}
+{"text":"开始引到","expect":{"intent":"guide_start","actions":["start_guide"]},"note":"CM5 ASR 同音实测"}
+{"text":"罐必引导","expect":{"intent":"guide_stop","actions":["stop_guide"]},"note":"CM5 ASR 同音实测"}
+{"text":"读日记","expect":{"intent":"read_date"},"note":"CM5 ASR 同音实测"}
+{"text":"小病小病前面有什么","expect":{"intent":"scene"},"note":"CM5 ASR 同音实测"}

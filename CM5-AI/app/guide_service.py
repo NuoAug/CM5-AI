@@ -73,6 +73,7 @@ class GuideRuntime:
             "last_error": None,
             "last_inference_ms": None,
             "inference_samples": [],
+            "age_samples": [],
         }
 
     # ---------- 生命周期 ----------
@@ -110,6 +111,7 @@ class GuideRuntime:
                 started_at=time.monotonic(),
                 last_error=None,
                 inference_samples=[],
+                age_samples=[],
             )
             self._thread = threading.Thread(target=self._loop, name="guide-loop", daemon=True)
             self._watchdog = threading.Thread(target=self._watchdog_loop, name="guide-watchdog", daemon=True)
@@ -127,6 +129,8 @@ class GuideRuntime:
             thread = self._thread
         if thread is not None:
             thread.join(timeout=1.0)
+        if thread is None or not thread.is_alive():
+            guide.unload()
         with self._lock:
             self._decision = {
                 "state": "unavailable",
@@ -184,8 +188,9 @@ class GuideRuntime:
 
     # ---------- 主循环 ----------
     def _loop(self) -> None:
-        next_tick = time.monotonic()
+        period = 1.0 / max(1.0, guide.TARGET_FPS)
         while not self._stop_event.is_set():
+            t_loop = time.monotonic()
             with self._lock:
                 self._heartbeat = time.monotonic()
                 packet = self._latest
@@ -200,6 +205,11 @@ class GuideRuntime:
                 continue
 
             age = now - packet.received_mono
+            with self._lock:
+                samples = self._stats["age_samples"]
+                samples.append(int(age * 1000))
+                if len(samples) > 200:
+                    del samples[:-200]
             if age > guide.FRAME_MAX_AGE:
                 self._stats["stale"] += 1
                 if now - self._last_stale_publish >= 1.0:
@@ -213,6 +223,7 @@ class GuideRuntime:
             self._last_frame_mono = packet.received_mono
             self._had_frame = True
             try:
+                t_work = time.monotonic()
                 obs = guide.analyze_image(
                     packet.image,
                     frame={
@@ -229,11 +240,13 @@ class GuideRuntime:
                 self._stats["errors"] += 1
                 self._stats["last_error"] = str(exc)
                 self._publish_unavailable("error", time.monotonic())
-            elapsed = time.monotonic() - next_tick
-            next_tick = max(next_tick + 1.0 / max(1.0, guide.TARGET_FPS), time.monotonic())
-            delay = next_tick - time.monotonic()
+            work_ms = int((time.monotonic() - t_work) * 1000)
+            self._stats["last_work_ms"] = work_ms
+            elapsed = time.monotonic() - t_loop
+            delay = period - elapsed
             if delay > 0:
-                time.sleep(min(delay, 0.25))
+                time.sleep(min(delay, period))
+            self._stats["last_iter_ms"] = int((time.monotonic() - t_loop) * 1000)
 
     def _publish(self, obs: dict, decision: dict, packet: FramePacket) -> None:
         now = time.monotonic()
@@ -269,7 +282,9 @@ class GuideRuntime:
             )
 
         speech = decision.get("speech") or ""
-        if speech:
+        # 只在状态变化时播报：重复播报同一 no_seed/危险状态会让 Piper+aplay
+        # 持续抢占 CPU，实测把引导吞吐从 3.6 fps 压到 1.4 fps。
+        if speech and decision.get("changed"):
             reason = decision.get("reason") or ""
             priority = PRIORITY_DANGER if (decision.get("urgent") and reason in guide.DANGER_REASONS | {"stale", "model_stuck", "error"}) else PRIORITY_GUIDE
             OUTPUT.push(
@@ -342,6 +357,12 @@ class GuideRuntime:
                 arr = sorted(samples)
                 p50 = arr[int(len(arr) * 0.5) - 1] if len(arr) > 1 else arr[0]
                 p95 = arr[min(len(arr) - 1, int(len(arr) * 0.95))]
+            age_samples = list(self._stats.get("age_samples") or [])
+            age_p50 = age_p95 = None
+            if age_samples:
+                arr = sorted(age_samples)
+                age_p50 = arr[int(len(arr) * 0.5) - 1] if len(arr) > 1 else arr[0]
+                age_p95 = arr[min(len(arr) - 1, int(len(arr) * 0.95))]
             stats = {
                 "processed": self._stats["processed"],
                 "dropped": self._stats["dropped"],
@@ -349,8 +370,12 @@ class GuideRuntime:
                 "errors": self._stats["errors"],
                 "last_error": self._stats["last_error"],
                 "last_inference_ms": self._stats["last_inference_ms"],
+                "last_work_ms": self._stats.get("last_work_ms"),
+                "last_iter_ms": self._stats.get("last_iter_ms"),
                 "inference_p50_ms": p50,
                 "inference_p95_ms": p95,
+                "age_p50_ms": age_p50,
+                "age_p95_ms": age_p95,
                 "target_fps": guide.TARGET_FPS,
                 "frame_max_age_s": guide.FRAME_MAX_AGE,
                 "watchdog_s": guide.WATCHDOG_SECONDS,

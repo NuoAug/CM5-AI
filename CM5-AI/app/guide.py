@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import gc
 import hashlib
 import os
 import threading
@@ -186,6 +187,22 @@ def status() -> dict:
         "error": _load_error,
         "output_shape_symbolic": _output_shape,
     }
+
+
+def unload() -> None:
+    """释放引导 ONNX 会话与内存；下次开始时按需重新加载。
+
+    引导关闭后调用，给 ASR/VLM 留出内存；必须等当前推理退出，避免卸载正在用的会话。
+    """
+    global _session, _input_name, _output_shape, _load_error, _session_sha256
+    with _RUN_LOCK:
+        with _SESSION_LOCK:
+            _session = None
+            _input_name = None
+            _output_shape = None
+            _load_error = None
+            _session_sha256 = None
+    gc.collect()
 
 
 # ---------- 可选传感器接口：没有硬件时明确返回不可用，不伪造数据 ----------

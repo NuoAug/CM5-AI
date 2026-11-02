@@ -9,3 +9,6 @@ CM5-AI/data/
 CM5-AI/app/__pycache__/
 __pycache__/
 *.pyc
+
+# 实机测试原始数据（报告进 docs/，原始包不入库）
+CM5-AI/test-runs/

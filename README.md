@@ -1,8 +1,8 @@
 # CM5 边缘 AI 测试台
 
-面向视障辅助场景的离线多模态服务，模型全部本地推理，不联网。当前在 Windows 本机完成开发与调优，目标运行环境为下列硬件。
+面向视障辅助场景的离线多模态服务，模型全部本地推理，不联网。Windows 本机用于开发与调优，CM5 实机用于部署与验收。
 
-当前代码版本：v1.3.0（第二阶段：流式语义分段、常驻 Piper、连续播放、延迟 trace 与候选对比）。第一阶段改造说明见 [第一阶段改造说明](docs/第一阶段-视障辅助系统改造说明.md)，第二阶段实测与候选对比见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)，CM5 安装与运维见 [CM5 部署与运维](docs/CM5-部署与运维.md)，性能报告模板见 [CM5 性能实测报告模板](docs/CM5-性能实测报告模板.md)（模板中数据仍需按本机复测填写）。
+当前代码版本：v1.3.1（CM5 实机部署与稳定性修复：Qwen3-VL 替代 MiniCPM、3 线程绑核、取消立即断流、追问 256、复读/截断/障碍守卫、ASR 同音别名、引导模型关闭卸载）。第一阶段改造说明见 [第一阶段改造说明](docs/第一阶段-视障辅助系统改造说明.md)，第二阶段实测与候选对比见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)，CM5 安装与运维见 [CM5 部署与运维](docs/CM5-部署与运维.md)，CM5 实机数据见 [CM5 实机测试报告](docs/CM5-实机测试报告-2026-11-02.md)，性能报告模板见 [CM5 性能实测报告模板](docs/CM5-性能实测报告模板.md)。
 
 ## 目标硬件
 
@@ -31,6 +31,20 @@
 
 这台机器只有 4GB 内存，是项目所有内存优化的出发点。具体预算与实测见下文「内存预算」。
 
+## CM5 实机部署（2026-11-02）
+
+已完成用户级可回滚部署（`~/cm5-ai/releases/v1.3.0-cm5`，`current` 符号链接），真实 CSI 摄像头、XVF3800 麦克风、ALSA 播放、KWS/ASR/OCR/TTS/VLM 全链路联调。详细数据与人工待确认项见 [CM5 实机测试报告](docs/CM5-实机测试报告-2026-11-02.md)。
+
+关键结论（均为 CM5 实测，不是 Windows）：
+
+- **模型**：MiniCPM-V 4.7 视觉编码固定约 118 s/帧，256/320/384/512 都一样，不可实时；CM5 默认改为 Qwen3-VL-2B Q4_K_M，prefill 3.8 s（256）～9.0 s（512）。
+- **输入**：`VLM_IMAGE_MAX_SIDE=256`；512 比 256 慢约 2.4 倍。
+- **CPU**：VLM `-t4` 会抢满四核，引导出现 `model_stuck`；改为 `-t3` + `taskset -c 0-2`，引导 P95 449 ms、无看门狗；代价是 VLM 慢约 20–30%。
+- **首声**：引导状态/控制快路径 0.1–2.0 s；OCR 约 1.8 s；VLM 场景/找物 8–20 s，未达到 1.5 s 目标，瓶颈与阶段耗时已写入报告。
+- **内存**：PSS 口径，VLM 2.37–2.94 GB + Web 0.20–0.55 GB + TTS 0.09 GB；预算 3.6 GB；引导关闭后卸载 ONNX 会话，Web 392→238 MB。
+- **稳定性**：30 分钟连续引导已完成（数据在 `CM5-AI/test-runs/20261102T1550+0800_soak30/`）；8 小时未完成，命令见部署文档。
+- **待人工确认**：扬声器实际出声、真人唤醒、真实台阶/标签、AEC 开关。
+
 ## 目录结构
 
 ```
@@ -41,7 +55,9 @@ AI-Deployment/
 │  ├─ CM5-边缘AI模型选型报告-2026-10-31.md   选型依据与对比结论
 │  ├─ 第一阶段-视障辅助系统改造说明.md       第一阶段改动、测试与未验证项
 │  ├─ 第二阶段-语音与视觉优化说明.md         流式分段、常驻 TTS、候选实测与回滚
-│  ├─ CM5-部署与运维.md                     ARM64 安装、systemd、健康检查、回滚
+│  ├─ CM5-部署与运维.md                     ARM64 用户级部署、systemd、健康检查、回滚
+│  ├─ CM5-实机测试报告-2026-11-02.md        CM5 实测环境、优化、外设、性能与限制
+│  ├─ CM5-AI-功能清单-2026-11-02.md         功能与验证口径
 │  └─ CM5-性能实测报告模板.md               实测记录模板
 └─ CM5-AI/
    ├─ 启动测试台.bat      双击启动；关闭窗口即停止
@@ -57,18 +73,20 @@ AI-Deployment/
    │  ├─ kws.py            sherpa-onnx KWS + 环形缓冲
    │  ├─ device_io.py      Picamera2 / ALSA 适配
    │  ├─ device_voice.py   设备端常开语音闭环
+   │  ├─ hardware.py       Live/Replay 硬件抽象与测试接收器
    │  ├─ config/keywords.txt 唤醒词拼音 token
    │  ├─ static/index.html 测试页面
    │  ├─ start.ps1 / stop.ps1
    │  ├─ precheck.py       启动前只读预检
    │  ├─ test_*.py         单元/接口测试
    │  └─ requirements.txt
-   ├─ tools/              回放、基准、CM5 环境体检
+   ├─ tools/              CM5 环境快照、外设验收、并发/稳定性、VLM/SSE 探测、回放与校验
    ├─ testsets/           意图金标准与引导回归案例
-   ├─ deploy/             ARM64 安装脚本、systemd、健康检查
+   ├─ deploy/             用户级/ARM64 安装脚本、systemd、健康检查、固定依赖
    ├─ models/             模型文件（VLM / OCR / ASR / TTS / 引导 / KWS）
    ├─ runtime/            llama.cpp、Piper、Python、MinGW
    ├─ samples/            测试图（猫、中文标牌、场景与盲道示例）
+   ├─ test-runs/          CM5 实机原始数据（不入库）
    ├─ logs/               运行日志，不入库
    └─ data/               运行产物，不入库
 ```
@@ -79,7 +97,8 @@ AI-Deployment/
 
 | 用途 | 模型 | 格式 | 说明 |
 |---|---|---|---|
-| 场景 / 空间 / VQA | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091 |
+| 场景 / 空间 / VQA（Windows 开发） | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091 |
+| 场景 / 空间 / VQA（CM5 默认） | Qwen3-VL-2B-Instruct | Q4_K_M + mmproj-F16 | CM5 实测 MiniCPM 视觉编码 118 s/帧，改用 Qwen；见实机报告 |
 | 中文 OCR | RapidOCR + PP-OCRv6_small | ONNX | det / rec / cls 三个模型 |
 | 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎；常驻 worker 一次加载，约 63 MB |
 | 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置 60 秒释放 |
@@ -333,16 +352,18 @@ $env:MEM_BUDGET_GB = "3.2"
 
 ## 部署到树莓派时注意
 
-完整步骤见 [CM5 部署与运维](docs/CM5-部署与运维.md)。要点：
+完整步骤见 [CM5 部署与运维](docs/CM5-部署与运维.md)，实测见 [CM5 实机测试报告](docs/CM5-实机测试报告-2026-11-02.md)。要点：
 
-1. 只复制 `models/`、`app/`、`samples/`、`tools/`、`testsets/`、`deploy/`，不要复制 Windows 版 `runtime/llama.cpp`。
-2. Pi 上需要 b11551 及以上版本的 llama.cpp 才支持 MiniCPM-V 4.7；低于此版本可回退 Qwen3-VL-2B。可用 `deploy/build_llama_cpp.sh` 在 CM5 上构建。
-3. 启动参数由 `start.ps1` 按逻辑核数选择：≤4 核用 `-t 4`，也可用 `VLM_THREADS` 覆盖；`-c` 默认 1024，可用 `VLM_CTX` 覆盖。
-4. 摄像头由 Picamera2 在 Pi 端直接取帧；浏览器在局域网 IP 下会被安全策略禁用摄像头/麦克风。
-5. 麦克风与喇叭使用 ALSA：先运行 `arecord -l`、`aplay -l` 确认 ReSpeaker XVF3800 的卡号与设备号，再填 `ALSA_INPUT` / `ALSA_OUTPUT`。
-6. 4GB 内存下模型侧余量有限，上 Pi 后必须实测峰值与热降频，建议先把 `MEM_BUDGET_GB` 设为 3.2 并关闭非必要模块。
-7. Piper 需要 Pi 端 aarch64 可执行文件，不能直接复制 Windows 的 `piper.exe`；用 `PIPER_BIN` 指向 Pi 上的 piper，`PIPER_MODEL` 指向中文音色 onnx。
-8. 真机语音默认半双工：播报期间暂停采集；全双工需要 AEC，当前没有实现。
+1. **用户级部署优先**：`deploy/install_cm5_user.sh` 不需要 sudo，发布到 `~/cm5-ai/releases/<id>`，`current` 符号链接回滚；`models/`、`runtime/`、`data/`、`logs/` 共享，不随发布复制。有 sudo 时才用 `deploy/install_cm5.sh` 的 `/opt` 路径，两条路径不要同时启用。
+2. **CM5 默认 VLM 是 Qwen3-VL-2B**，不是 MiniCPM。MiniCPM-V 4.7 在 CM5 上视觉编码约 118 s/帧（256/320/384/512 都一样），不可实时；Qwen 256 px prefill 3.8 s、512 px 9.0 s。
+3. **线程与绑核**：VLM `-t3` + `taskset -c 0-2`，Web 不绑核；4 线程会抢满四核导致引导 `model_stuck`，把 Web 绑到第 4 核也会让引导和 VLM HTTP/ORT 抢同一核。
+4. **输入尺寸**：`VLM_IMAGE_MAX_SIDE=256`；OCR 另走高清图，不跟着降。
+5. 摄像头由 Picamera2 在 Pi 端直接取帧；浏览器在局域网 IP 下会被安全策略禁用摄像头/麦克风。`VOICE_SOURCE=device` 时关闭引导不关摄像头。
+6. 麦克风与喇叭使用 ALSA：先运行 `arecord -l`、`aplay -l`；CM5 实测用 `plughw:CARD=Array,DEV=0`（reSpeaker XVF3800），不要依赖 card 数字。
+7. 4GB 内存下模型侧余量有限：预算 3.6 GB，引导运行时 Web PSS 约 0.4 GB、VLM 约 2.5 GB；引导关闭后卸载 ONNX 会话可释放约 150 MB。
+8. Piper 需要 Pi 端 aarch64 可执行文件，不能直接复制 Windows 的 `piper.exe`；用 `PIPER_BIN` 指向 Pi 上的 piper，`PIPER_MODEL` 指向中文音色 onnx。
+9. 真机语音默认半双工：播报期间暂停采集；全双工需要 AEC，当前没有实现，XVF3800 的 AEC 开关也未确认。
+10. 服务只监听 `127.0.0.1`；跨机调试用 SSH 隧道 `ssh -L 8090:127.0.0.1:8090`。
 
 ## 本轮新增能力（v1.0.8）
 
@@ -373,12 +394,14 @@ $env:MEM_BUDGET_GB = "3.2"
 | `MIN_VOICE_SECONDS` | 0.6 | 服务端最短有效语音时长，低于此值不送 ASR |
 | `MIN_VOICE_RMS` | 0.008 | 服务端最低平均音量，低于此值判无效语音 |
 | `ARMED_SECONDS` | 15 | 唤醒后免唤醒窗口秒数 |
-| `VLM_THREADS` | 4（≤4 核）/ 8 | 传给 llama-server 的 `-t`，start.ps1 按逻辑核数选择 |
+| `VLM_THREADS` | 4（≤4 核）/ 8 | 传给 llama-server 的 `-t`，start.ps1 按逻辑核数选择；CM5 实测用 3 + 绑 0–2 核 |
 | `VLM_CTX` | 1024 | 传给 llama-server 的 `-c` |
+| `VLM_IMAGE_MAX_SIDE` | 512 | 服务端 VLM 输入长边；CM5 实测用 256 |
 | `VLM_API_KEY` | 每次启动随机生成 | llama-server 与本服务共用的 API key；不设置时由 start.ps1 生成并写入 `logs/vlm.key` |
 | `OCR_INTRA_THREADS` / `OCR_INTER_THREADS` | 4 / 1 | RapidOCR 的 ORT 线程，注意 `OMP_NUM_THREADS` 不控制 ORT 线程池 |
 | `FRAME_MAX_AGE` | 20 | 画面过期秒数 |
 | `MEM_BUDGET_GB` | 3.6 | 模型侧内存预算 |
+| `MEM_SAMPLE_TTL` | 10 | PSS 采样缓存秒数；读 2.5 GB 进程的 smaps_rollup 开销明显，轮询接口不应每次触发 |
 | `PIPER_BIN` | `runtime/piper/piper/piper.exe` | Piper 可执行文件路径，Pi 端指向 aarch64 版 |
 | `PIPER_MODEL` | `models/tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx` | Piper 中文音色模型路径 |
 | `GUIDE_MODEL` | `models/guide/segformer-b0-ade/model.onnx` | 无盲道引导分割模型路径 |
@@ -491,3 +514,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.1.1 | 语音闭环与稳定性修复：回声过滤、服务端免唤醒窗口、无画面追问、意图归一化、VAD/ASR 门限、上下文收紧、llama API key/CORS、会话日志 |
 | v1.2.0 | 第一阶段改造：服务端持续引导循环 + 连通通道/瓶颈/前方物体 + 状态机/看门狗；KWS 唤醒；结构化意图与控制动作；统一输出仲裁与危险抢占；帧标识冲突检测；VLM 计时字段修正；设备摄像头/ALSA 适配；ARM64 部署脚本、回放/基准工具与 153 项测试 |
 | v1.3.0 | 第二阶段优化：流式语义分段（首段 12–25/后续 25–50 字）+ 常驻 Piper + 浏览器 `AudioContext` 连续调度 + 设备 ALSA 连续 PCM；分片段安全守卫与输出仲裁；引导状态/OCR 快路径；`trace_id` 分阶段延迟与 `/api/metrics`；TTS/VLM 候选实测与回滚开关；176 项测试 |
+| v1.3.1 | CM5 实机部署与修复：Qwen3-VL-2B 替代 MiniCPM（MiniCPM 视觉编码 118 s/帧）、256 px、VLM 3 线程绑 0–2 核、取消播报立即断流、追问统一 256、复读/截断/障碍矛盾守卫、ASR 同音别名、关闭引导不关摄像头、引导模型关闭卸载、PSS 统计；新增用户级部署、实机验收、并发/稳定性/回放工具与 CM5 实测报告 |

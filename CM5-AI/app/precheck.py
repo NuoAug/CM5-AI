@@ -69,19 +69,33 @@ def check_models():
 
 def check_llama():
     name = "llama-server.exe" if os.name == "nt" else "llama-server"
-    candidates = [
+    env_path = os.environ.get("LLAMA_SERVER")
+    candidates = ([Path(env_path)] if env_path else []) + [
         ROOT / "runtime" / "llama.cpp" / name,
         ROOT / "runtime" / "llama.cpp" / "build" / "bin" / name,
+        ROOT / "runtime" / "llama.cpp" / "bin" / name,
         ROOT / "runtime" / "llama.cpp-src" / "build4" / "bin" / name,
     ]
     found = next((p for p in candidates if p.exists()), None)
-    record("llama-server 可执行", found is not None, str(found.relative_to(ROOT)) if found else "未找到")
+    detail = "未找到"
+    if found is not None:
+        try:
+            detail = str(found.relative_to(ROOT))
+        except ValueError:
+            detail = str(found)
+    record("llama-server 可执行", found is not None, detail)
 
 
 def check_piper():
     name = "piper.exe" if os.name == "nt" else "piper"
     exe = Path(os.environ.get("PIPER_BIN") or (ROOT / "runtime" / "piper" / "piper" / name))
-    record("piper 可执行", exe.exists(), str(exe.relative_to(ROOT)) if exe.exists() else "未找到")
+    detail = "未找到"
+    if exe.exists():
+        try:
+            detail = str(exe.relative_to(ROOT))
+        except ValueError:
+            detail = str(exe)
+    record("piper 可执行", exe.exists(), detail)
 
 
 def check_guide():
@@ -90,7 +104,11 @@ def check_guide():
         or (MODELS / "guide" / "segformer-b0-ade" / "model.onnx")
     )
     if model.exists():
-        print("PASS 引导模型  " + str(model.relative_to(ROOT)))
+        try:
+            detail = str(model.relative_to(ROOT))
+        except ValueError:
+            detail = str(model)
+        print("PASS 引导模型  " + detail)
     else:
         print("WARN 引导模型未下载，无盲道引导不可用（不影响其它功能）")
 
