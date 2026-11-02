@@ -203,9 +203,6 @@
       return browserCapture(); // 明确选择的上传/示例静态图，不采集电脑摄像头。
     } catch (error) { toast(error.message); return null; }
   };
-  const clearClick = $('btn-clear').onclick;
-  $('btn-clear').onclick = () => { closeCamera(); clearClick(); };
-
   $('btn-voice').onclick = async () => {
     try {
       if (!await remote()) return vOn ? stopVoice() : startVoice();

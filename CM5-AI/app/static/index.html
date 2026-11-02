@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.5</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.6</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -69,7 +69,7 @@
   .left { display: flex; flex-direction: column; gap: 16px; }
   h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
   h2 span { color: var(--cyan); margin-right: 6px; }
-  .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 270px; gap: 14px; align-items: stretch; }
+  .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 270px; gap: 10px; align-items: stretch; }
   .image-view, .camera-view {
     position: relative; min-width: 0; aspect-ratio: 16 / 9; overflow: hidden;
     border: 1px solid var(--line); border-radius: 12px; background: #08101d;
@@ -100,6 +100,8 @@
   }
   .image-actions { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
   .image-actions button, .image-actions select { width: 100%; }
+  #device-source-slot { margin-top: 2px; }
+  #device-source-slot .hint { margin: 0; }
   @media (max-width: 1100px) {
     .image-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     .image-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; }
@@ -223,7 +225,6 @@
           <div class="view-caption" id="camera-source" style="display:none"></div>
         </div>
         <div class="image-actions" id="image-actions">
-          <div id="device-source-slot"></div>
           <select id="sample-image">
             <option value="" disabled selected hidden>选择示例图…</option>
             <option value="cats.jpg">示例：猫</option>
@@ -244,6 +245,7 @@
           <button id="btn-clear">清除图片</button>
           <button id="btn-cam">打开摄像头</button>
           <button id="btn-shot" disabled>拍照</button>
+          <div id="device-source-slot"></div>
         </div>
       </div>
       <input type="file" id="file" accept="image/*" hidden />
