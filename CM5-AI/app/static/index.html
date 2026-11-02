@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.2</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.3</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -271,22 +271,17 @@
             <option value="date">读日期</option>
             <option value="detail">详细描述</option>
           </select>
-          <button class="primary" id="btn-command">发送指令给模型</button>
-        </div>
-        <div class="row">
-          <input type="text" id="eyes-item" placeholder="要找的东西，例如 水杯 / 门 / 楼梯" style="flex:1;min-width:200px" />
-          <button id="btn-eyes-item">找物品</button>
+          <button class="primary" id="btn-command">发送指令</button>
         </div>
         <div class="result empty" id="out-eyes">等待提问…</div>
         <div class="meta" id="meta-eyes"></div>
         <div class="row">
           <input type="text" id="eyes-input" placeholder="聊天或追问，例如 今天有点烦 / 左边那个是台阶吗" style="flex:1;min-width:220px" />
           <button class="primary" id="btn-send">发送</button>
-          <button id="btn-stop">停止播报</button>
         </div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
-          <button id="btn-voice-test">语音试听</button>
+          <button id="btn-stop">停止播报</button>
           <span id="voice-state" class="voice-state">未开启 · 先说「小冰小冰」再说指令</span>
         </div>
         <div class="row" id="device-volume-controls" style="display:none">
@@ -869,11 +864,6 @@ async function runEyes(task, btn) {
   const requestStart = Date.now();
   const requestId = newFrameId('req');
   const body = { task, session_id: sessionId, request_id: requestId, request_start_ms: requestStart };
-  if (task === 'item') {
-    const item = $('eyes-item').value.trim();
-    if (!item) return toast('请输入要找的东西');
-    body.item = item;
-  }
   let frame = null;
   try {
     frame = await captureFrame();
@@ -902,12 +892,10 @@ async function runEyes(task, btn) {
     state.lastEyes = j.answer || '';
     if (!outputReady) speakAnswer(j.answer);
   } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
-  finally { setBusy(btn, false, '发送指令给模型'); }
+  finally { setBusy(btn, false, '发送指令'); }
 }
 
 $('btn-command').onclick = () => runEyes($('eyes-command').value, $('btn-command'));
-$('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
-$('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
 
 // 交互代次由 app-core.js 提供。
 
@@ -1256,18 +1244,6 @@ function stopVoice() {
 }
 
 $('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
-
-$('btn-voice-test').onclick = async () => {
-  voiceState('Piper 合成中…', true);
-  try {
-    const t = await synthTts('你好，我是你的AI助手，现在可以听到我说话吗', 'piper');
-    await playUrl(t.url);
-    URL.revokeObjectURL(t.url);
-    voiceState('Piper 播放完成', true);
-  } catch (e) {
-    voiceState('Piper 播放失败：' + e.message, false);
-  }
-};
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {

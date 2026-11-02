@@ -60,6 +60,15 @@ class TestbenchCompatibilityTests(unittest.TestCase):
         self.assertEqual(run_eyes.call_args.args[0], "toilet")
         self.assertEqual(run_eyes.call_args.kwargs["image_b64"], image)
 
+    def test_ask_text_item_routes_item_task(self):
+        image = "data:image/jpeg;base64," + base64.b64encode(b"x").decode()
+        with mock.patch.object(server, "run_eyes", return_value={
+                "task": "item", "source": "vlm", "answer": "水杯在右边", "latency_ms": 1}) as run_eyes:
+            data = self.client.post("/api/ask", json={"text": "帮我找一下水杯", "image": image}).json
+        self.assertEqual(data["intent"], "find_object")
+        self.assertEqual(run_eyes.call_args.args[0], "item")
+        self.assertEqual(run_eyes.call_args.kwargs["item"], "水杯")
+
     def test_ask_unknown_with_image_routes_followup(self):
         image = "data:image/jpeg;base64," + base64.b64encode(b"x").decode()
         with mock.patch.object(server, "run_eyes", return_value={

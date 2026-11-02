@@ -44,14 +44,13 @@ async function scenario(mode) {
   for (let i=0; i<12; i++) await Promise.resolve();
   await element('btn-voice').onclick();
   await element('btn-cam').onclick();
-  await element('btn-voice-test').onclick();
   await context.playTts('test');
   context.speakAnswer('late answer');
   await context.synthTts('late synth').catch(() => {});
   if (mode !== 'browser') assert.equal(local, 0, mode + ': must never use browser hardware');
   if (mode === 'remote') {
     assert.ok(calls.some(c => c.url === '/api/device/voice' && c.body.action === 'stop'));
-    assert.equal(calls.filter(c => c.url === '/api/device/speak').length, 2);
+    assert.equal(calls.filter(c => c.url === '/api/device/speak').length, 1);
     assert.equal(calls.filter(c => c.url === '/api/device/camera').length, 0, 'main-control camera must not be stolen');
   }
   if (mode === 'browser') assert.ok(local > 0, 'explicit browser debug mode still works');

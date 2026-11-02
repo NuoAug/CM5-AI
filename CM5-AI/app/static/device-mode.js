@@ -47,7 +47,6 @@
     $('btn-voice').textContent = voice.running ? '停止树莓派收音' : '开启树莓派语音唤醒';
     voiceState(voice.error || (voice.running ? (voice.paused ? '树莓派播报中 · 暂停收音' : '树莓派监听中 · 说「小冰小冰」') : '树莓派收音已停止'), !!voice.running && !voice.error);
     $('audio').style.display = 'none';
-    $('btn-voice-test').textContent = '树莓派扬声器试听';
     $('btn-tts').textContent = '在树莓派播报';
   }
 
@@ -224,13 +223,6 @@
   playTts = async function (text) {
     try { return await remote() ? await deviceSpeak(text) : await browserTts(text); }
     catch (error) { toast(error.message); }
-  };
-  const browserTest = $('btn-voice-test').onclick;
-  $('btn-voice-test').onclick = async () => {
-    try {
-      if (!await remote()) return browserTest();
-      await deviceSpeak('这是树莓派扬声器试听，现在可以听到我说话吗？');
-    } catch (error) { toast(error.message); }
   };
   const browserSpeakAnswer = speakAnswer;
   speakAnswer = function (text) { if (!ui.remote) return browserSpeakAnswer(text); };
