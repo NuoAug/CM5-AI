@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.11</title>
+<title>CM5 AI 功能测试台 v1.1.12</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -25,6 +25,7 @@
     color: var(--text);
     font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
     min-height: 100vh;
+    -webkit-user-select: none; user-select: none;
   }
   header {
     display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between;
@@ -68,7 +69,6 @@
   .left { display: flex; flex-direction: column; gap: 16px; }
   h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
   h2 span { color: var(--cyan); margin-right: 6px; }
-  h1, h2, button { -webkit-user-select: none; user-select: none; }
   .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 270px; gap: 10px; align-items: stretch; }
   .image-view, .camera-view {
     position: relative; min-width: 0; height: 286px; overflow: hidden;
@@ -166,6 +166,8 @@
     background: #0c1627; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
     padding: 9px 11px; font-family: inherit; font-size: 13px; width: 100%;
   }
+  input, textarea { -webkit-user-select: text; user-select: text; }
+  select { -webkit-user-select: none; user-select: none; }
   audio { width: 100%; margin-top: 12px; }
   .loading { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff33; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
