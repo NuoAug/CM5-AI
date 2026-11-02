@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.10</title>
+<title>CM5 AI 功能测试台 v1.1.11</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -68,6 +68,7 @@
   .left { display: flex; flex-direction: column; gap: 16px; }
   h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
   h2 span { color: var(--cyan); margin-right: 6px; }
+  h1, h2, button { -webkit-user-select: none; user-select: none; }
   .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 270px; gap: 10px; align-items: stretch; }
   .image-view, .camera-view {
     position: relative; min-width: 0; height: 286px; overflow: hidden;
@@ -179,7 +180,7 @@
 <body>
 <header>
   <div class="brand">
-    <h1>CM5 边缘 AI 功能测试台</h1>
+    <h1>CM5 AI 功能测试台</h1>
   </div>
   <div class="status">
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
