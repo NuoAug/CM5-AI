@@ -74,9 +74,9 @@ aplay -l
 
 - 摄像头：代码使用 Picamera2，低分辨率流给引导、主码流按需给 OCR/VLM；如果 lores RGB888 不被支持，会自动回退到 main 并缩放。CSI 线序、电源与相机型号请按官方文档核对。
 - 麦克风：设备清单是 ReSpeaker XVF3800 USB 四麦克风阵列；先运行 `arecord -l` 看实际卡名/卡号，`ALSA_INPUT` 填 `plughw:CARD=<卡名或编号>,DEV=0`。代码使用 16 kHz、单声道、S16_LE 原始流。
-- 喇叭：Piper 输出 22.05 kHz WAV，`aplay` 播放；`ALSA_OUTPUT` 同样按 `aplay -l` 填写。
+- 喇叭：Piper 输出 22.05 kHz WAV；v1.3.0 设备 sink 解析 WAV 后把 PCM 写入持续 `aplay -t raw` 进程，减少逐段启动的空隙；`ALSA_OUTPUT` 同样按 `aplay -l` 填写。采样率/声道变化时会重建播放流，需在真机确认没有 underrun。
 - 设备端默认半双工：播报前 `DeviceSink` 暂停采集，播完恢复；不支持播报中可靠打断。需要全双工必须做带播放参考信号的 AEC。
-- 启动时后台预生成 17 条常用引导/确认短语，写入 `data/tts-cache/`；Piper 第一次启动仍会有约 0.5–1 s 的冷启动。
+- 启动时后台预生成 17 条常用引导/确认短语，写入 `data/tts-cache/`；v1.3.0 默认使用常驻 Piper worker（`TTS_BACKEND=persistent`），音色只在第一次合成时加载。内存紧张时设 `TTS_IDLE_SECONDS=60~120` 空闲释放，或设 `TTS_BACKEND=subprocess` 回到每次启动 Piper 的旧路径。
 
 ## 5. 启动与检查
 

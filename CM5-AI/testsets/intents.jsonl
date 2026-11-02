@@ -55,3 +55,9 @@
 {"text":"好的","expect":{"intent":"ack"}}
 {"text":"","expect":{"intent":"silent"}}
 {"text":"随便说说","expect":{"intent":"unknown"}}
+{"text":"现在能走吗","expect":{"intent":"guide_status"}}
+{"text":"前面能走吗","expect":{"intent":"guide_status"}}
+{"text":"现在安全吗","expect":{"intent":"guide_status"}}
+{"text":"引导状态","expect":{"intent":"guide_status"}}
+{"text":"前面通不通","expect":{"intent":"guide_status"}}
+{"text":"能不能走楼梯","expect":{"intent":"unknown"}}

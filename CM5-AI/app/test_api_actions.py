@@ -89,6 +89,20 @@ class VoiceActionTests(unittest.TestCase):
         self.assertEqual(result["intent"], "guide_stop")
         self.assertFalse(server.GUIDE.status()["running"])
 
+    def test_guide_status_fast_path_does_not_call_model(self):
+        status = {
+            "running": True,
+            "frame_age_ms": 120,
+            "frame_id": "g1",
+            "decision": {"state": "straight", "reason": "clear"},
+        }
+        with mock.patch.object(server.GUIDE, "status", return_value=status), \
+                mock.patch.object(server, "run_eyes") as run_eyes:
+            result = self.send("现在能走吗")
+        self.assertEqual(result["intent"], "guide_status")
+        self.assertIn("直行通道可用", result["answer"])
+        run_eyes.assert_not_called()
+
     def test_clarify_does_not_call_model(self):
         server.GUIDE.start("browser")
         with mock.patch.object(server, "recent_speech_active", lambda *a, **k: True), \

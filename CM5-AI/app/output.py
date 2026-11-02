@@ -11,6 +11,8 @@ import itertools
 import queue
 import threading
 import time
+import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -36,11 +38,22 @@ class SpeechEvent:
     epoch: int = 0
     created_mono: float = field(default_factory=time.monotonic)
     meta: dict = field(default_factory=dict)
+    utterance_id: str = ""
+    segment_id: str = ""
+    sequence: int = 0
+    is_final: bool = True
+    deadline_s: Optional[float] = None
+    playback: str = "browser"
 
     def to_dict(self) -> dict:
         return {
             "type": "speech",
             "id": self.id,
+            "utterance_id": self.utterance_id,
+            "segment_id": self.segment_id,
+            "sequence": self.sequence,
+            "is_final": self.is_final,
+            "deadline_s": self.deadline_s,
             "text": self.text,
             "priority": self.priority,
             "source": self.source,
@@ -49,6 +62,7 @@ class SpeechEvent:
             "preempt": self.preempt,
             "epoch": self.epoch,
             "age_s": round(time.monotonic() - self.created_mono, 3),
+            "playback": self.playback,
             "meta": self.meta,
         }
 
@@ -74,6 +88,16 @@ class OutputBus:
         self._sink_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=32)
         self._sink_thread: Optional[threading.Thread] = None
         self._sink_stop = threading.Event()
+        self._history: deque = deque(maxlen=128)
+
+    def new_utterance_id(self, prefix: str = "u") -> str:
+        return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+    def history_since(self, last_id: Optional[int]) -> list[dict]:
+        with self._lock:
+            if last_id is None:
+                return []
+            return [item for item in list(self._history) if item.get("id", -1) > int(last_id)]
 
     def subscribe(self) -> queue.Queue:
         q: queue.Queue = queue.Queue(maxsize=MAX_QUEUE)
@@ -112,7 +136,7 @@ class OutputBus:
     def _sink_worker(self) -> None:
         while not self._sink_stop.is_set():
             try:
-                priority, event_id, text = self._sink_queue.get(timeout=0.5)
+                _priority, _event_id, payload = self._sink_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             with self._lock:
@@ -121,10 +145,12 @@ class OutputBus:
                 continue
             cancel = threading.Event()
             try:
-                sink.speak(text, cancel)
+                sink.speak(payload, cancel)
                 with self._lock:
                     self._stats["sink_played"] += 1
             except Exception:  # noqa: BLE001
+                with self._lock:
+                    self._stats["sink_failed"] = self._stats.get("sink_failed", 0) + 1
                 continue
 
     def _drain_sink_queue(self, min_priority: int) -> None:
@@ -156,15 +182,21 @@ class OutputBus:
                 except queue.Full:
                     self._stats["dropped"] += 1
 
-    def push(
+    def push_segment(
         self,
         text: str,
+        *,
+        utterance_id: str = "",
+        segment_id: str = "",
+        sequence: int = 0,
+        is_final: bool = True,
         priority: int = PRIORITY_ANSWER,
         source: str = "app",
         reason: str = "",
         ttl: float = 3.0,
         dedupe_key: Optional[str] = None,
         preempt: Optional[bool] = None,
+        deadline_s: Optional[float] = None,
         meta: Optional[dict] = None,
     ) -> Optional[dict]:
         text = (text or "").strip()
@@ -172,8 +204,10 @@ class OutputBus:
             return None
         if len(text) > MAX_TEXT:
             text = text[:MAX_TEXT]
+        uid = utterance_id or self.new_utterance_id("u")
+        sid = segment_id or f"{uid}-{int(sequence)}"
         now = time.monotonic()
-        key = dedupe_key or f"{source}|{priority}|{text}"
+        key = dedupe_key or f"{uid}|{sid}|{int(sequence)}|{text}"
         window = 3.0 if priority <= PRIORITY_GUIDE else 2.0
         with self._lock:
             last = self._last.get(key)
@@ -181,12 +215,12 @@ class OutputBus:
                 self._stats["deduped"] += 1
                 return None
             self._last[key] = now
-            if len(self._last) > 64:
+            if len(self._last) > 128:
                 cutoff = now - 30.0
                 self._last = {k: v for k, v in self._last.items() if v >= cutoff}
 
             if priority <= PRIORITY_DANGER:
-                # 危险提示：清掉尚未播出的普通排队项，避免“安全”话术压住危险提示。
+                # 危险提示：清掉尚未播出的普通排队项与历史，避免重连后重播旧回答。
                 for q in list(self._subs):
                     kept = []
                     while True:
@@ -201,6 +235,7 @@ class OutputBus:
                             q.put_nowait(item)
                         except queue.Full:
                             self._stats["dropped"] += 1
+                self._history.clear()
 
             event = SpeechEvent(
                 id=next(self._ids),
@@ -213,12 +248,22 @@ class OutputBus:
                 dedupe_key=key,
                 epoch=self._epoch,
                 meta=meta or {},
+                utterance_id=uid,
+                segment_id=sid,
+                sequence=int(sequence),
+                is_final=bool(is_final),
+                deadline_s=deadline_s,
+                playback=("device" if self._sink is not None else "browser"),
             )
             payload = event.to_dict()
             self._fanout(payload)
+            self._history.append(payload)
             self._stats["pushed"] += 1
             self._stats["last_event"] = {
                 "id": event.id,
+                "utterance_id": uid,
+                "segment_id": sid,
+                "sequence": int(sequence),
                 "text": text,
                 "priority": event.priority,
                 "source": source,
@@ -227,25 +272,51 @@ class OutputBus:
             }
             sink = self._sink
         if sink is not None:
-            if priority <= PRIORITY_GUIDE:
+            if priority <= PRIORITY_GUIDE or event.preempt:
                 try:
                     sink.stop()
                 except Exception:  # noqa: BLE001
                     pass
             if priority <= PRIORITY_DANGER:
                 self._drain_sink_queue(PRIORITY_GUIDE)
+            elif event.preempt:
+                # 新回答的第一段抢占旧回答，丢弃尚未播出的旧片段。
+                self._drain_sink_queue(int(priority))
             try:
-                self._sink_queue.put_nowait((int(priority), event.id, text))
+                self._sink_queue.put_nowait((int(priority), event.id, payload))
             except queue.Full:
                 try:
                     self._sink_queue.get_nowait()
                 except queue.Empty:
                     pass
                 try:
-                    self._sink_queue.put_nowait((int(priority), event.id, text))
+                    self._sink_queue.put_nowait((int(priority), event.id, payload))
                 except queue.Full:
                     self._stats["dropped"] += 1
         return payload
+
+    def push(
+        self,
+        text: str,
+        priority: int = PRIORITY_ANSWER,
+        source: str = "app",
+        reason: str = "",
+        ttl: float = 3.0,
+        dedupe_key: Optional[str] = None,
+        preempt: Optional[bool] = None,
+        meta: Optional[dict] = None,
+    ) -> Optional[dict]:
+        """兼容单段调用：生成新 utterance，只有一个 final 片段。"""
+        return self.push_segment(
+            text,
+            priority=priority,
+            source=source,
+            reason=reason,
+            ttl=ttl,
+            dedupe_key=dedupe_key,
+            preempt=preempt,
+            meta=meta,
+        )
 
     def cancel(self, min_priority: int = PRIORITY_GUIDE, source: str = "voice") -> dict:
         """停止普通播报，但保留尚未播出的危险提示；不关闭引导检测。"""
@@ -266,14 +337,17 @@ class OutputBus:
                         q.put_nowait(item)
                     except queue.Full:
                         self._stats["dropped"] += 1
+            self._history.clear()
             payload = {
                 "type": "cancel",
+                "id": next(self._ids),
                 "source": source,
                 "min_priority": int(min_priority),
                 "epoch": epoch,
                 "ts": time.monotonic(),
             }
             self._fanout(payload)
+            self._history.append(payload)
             self._stats["cancelled"] += 1
             sink = self._sink
         if sink is not None:

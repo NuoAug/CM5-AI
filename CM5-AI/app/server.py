@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 import psutil
 import requests
-from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
+from flask import Flask, Response, after_this_request, jsonify, request, send_file, send_from_directory, stream_with_context
 from PIL import Image
 from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
@@ -41,6 +41,9 @@ import device_io
 import device_voice
 from guide_service import GUIDE
 from output import OUTPUT, PRIORITY_ANSWER, PRIORITY_CONFIRM, PRIORITY_DANGER, PRIORITY_GUIDE
+from stream_text import TTS_NORM_VERSION, normalize_for_tts, segment_text, SemanticSegmenter
+from tts_worker import PiperWorker, TTSInterrupted
+from trace import TraceStore
 
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
@@ -61,12 +64,18 @@ DATA_DIR = Path(os.environ.get("DATA_DIR") or (ROOT / "data"))
 TTS_CACHE_DIR = DATA_DIR / "tts-cache"
 SAMPLES_DIR = ROOT / "samples"
 DEBUG_SNAPSHOT = os.environ.get("DEBUG_SNAPSHOT", "0").strip().lower() in ("1", "true", "yes")
+TTS_SMOOTH = os.environ.get("TTS_SMOOTH", "0").strip().lower() in ("1", "true", "yes")
+TTS_BACKEND = os.environ.get("TTS_BACKEND", "persistent").strip().lower()
+TTS_IDLE_SECONDS = float(os.environ.get("TTS_IDLE_SECONDS", "0"))
+TTS_CACHE_VERSION = "piper-persistent-v3"
+_PIPER_WORKER = None
 
 # 线程数可配置：默认值与现状一致，CM5 上按实测再调，不做绑核
 ASR_THREADS = int(os.environ.get("ASR_THREADS", "4"))
 OCR_INTRA_THREADS = int(os.environ.get("OCR_INTRA_THREADS", "4"))
 OCR_INTER_THREADS = int(os.environ.get("OCR_INTER_THREADS", "1"))
 FRAME_MAX_AGE = float(os.environ.get("FRAME_MAX_AGE", "20"))
+VLM_IMAGE_MAX_SIDE = int(os.environ.get("VLM_IMAGE_MAX_SIDE", "512"))
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -74,6 +83,7 @@ TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR = ROOT / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "app.log"
+TRACES = TraceStore(LOG_DIR / "traces.jsonl")
 
 
 def _setup_logger():
@@ -332,29 +342,28 @@ def model_cpu_percent():
 
 
 EYES_RULE = (
-    "你是视障人士的AI助手。用1到2句口语中文回答，不分点、不加括号。"
-    "方位只说左/中/右，远近只说近/远。"
+    "你是视障人士的AI助手。先说最重要的事实，再用一到两句口语中文回答；不分点、不加括号、不用 Markdown。"
+    "方位只说左/中/右，远近只说近/远；不要重复同一方位。"
     "只说画面里看得见的；看不清、被挡住、没看到就直说，不猜、不补常识。"
     "不报米数、不报秒数，不说能不能走、能不能过马路。"
 )
 
 CHAT_RULE = (
-    "你是陪伴视障人士的中文语音助手。用口语中文回答，两到四句，不分点、不加括号。"
-    "不要描述画面，也不要提眼睛或视力。"
+    "你是陪伴视障人士的中文语音助手。先说结论，再用两到三句口语中文回答，不分点、不加括号、不用 Markdown。"
+    "不要描述画面，也不要提眼睛或视力；不要重复开场白。"
     "不编造事实，不假装能查询实时信息。"
     "如果对方问新闻、天气或实时数据，直接说明没有联网查询能力，请他看手机或问身边的人。"
     "涉及安全或医疗时只给一般性建议，并提醒找专业人员。"
 )
 
 DETAIL_RULE = (
-    "你是视障人士的AI助手。用三到五句口语中文描述，不分点、不加括号。"
-    "方位只说左/中/右，远近只说近/远。"
-    "只说画面里看得见的；看不清就直说，不猜、不补常识。"
+    "你是视障人士的AI助手。先用一句话说正前方和近处有没有障碍，再补充主要物体的位置和外观；总共三到五句口语中文，不分点、不加括号、不用 Markdown。"
+    "方位只说左/中/右，远近只说近/远，不重复同一方位；看不清就直说，不猜、不补常识。"
     "不报米数、不报秒数，不说能不能走、能不能过马路。"
 )
 
 FOLLOW_RULE = (
-    "你是视障人士的AI助手。用一到两句口语中文回答，不分点、不加括号。"
+    "你是视障人士的AI助手。先直接回答对方的问题，用一到两句口语中文，不分点、不加括号、不用 Markdown。"
     "给了画面就结合画面回答，只用能确认的信息；看不清、被挡住、没看到就直说，不猜。"
     "方位只说左/中/右，远近只说近/远，不报米数、不报秒数，不说能不能走。"
 )
@@ -924,66 +933,89 @@ def smooth_piper_wav(wav_bytes, max_pause=0.15, long_pause=0.28):
         return wav_bytes
 
 
+def piper_worker():
+    global _PIPER_WORKER
+    if _PIPER_WORKER is None:
+        _PIPER_WORKER = PiperWorker(
+            PIPER_BIN, PIPER_MODEL, DATA_DIR / "tts-tmp",
+            timeout_s=float(os.environ.get("TTS_TIMEOUT", "90")),
+            idle_seconds=TTS_IDLE_SECONDS,
+        )
+    return _PIPER_WORKER
+
+
 def piper_wav(text, speed=1.0):
-    """调用 Piper 子进程合成 wav 字节；带磁盘缓存，固定短语第二次 0 ms。"""
+    """常驻 Piper worker 合成 WAV；缓存键包含模型、参数和文本规范版本。"""
     err = piper_error()
     if err:
         raise RuntimeError("Piper 未就绪：" + err)
+    text = normalize_for_tts(text)
+    if not text:
+        raise ValueError("TTS 文本为空")
     try:
         length_scale = 1.0 / max(0.5, min(2.0, float(speed or 1.0)))
     except (TypeError, ValueError):
         length_scale = 1.0
+    model_stat = PIPER_MODEL.stat()
     key = hashlib.sha1(
-        f"piper-v2|{PIPER_MODEL.name}|{PIPER_MODEL.stat().st_size}|{length_scale:.3f}|{text}".encode("utf-8")
+        f"{TTS_CACHE_VERSION}|{TTS_NORM_VERSION}|{TTS_BACKEND}|{int(TTS_SMOOTH)}|{PIPER_MODEL.name}|"
+        f"{model_stat.st_size}|{int(model_stat.st_mtime)}|{length_scale:.3f}|{text}".encode("utf-8")
     ).hexdigest()[:16]
     cache_path = TTS_CACHE_DIR / f"piper-{key}.wav"
     hit = cache_path.exists() and cache_path.stat().st_size > 1024
-    t0 = time.time()
     if hit:
         data = cache_path.read_bytes()
+        gen_ms = 0
     else:
-        fd, tmp = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        try:
-            proc = subprocess.run(
-                [
-                    str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", tmp,
-                    "--length_scale", f"{length_scale:.3f}",
-                    "--sentence_silence", "0.12",
-                ],
-                input=text.encode("utf-8"),
-                capture_output=True,
-                timeout=90,
-                cwd=str(PIPER_BIN.parent),
-            )
-            if proc.returncode != 0 or os.path.getsize(tmp) < 1024:
-                tail = (proc.stderr or b"").decode("utf-8", "ignore")[-300:]
-                raise RuntimeError(f"Piper 合成失败：{tail}")
-            data = smooth_piper_wav(Path(tmp).read_bytes())
-            cache_path.write_bytes(data)
-            prune_tts_cache()
-        finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+        if TTS_BACKEND == "subprocess":
+            data, gen_ms = piper_subprocess_synth(text, length_scale)
+        else:
+            data, gen_ms = piper_worker().synth(text, length_scale)
+        if TTS_SMOOTH:
+            data = smooth_piper_wav(data)
+        cache_path.write_bytes(data)
+        prune_tts_cache()
     with wave.open(io.BytesIO(data), "rb") as wf:
         duration = wf.getnframes() / float(wf.getframerate() or 1)
-    gen_ms = 0 if hit else int((time.time() - t0) * 1000)
+        sample_rate = wf.getframerate()
     log.info(
-        "tts engine=piper cache=%s chars=%d gen=%sms audio=%.2fs",
-        "hit" if hit else "miss", len(text), gen_ms, duration,
+        "tts engine=%s cache=%s chars=%d gen=%sms audio=%.2fs smooth=%s",
+        tts_engine_name(), "hit" if hit else "miss", len(text), gen_ms, duration, int(TTS_SMOOTH),
     )
     return data, duration, gen_ms, hit
 
 
+def tts_engine_name() -> str:
+    return "piper-subprocess" if TTS_BACKEND == "subprocess" else "piper-persistent"
+
+
+def piper_subprocess_synth(text: str, length_scale: float) -> tuple[bytes, int]:
+    """旧路径：每次启动 Piper。保留为内存紧张或 worker 异常时的回滚选项。"""
+    t0 = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="piper-") as tmp:
+        out = Path(tmp) / "out.wav"
+        proc = subprocess.run(
+            [str(PIPER_BIN), "-m", str(PIPER_MODEL), "-f", str(out),
+             "--length_scale", f"{length_scale:.3f}", "--sentence_silence", "0.12"],
+            input=text.encode("utf-8"), capture_output=True, timeout=90,
+            cwd=str(PIPER_BIN.parent),
+        )
+        if proc.returncode != 0 or not out.exists():
+            raise RuntimeError(f"Piper 合成失败：{proc.stderr[-200:]!r}")
+        data = out.read_bytes()
+    return data, int((time.perf_counter() - t0) * 1000)
+
+
 def piper_tts(text, speed=1.0):
     data, duration, gen_ms, hit = piper_wav(text, speed)
+    with wave.open(io.BytesIO(data), "rb") as wf:
+        sample_rate = wf.getframerate()
     resp = Response(data, mimetype="audio/wav")
     resp.headers["X-Gen-Ms"] = str(gen_ms)
     resp.headers["X-Audio-Seconds"] = str(round(duration, 2))
-    resp.headers["X-TTS-Engine"] = "piper"
+    resp.headers["X-TTS-Engine"] = tts_engine_name()
     resp.headers["X-TTS-Cache"] = "hit" if hit else "miss"
+    resp.headers["X-Audio-Sample-Rate"] = str(sample_rate)
     return resp
 
 
@@ -1071,6 +1103,24 @@ def image_to_jpeg_b64(img: Image.Image, max_side: int = 800) -> str:
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
     return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def vlm_image_b64(data: str, max_side: int = VLM_IMAGE_MAX_SIDE) -> str:
+    """尽量复用客户端已压缩的 JPEG，避免 decode→resize→encode 的重复开销。"""
+    if not data:
+        raise ValueError("缺少图片数据")
+    raw = data.split(",", 1)[1] if data.startswith("data:") else data
+    try:
+        binary = base64.b64decode(raw)
+        probe = Image.open(io.BytesIO(binary))
+        if probe.format == "JPEG" and max(probe.size) <= max_side:
+            return raw
+    except Exception:  # noqa: BLE001
+        binary = None
+    if binary is None:
+        raise ValueError("图片解码失败")
+    img = Image.open(io.BytesIO(binary)).convert("RGB")
+    return image_to_jpeg_b64(img, max_side)
 
 
 def save_debug_image(name, img):
@@ -1303,7 +1353,11 @@ def status():
             "asr": {"ready": asr_engine is not None, "lazy": True, "error": init_error["asr"]},
             "tts": {
                 "ready": not piper_error(),
-                "engine": "piper",
+                "engine": tts_engine_name(),
+                "backend": TTS_BACKEND,
+                "worker": piper_worker().status() if TTS_BACKEND != "subprocess"
+                else {"alive": False, "engine": "piper-subprocess", "synth_count": None},
+                "smooth": TTS_SMOOTH,
                 "error": piper_error() or None,
             },
             "kws": kws.status(),
@@ -1313,6 +1367,7 @@ def status():
             "active": active_stats(),
             "system": system_metrics(),
             "device": device_status(),
+            "traces": {"active": TRACES.active_count(), "summary": TRACES.summary()},
             "memory": {
                 "model_gb": round(vlm_rss / 1024 ** 3, 2),
                 "app_gb": round(app_rss / 1024 ** 3, 2),
@@ -1327,6 +1382,40 @@ def status():
             },
         }
     )
+
+
+@app.get("/api/metrics")
+def api_metrics():
+    kind = (request.args.get("kind") or "").strip() or None
+    try:
+        limit = int(request.args.get("limit", "100"))
+    except ValueError:
+        limit = 100
+    return jsonify({
+        "summary": TRACES.summary(),
+        "active": TRACES.active_count(),
+        "records": TRACES.records(limit=max(1, min(limit, 500)), kind=kind),
+        "tts": piper_worker().status(),
+        "output": OUTPUT.stats(),
+    })
+
+
+@app.post("/api/trace/event")
+def api_trace_event():
+    body = request.get_json(force=True, silent=True) or {}
+    trace_id = str(body.get("trace_id") or "").strip()
+    stage = str(body.get("stage") or "").strip()
+    allowed = {
+        "play_start", "underrun", "tts_failed", "cancel", "client_vad_end",
+        "client_capture_end", "client_request_start",
+    }
+    if not trace_id or stage not in allowed:
+        return jsonify({"ok": False}), 400
+    data = {k: v for k, v in body.items() if k not in ("trace_id", "stage", "at_ms")}
+    if isinstance(body.get("at_ms"), (int, float)):
+        data["wall_ms"] = int(body["at_ms"])
+    TRACES.mark(trace_id, stage, **data)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/health")
@@ -1380,7 +1469,7 @@ def api_vlm():
         leave()
 
 
-def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64="", frame_id="", session_id="", captured_at=""):
+def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64="", frame_id="", session_id="", captured_at="", trace_id=""):
     """统一执行入口，HTTP 路由和语音链路都走这里。"""
     spec = EYES_TASKS.get(task)
     if spec is None:
@@ -1408,6 +1497,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
             }
         if not vlm_health():
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+        TRACES.mark(trace_id, "vlm_start", task="chat")
         with VLM_LOCK:
             out = call_vlm(
                 None,
@@ -1415,6 +1505,11 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
                 spec["max_tokens"],
                 temperature=temperature_for(task),
             )
+        if out.get("prefill_ms") is not None:
+            TRACES.mark(trace_id, "prefill_ms", value_ms=out["prefill_ms"], image=False, task="chat")
+        if out.get("decode_ms") is not None:
+            TRACES.mark(trace_id, "decode_ms", value_ms=out["decode_ms"], task="chat")
+        TRACES.mark(trace_id, "vlm_end", task="chat", latency_ms=out.get("latency_ms"))
         answer = out["answer"] or spec["fallback"]
         session_remember(session_id, question, answer)
         return {
@@ -1446,8 +1541,14 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         prompt = build_eyes_prompt("followup", context=ctx, question=question)
         if not vlm_health():
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+        TRACES.mark(trace_id, "vlm_start", task="followup")
         with VLM_LOCK:
             out = call_vlm(img, prompt, spec["max_tokens"], temperature=temperature_for(task))
+        if out.get("prefill_ms") is not None:
+            TRACES.mark(trace_id, "prefill_ms", value_ms=out["prefill_ms"], image=True, task="followup")
+        if out.get("decode_ms") is not None:
+            TRACES.mark(trace_id, "decode_ms", value_ms=out["decode_ms"], task="followup")
+        TRACES.mark(trace_id, "vlm_end", task="followup", latency_ms=out.get("latency_ms"))
         answer = out["answer"] or spec["fallback"]
         session_remember(session_id, question, answer, visual=bool(img), frame_id=frame_id)
         return {
@@ -1468,8 +1569,10 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         if ocr_engine is None:
             raise RuntimeError("OCR 未初始化：" + str(init_error["ocr"]))
         save_debug_image("date.png", img)
+        TRACES.mark(trace_id, "ocr_start", task="date")
         with OCR_LOCK:
             res = ocr_engine(img)
+        TRACES.mark(trace_id, "ocr_end", task="date")
         parsed = parse_date_label(parse_ocr_result(res))
         if parsed is None:
             return {
@@ -1492,6 +1595,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
 
     if task == "text" and ocr_engine is not None:
         save_debug_image("text.png", img)
+        TRACES.mark(trace_id, "ocr_start", task="text")
         try:
             with OCR_LOCK:
                 res = ocr_engine(img)
@@ -1499,6 +1603,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         except Exception as exc:  # noqa: BLE001
             log.warning("[eyes] OCR 失败，改用 VLM：%s", exc)
             text = ""
+        TRACES.mark(trace_id, "ocr_end", task="text", chars=len(text))
         if text:
             session_remember(session_id, "读文字", text, visual=True, frame_id=frame_id)
             return {
@@ -1510,13 +1615,19 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
 
     vlm_img = image_vlm_b64 or image_b64
     try:
-        img_b64 = image_to_jpeg_b64(decode_image(vlm_img))
+        img_b64 = vlm_image_b64(vlm_img)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"图片解析失败：{exc}")
     if not vlm_health():
         raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
+    TRACES.mark(trace_id, "vlm_start", task=task)
     with VLM_LOCK:
         out = call_vlm(img_b64, prompt_for(task, item, context, question), spec["max_tokens"], temperature=temperature_for(task))
+    if out.get("prefill_ms") is not None:
+        TRACES.mark(trace_id, "prefill_ms", value_ms=out["prefill_ms"], image=bool(img_b64), task=task)
+    if out.get("decode_ms") is not None:
+        TRACES.mark(trace_id, "decode_ms", value_ms=out["decode_ms"], task=task)
+    TRACES.mark(trace_id, "vlm_end", task=task, latency_ms=out.get("latency_ms"))
     answer = settle_eyes_answer(task, out["answer"], spec["fallback"].format(item=item), item)
     session_remember(session_id, item or task, answer, visual=True, frame_id=frame_id)
     return {
@@ -1525,6 +1636,42 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         "answer": answer,
         "latency_ms": int((time.time() - t0) * 1000),
     }
+
+
+def finish_trace_after_request(trace_id: str) -> None:
+    @after_this_request
+    def _finish(resp):
+        status = "ok" if resp.status_code < 400 else "error"
+        TRACES.finish(trace_id, status=status, error="" if status == "ok" else str(resp.status_code))
+        return resp
+
+
+def push_answer_segments(answer, task, source, utterance_id=None, priority=PRIORITY_ANSWER, meta=None, trace_id=""):
+    """把完整答案按语义片段推入输出总线；每段独立 TTS，不重播全文。"""
+    answer = (answer or "").strip()
+    if not answer:
+        return None
+    uid = utterance_id or OUTPUT.new_utterance_id("ans")
+    pieces = segment_text(answer)
+    total = len(pieces)
+    for idx, piece in enumerate(pieces, 1):
+        if idx == 1 and trace_id:
+            TRACES.mark(trace_id, "first_segment", chars=len(piece), segments=total)
+        OUTPUT.push_segment(
+            piece,
+            utterance_id=uid,
+            segment_id=f"{uid}-{idx}",
+            sequence=idx,
+            is_final=(idx == total),
+            priority=priority,
+            source=source,
+            reason=task,
+            ttl=8.0,
+            preempt=(idx == 1),
+            deadline_s=3.0 if idx == 1 else 8.0,
+            meta={**(meta or {}), "task": task, "segments": total, "answer": answer[:260], "request_id": trace_id},
+        )
+    return uid
 
 
 @app.post("/api/talk")
@@ -1545,6 +1692,11 @@ def api_talk():
     item = str(body.get("item") or "").strip()
     question = str(body.get("question") or "").strip()
     session_id = str(body.get("session_id") or "").strip()
+    trace_id = str(body.get("request_id") or "").strip() or OUTPUT.new_utterance_id("talk")
+    TRACES.start(trace_id, "talk", session_id=session_id, task=task)
+    if isinstance(body.get("request_start_ms"), (int, float)):
+        TRACES.mark(trace_id, "request_start", wall_ms=int(body["request_start_ms"]))
+    finish_trace_after_request(trace_id)
     has_image = bool(body.get("image_vlm") or body.get("image"))
     frame_id = canonical_frame_id(
         str(body.get("frame_id") or "").strip(),
@@ -1558,7 +1710,7 @@ def api_talk():
         src = body.get("image_vlm") or body.get("image")
         if src:
             try:
-                img_b64 = image_to_jpeg_b64(decode_image(src))
+                img_b64 = vlm_image_b64(src)
             except Exception:  # noqa: BLE001
                 img_b64 = None
     if task not in ("chat", "followup") and not img_b64:
@@ -1578,14 +1730,28 @@ def api_talk():
             log.info("talk task=chat rule=realtime q=%r", question)
             try:
                 session_remember(session_id, question, CHAT_REALTIME_REPLY)
-                OUTPUT.push(
-                    CHAT_REALTIME_REPLY, priority=PRIORITY_ANSWER, source="chat",
-                    reason="realtime", ttl=8.0,
-                )
-                chunk = json.dumps({"sentence": CHAT_REALTIME_REPLY}, ensure_ascii=False)
-                yield f"data: {chunk}\n\n"
-                chunk = json.dumps({"done": True, "answer": CHAT_REALTIME_REPLY}, ensure_ascii=False)
-                yield f"data: {chunk}\n\n"
+                uid = OUTPUT.new_utterance_id("talk")
+                pieces = segment_text(CHAT_REALTIME_REPLY)
+                total = len(pieces)
+                for idx, piece in enumerate(pieces, 1):
+                    OUTPUT.push_segment(
+                        piece, utterance_id=uid, segment_id=f"{uid}-{idx}", sequence=idx,
+                        is_final=(idx == total), priority=PRIORITY_ANSWER, source="chat",
+                        reason="realtime", ttl=8.0, preempt=(idx == 1), deadline_s=3.0,
+                        meta={"request_id": trace_id},
+                    )
+                    if idx == 1:
+                        TRACES.mark(trace_id, "first_segment", chars=len(piece), segments=total)
+                    payload = {
+                        "segment": {
+                            "text": piece, "utterance_id": uid, "segment_id": f"{uid}-{idx}",
+                            "sequence": idx, "is_final": idx == total,
+                        },
+                        "sentence": piece, "trace_id": trace_id,
+                    }
+                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                TRACES.mark(trace_id, "answer", chars=len(CHAT_REALTIME_REPLY), source="rule")
+                yield f"data: {json.dumps({'done': True, 'answer': CHAT_REALTIME_REPLY, 'trace_id': trace_id}, ensure_ascii=False)}\n\n"
             finally:
                 leave()
 
@@ -1598,51 +1764,96 @@ def api_talk():
     prompt = prompt_for(task, item, context, question)
     max_tokens = spec["max_tokens"]
     t0 = time.time()
+    utterance_id = OUTPUT.new_utterance_id("talk")
 
     def generate():
         buf, full = "", ""
+        stream_seg = SemanticSegmenter()
+        sequence = 0
+        emitted = ""
+        blocked = False
         if not VLM_LOCK.acquire(timeout=30):
             yield f"data: {json.dumps({'error': '设备正忙，请稍后再试'}, ensure_ascii=False)}\n\n"
             leave()
             return
         inner = None
+
+        def emit(piece, final):
+            nonlocal sequence, emitted, blocked
+            piece = (piece or "").strip()
+            if not piece or blocked:
+                return None
+            # 守卫看“已播出 + 本段”的累计文本，避免跨段拼出“可以走……不能通行”。
+            probe = (emitted + piece)[-500:]
+            safe = guard_vision_answer(task, probe)
+            if safe != probe:
+                piece = safe
+                blocked = True
+                final = True
+            sequence += 1
+            if sequence == 1:
+                TRACES.mark(trace_id, "first_segment", chars=len(piece), segments=None)
+            OUTPUT.push_segment(
+                piece, utterance_id=utterance_id, segment_id=f"{utterance_id}-{sequence}",
+                sequence=sequence, is_final=final, priority=PRIORITY_ANSWER, source="chat",
+                reason=task, ttl=8.0, preempt=(sequence == 1), deadline_s=3.0 if sequence == 1 else 8.0,
+                meta={"task": task, "segment": sequence, "request_id": trace_id},
+            )
+            emitted += piece
+            return {
+                "segment": {
+                    "text": piece, "utterance_id": utterance_id,
+                    "segment_id": f"{utterance_id}-{sequence}", "sequence": sequence,
+                    "is_final": final,
+                },
+                "sentence": piece,
+                "trace_id": trace_id,
+            }
+
         try:
             inner = stream_vlm(prompt, img_b64, max_tokens, temperature=temperature_for(task))
+            first_token = False
             for delta in inner:
+                if not first_token and delta:
+                    TRACES.mark(trace_id, "first_token", chars=len(delta))
+                    first_token = True
                 buf += delta
                 full += delta
-                while True:
-                    m = re.search(r"[。！？]", buf)
-                    if not m:
-                        break
-                    sentence, buf = buf[: m.end()], buf[m.end() :]
-                    if sentence.strip():
-                        yield f"data: {json.dumps({'sentence': sentence.strip()}, ensure_ascii=False)}\n\n"
-                if len(buf) >= 60:
-                    yield f"data: {json.dumps({'sentence': buf.strip()}, ensure_ascii=False)}\n\n"
-                    buf = ""
-            if buf.strip():
-                yield f"data: {json.dumps({'sentence': buf.strip()}, ensure_ascii=False)}\n\n"
+                for piece in stream_seg.feed(delta):
+                    payload = emit(piece, False)
+                    if payload:
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if blocked:
+                    break
+            if not blocked:
+                tail = stream_seg.flush()
+                for idx, piece in enumerate(tail, 1):
+                    payload = emit(piece, idx == len(tail))
+                    if payload:
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             answer = settle_eyes_answer(task, full, spec["fallback"].format(item=item), item)
             answer = guard_vision_answer(task, answer)
             session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
-            OUTPUT.push(
-                answer, priority=PRIORITY_ANSWER, source="chat", reason=task,
-                ttl=8.0, dedupe_key=f"talk:{task}:{answer[:40]}",
-            )
-            yield f"data: {json.dumps({'done': True, 'answer': answer}, ensure_ascii=False)}\n\n"
+            TRACES.mark(trace_id, "answer", chars=len(answer), source="vlm")
+            if not emitted and answer:
+                # VLM 返回空文本或只有兜底句时，至少播报一次最终答案。
+                for idx, piece in enumerate(segment_text(answer)):
+                    payload = emit(piece, True)
+                    if payload:
+                        yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'done': True, 'answer': answer, 'utterance_id': utterance_id, 'trace_id': trace_id}, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001
             log.warning("talk stream failed: %s", exc)
-            yield f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'error': str(exc), 'utterance_id': utterance_id}, ensure_ascii=False)}\n\n"
         finally:
             if inner is not None:
                 inner.close()
             VLM_LOCK.release()
             leave()
             log.info(
-                "talk task=%s session=%s frame=%s q=%r latency=%sms answer=%r",
+                "talk task=%s session=%s frame=%s q=%r latency=%sms segments=%d answer=%r",
                 task, session_id, frame_id, question[:80],
-                int((time.time() - t0) * 1000), full[:160],
+                int((time.time() - t0) * 1000), sequence, full[:160],
             )
 
     return Response(
@@ -1672,6 +1883,11 @@ def api_eyes():
         ) if has_image else ""
         session_id = str(body.get("session_id") or "").strip()
         captured_at = str(body.get("captured_at") or "").strip()
+        trace_id = str(body.get("request_id") or "").strip() or OUTPUT.new_utterance_id("eyes")
+        TRACES.start(trace_id, "eyes", session_id=session_id, task=task, has_image=has_image)
+        if isinstance(body.get("request_start_ms"), (int, float)):
+            TRACES.mark(trace_id, "request_start", wall_ms=int(body["request_start_ms"]))
+        finish_trace_after_request(trace_id)
         result = run_eyes(
             task,
             item=item,
@@ -1682,14 +1898,17 @@ def api_eyes():
             frame_id=frame_id,
             session_id=session_id,
             captured_at=captured_at,
+            trace_id=trace_id,
         )
         result["answer"] = guard_vision_answer(task, result.get("answer", ""))
-        OUTPUT.push(
-            result["answer"], priority=PRIORITY_ANSWER, source="eyes", reason=task,
-            ttl=8.0, dedupe_key=f"eyes:{task}:{result['answer'][:40]}",
-            meta={"frame_id": frame_id},
+        TRACES.mark(trace_id, "answer", chars=len(result["answer"]), source=result.get("source"))
+        push_answer_segments(
+            result["answer"], task, "eyes",
+            meta={"frame_id": frame_id, "request_id": trace_id},
+            trace_id=trace_id,
         )
         result["frame_id"] = frame_id
+        result["trace_id"] = trace_id
         log.info(
             "eyes task=%s source=%s item=%r question=%r frame=%s captured=%s age=%s session=%s image_source=%s full=%s vlm=%s latency=%sms answer=%r",
             task, result.get("source"), item, question, frame_id, captured_at,
@@ -1792,6 +2011,15 @@ def api_voice():
     body = request.get_json(force=True, silent=True) or {}
     t0 = time.time()
     session_id = str(body.get("session_id") or "").strip()
+    trace_id = str(body.get("request_id") or "").strip() or OUTPUT.new_utterance_id("voice")
+    TRACES.start(trace_id, "voice", session_id=session_id, has_image=bool(body.get("image") or body.get("image_vlm")))
+    if isinstance(body.get("request_start_ms"), (int, float)):
+        TRACES.mark(trace_id, "request_start", wall_ms=int(body["request_start_ms"]))
+    if isinstance(body.get("speech_end_ms"), (int, float)):
+        TRACES.mark(trace_id, "speech_end", wall_ms=int(body["speech_end_ms"]))
+    if isinstance(body.get("vad_end_ms"), (int, float)):
+        TRACES.mark(trace_id, "vad_end", wall_ms=int(body["vad_end_ms"]))
+    finish_trace_after_request(trace_id)
     sess = get_session(session_id)
 
     try:
@@ -1812,6 +2040,7 @@ def api_voice():
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
     log.info("voice asr sr=%s dur=%.1fs rms=%.4f text=%r", src_sr, duration, rms, text)
+    TRACES.mark(trace_id, "asr_end", text=text, duration_s=round(duration, 2), rms=round(rms, 4))
     if not text:
         log.info("voice empty dur=%.1fs rms=%.4f", duration, rms)
         return voice_reply("", "silent", latency_ms=int((time.time() - t0) * 1000), spoken=False)
@@ -1861,6 +2090,7 @@ def api_voice():
         speech_active=recent_speech_active(),
         session_id=session_id,
     )
+    TRACES.mark(trace_id, "intent_end", intent=task.intent, confidence=task.confidence)
     with SESSION_LOCK:
         sess["armed_until"] = 0.0
         sess["last_cmd"] = cmd
@@ -1870,6 +2100,7 @@ def api_voice():
         "text": text,
         "cmd": cmd,
         "task": task.to_dict(),
+        "trace_id": trace_id,
         "latency_ms": int((time.time() - t0) * 1000),
     }
 
@@ -1928,6 +2159,33 @@ def api_voice():
     if task.intent == "ack":
         return voice_reply("", "ack", spoken=False, **base)
 
+    if task.intent == "guide_status":
+        st = GUIDE.status()
+        d = st.get("decision") or {}
+        age_ms = st.get("frame_age_ms")
+        if not st.get("running"):
+            answer = "引导没有运行，不能判断能不能走"
+        elif age_ms is None or age_ms > int(guide.FRAME_MAX_AGE * 1000 * 2):
+            answer = "引导画面已过期，不能判断，请先停下"
+        elif d.get("state") == "stop":
+            answer = guide.REASON_TEXT.get(d.get("reason"), "引导提示前方有危险，请停下")
+        elif d.get("state") == "left":
+            answer = "引导判断当前向左一点，请用盲杖确认"
+        elif d.get("state") == "right":
+            answer = "引导判断当前向右一点，请用盲杖确认"
+        elif d.get("state") == "straight":
+            answer = "引导判断当前直行通道可用，请用盲杖确认"
+        else:
+            answer = "引导画面当前不可用，不能判断，请先停下"
+        TRACES.mark(trace_id, "answer", chars=len(answer), source="guide")
+        push_answer_segments(
+            answer, "guide_status", "guide_status",
+            priority=PRIORITY_CONFIRM, meta={"frame_id": st.get("frame_id", ""), "request_id": trace_id},
+            trace_id=trace_id,
+        )
+        log.info("voice guide_status state=%s reason=%s age=%sms", d.get("state"), d.get("reason"), age_ms)
+        return voice_reply(answer, "guide_status", spoken=True, guide=st, **base)
+
     if "stop_guide" in task.actions and guide_active:
         GUIDE.stop(announce=False)
 
@@ -1948,29 +2206,29 @@ def api_voice():
 
     try:
         if task.intent == "scene":
-            result = run_eyes("scene", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+            result = run_eyes("scene", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "detail":
-            result = run_eyes("detail", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+            result = run_eyes("detail", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "read_text":
-            result = run_eyes("text", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+            result = run_eyes("text", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "read_date":
-            result = run_eyes("date", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+            result = run_eyes("date", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "find_object":
             target = task.slots.get("target")
             if target in ("toilet", "exit"):
-                result = run_eyes(target, image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+                result = run_eyes(target, image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
             else:
-                result = run_eyes("item", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+                result = run_eyes("item", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "compare":
-            result = run_eyes("compare", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at)
+            result = run_eyes("compare", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "followup":
             result = run_eyes(
                 "followup", context=context, question=task.slots.get("question", cmd),
                 image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id,
-                session_id=session_id, captured_at=captured_at,
+                session_id=session_id, captured_at=captured_at, trace_id=trace_id,
             )
         elif task.intent == "chat":
-            result = run_eyes("chat", question=cmd, frame_id=frame_id, session_id=session_id)
+            result = run_eyes("chat", question=cmd, frame_id=frame_id, session_id=session_id, trace_id=trace_id)
         else:
             raise ValueError(f"任务未实现：{task.intent}")
     except RuntimeError as exc:
@@ -1986,14 +2244,11 @@ def api_voice():
     eyes_task = result.get("task") or task.intent
     answer = guard_vision_answer(eyes_task, result["answer"])
     result["answer"] = answer
-    OUTPUT.push(
-        answer,
-        priority=PRIORITY_ANSWER,
-        source="voice",
-        reason=task.intent,
-        ttl=8.0,
-        dedupe_key=f"voice:{task.intent}:{answer[:40]}",
-        meta={"task": eyes_task, "frame_id": frame_id},
+    TRACES.mark(trace_id, "answer", chars=len(answer), source=result.get("source"))
+    push_answer_segments(
+        answer, eyes_task, "voice",
+        meta={"frame_id": frame_id, "request_id": trace_id},
+        trace_id=trace_id,
     )
 
     log.info(
@@ -2012,6 +2267,7 @@ def api_voice():
             "source": result["source"],
             "answer": answer,
             "frame_id": frame_id,
+            "trace_id": trace_id,
             "latency_ms": int((time.time() - t0) * 1000),
             "spoken": True,
             "armed": False,
@@ -2164,10 +2420,22 @@ def api_output_cancel():
 
 @app.get("/api/output/stream")
 def api_output_stream():
+    last_id = request.headers.get("Last-Event-ID") or request.args.get("last_event_id") or ""
+    try:
+        since = int(last_id) if last_id else None
+    except ValueError:
+        since = None
     q = OUTPUT.subscribe()
+
+    def sse(item: dict) -> str:
+        if item.get("id") is not None:
+            return f"id: {item['id']}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
+        return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
 
     def generate():
         yield "retry: 3000\n\n"
+        for item in OUTPUT.history_since(since):
+            yield sse(item)
         try:
             while True:
                 try:
@@ -2175,10 +2443,7 @@ def api_output_stream():
                 except queue.Empty:
                     yield ": ping\n\n"
                     continue
-                if item.get("type") == "speech":
-                    yield f"id: {item.get('id')}\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
-                else:
-                    yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+                yield sse(item)
         except GeneratorExit:
             pass
         finally:
@@ -2195,6 +2460,7 @@ def api_output_stream():
 def api_tts():
     body = request.get_json(force=True, silent=True) or {}
     text = (body.get("text") or "").strip()
+    trace_id = str(body.get("trace_id") or "").strip()
     if not text:
         return jsonify({"error": "文本为空"}), 400
     if len(text) > 200:
@@ -2203,14 +2469,32 @@ def api_tts():
     speed = float(body.get("speed", 1.0))
     if engine != "piper":
         return jsonify({"error": f"未知 TTS 引擎：{engine}"}), 400
+    if trace_id:
+        TRACES.mark(trace_id, "tts_start", chars=len(text))
     if not try_enter("light"):
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
     try:
         with TTS_LOCK:
-            return piper_tts(text, speed)
+            resp = piper_tts(text, speed)
+        if trace_id:
+            TRACES.mark(
+                trace_id, "tts_ready",
+                value_ms=int(resp.headers.get("X-Gen-Ms") or 0),
+                cache=resp.headers.get("X-TTS-Cache"),
+                chars=len(text),
+            )
+        return resp
+    except TTSInterrupted as exc:
+        if trace_id:
+            TRACES.mark(trace_id, "tts_failed", error=str(exc))
+        return jsonify({"error": str(exc)}), 499
     except RuntimeError as exc:
+        if trace_id:
+            TRACES.mark(trace_id, "tts_failed", error=str(exc))
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
+        if trace_id:
+            TRACES.mark(trace_id, "tts_failed", error=str(exc))
         return jsonify({"error": f"TTS 失败：{exc}"}), 500
     finally:
         leave("light")
@@ -2230,6 +2514,7 @@ if __name__ == "__main__":
     )
     atexit.register(lambda: log.info("web exit"))
     atexit.register(stop_device_services)
+    atexit.register(lambda: _PIPER_WORKER.stop() if _PIPER_WORKER is not None else None)
     log.info("piper=%s", "ready" if not piper_error() else piper_error())
     threading.Thread(target=init_ocr, daemon=True).start()
     threading.Thread(target=asr_idle_reaper, daemon=True).start()

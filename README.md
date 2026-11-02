@@ -2,7 +2,7 @@
 
 面向视障辅助场景的离线多模态服务，模型全部本地推理，不联网。当前在 Windows 本机完成开发与调优，目标运行环境为下列硬件。
 
-当前代码版本：v1.2.0（第一阶段服务端引导 + KWS + 输出仲裁）。改造说明、实测结果与未验证项见 [第一阶段改造说明](docs/第一阶段-视障辅助系统改造说明.md)，CM5 安装与运维见 [CM5 部署与运维](docs/CM5-部署与运维.md)，性能报告模板见 [CM5 性能实测报告模板](docs/CM5-性能实测报告模板.md)。
+当前代码版本：v1.3.0（第二阶段：流式语义分段、常驻 Piper、连续播放、延迟 trace 与候选对比）。第一阶段改造说明见 [第一阶段改造说明](docs/第一阶段-视障辅助系统改造说明.md)，第二阶段实测与候选对比见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)，CM5 安装与运维见 [CM5 部署与运维](docs/CM5-部署与运维.md)，性能报告模板见 [CM5 性能实测报告模板](docs/CM5-性能实测报告模板.md)（模板中数据仍需按本机复测填写）。
 
 ## 目标硬件
 
@@ -39,13 +39,17 @@ AI-Deployment/
 ├─ .gitignore
 ├─ docs/
 │  ├─ CM5-边缘AI模型选型报告-2026-10-31.md   选型依据与对比结论
-│  ├─ 第一阶段-视障辅助系统改造说明.md       本阶段改动、测试与未验证项
+│  ├─ 第一阶段-视障辅助系统改造说明.md       第一阶段改动、测试与未验证项
+│  ├─ 第二阶段-语音与视觉优化说明.md         流式分段、常驻 TTS、候选实测与回滚
 │  ├─ CM5-部署与运维.md                     ARM64 安装、systemd、健康检查、回滚
 │  └─ CM5-性能实测报告模板.md               实测记录模板
 └─ CM5-AI/
    ├─ 启动测试台.bat      双击启动；关闭窗口即停止
    ├─ app/
    │  ├─ server.py         Flask 服务，端口 8090
+   │  ├─ stream_text.py    朗读规范化 + 流式语义分段
+   │  ├─ tts_worker.py     常驻 Piper worker
+   │  ├─ trace.py          请求时间线与 P50/P95/P99
    │  ├─ guide.py          分割 + 质量 + 连通通道 + 状态机
    │  ├─ guide_service.py  服务端持续引导循环与看门狗
    │  ├─ output.py         统一输出仲裁（危险抢占/去重/取消）
@@ -77,7 +81,7 @@ AI-Deployment/
 |---|---|---|---|
 | 场景 / 空间 / VQA | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091 |
 | 中文 OCR | RapidOCR + PP-OCRv6_small | ONNX | det / rec / cls 三个模型 |
-| 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎，子进程按需合成，约 63 MB |
+| 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎；常驻 worker 一次加载，约 63 MB |
 | 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置 60 秒释放 |
 | 语音唤醒 | sherpa-onnx-kws-zipformer-wenetspeech-3.3M | ONNX | 中文拼音 KWS，Apache-2.0，关键词见 `app/config/keywords.txt` |
 | 无盲道引导 | SegFormer-B0 ADE20K | ONNX | 384×288 输入，输出动态类别图；NVIDIA 非商业许可 |
@@ -102,7 +106,7 @@ x iǎo b īng @小冰
 
 `sherpa-onnx-kws` 阈值 `KWS_SCORE=2.0`、`KWS_THRESHOLD=0.10` 只在官方真人测试音频上验证过；「小冰小冰」必须用真人录音重新标定，不能用 TTS 合成音频冒充唤醒样本。
 
-## 两条处理链（v1.2.0）
+## 两条处理链（v1.3.0）
 
 ```text
 持续引导：CSI 摄像头 / 浏览器调试帧
@@ -112,8 +116,9 @@ x iǎo b īng @小冰
 
 语音交互：麦克风 → KWS「小冰小冰」→ VAD → ASR
   → 规则意图（控制动作 / 视觉任务 / 聊天 / 未知）
-  → 引导控制、OCR、VLM 或聊天
-  → 安全一致性守卫 → 输出仲裁 → TTS 播放
+  → 引导快路径 / OCR 快路径 / VLM 慢路径
+  → 增量文本 → 语义片段 → 安全守卫
+  → SSE 分段 → 常驻 Piper → 连续音频播放
 ```
 
 - 引导感知在服务端独立运行，不依赖浏览器页面持续轮询；浏览器只送帧和显示。
@@ -121,6 +126,28 @@ x iǎo b īng @小冰
 - 危险停止与感知失效 priority 0，可抢占普通播报。
 - 同一结构化结果生成文字与语音，避免两者冲突。
 - 所有帧/结果队列有界；过期帧、晚到结果、取消的旧音频会被丢弃。
+- 同一回答的多个片段追加播放，不重新启动整段；新回答/危险才抢占。
+- `done` 不再重播全文；SSE 重连按 `Last-Event-ID` 回放并用 `utterance_id|segment_id` 去重。
+- 引导状态查询与 OCR 文本不经过 VLM；视觉问答仍是 prefill 主导的慢路径。
+
+## 第二阶段实测摘要
+
+以下为 Windows AMD64 开发机数据，不是 CM5 实测；详细方法与原始文件见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)。
+
+| 项目 | 结果 | CM5 状态 |
+|---|---|---|
+| Piper 常驻 vs 逐次启动（5 字短句） | 136 ms vs 522 ms | 未实测 |
+| Piper 常驻（25 字 / 121 字） | 375 ms / 1747 ms | 未实测 |
+| 语义分段首段 | 12–25 字，实测 24 字先播 | 逻辑已验证 |
+| `/api/talk` 视觉首段 / 全文 | 3.6 s / 4.2 s（n=1；prefill 约 3.0 s） | 未实测 |
+| 引导状态快路径（服务端） | 16–31 ms（ASR 已热）；ASR 冷加载后首句约 2.6 s | 未实测 |
+| OCR 文本快路径（服务端） | 296–312 ms（热），首次 750 ms | 未实测 |
+| MiniCPM-V 512 prefill P50 | 2.6 s（仅任务 prompt）/ 2.88–3.05 s（实际含 EYES_RULE，234 tokens） | 未实测 |
+| SmolVLM-256M wall P50 | 2.37–2.71 s，质量不合格 | 未实测 |
+| Matcha 中文 RTF | 0.04–0.06，但会丢 A/B 字母 | 未实测 |
+| Kokoro INT8 RTF | 1.24–1.48，合成慢于播放 | 未实测 |
+
+语音样本在 `CM5-AI/data/tts-samples/`，可直接试听；ASR 回听记录在 `CM5-AI/data/tts-asr-check.json`。ASR 只用于筛查漏字，不能替代人工音质评价。
 
 ## 启动
 
@@ -176,18 +203,21 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 |---|---|---|
 | `/api/status` | GET | 无；返回 VLM / OCR / ASR / TTS / KWS / 引导 / 输出 / 设备 / 内存 / CPU / 温度状态 |
 | `/api/health` | GET | 无；systemd 健康检查，不做模型加载 |
-| `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question`、`frame_id`、`captured_at` |
-| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`session_id`、`wake_detected`；免唤醒窗口由服务端维护 |
+| `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question`、`frame_id`、`captured_at`、`request_id` |
+| `/api/talk` | POST | 同上；SSE 逐段返回 `segment`，最后 `done`；视觉任务流式输出 |
+| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`session_id`、`wake_detected`、`request_id`、`speech_end_ms`、`vad_end_ms`；免唤醒窗口由服务端维护 |
 | `/api/kws` | POST | `audio`（WAV base64）；返回 `keyword` / `hits` / `latency_ms` |
 | `/api/ocr` | POST | `image` |
-| `/api/tts` | POST | `text`、`engine`、`speed` |
+| `/api/tts` | POST | `text`、`engine`、`speed`、`trace_id` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
 | `/api/guide` | POST | 单帧调试/回放；`image`、`frame_id`；返回 raw 方向、质量、通道与计时 |
 | `/api/guide/start` | POST | `source`（`browser` / `device`）；启动服务端引导循环 |
 | `/api/guide/frame` | POST | `image`、`frame_id`、`captured_at`；只保留最新一帧 |
 | `/api/guide/status` | GET | 服务端引导状态、稳定/原始方向、指标、帧龄、P50/P95、丢弃数 |
 | `/api/guide/stop` | POST | `reason`；停止引导并撤销方向 |
-| `/api/output/stream` | GET | SSE；推送 `speech` / `cancel` 事件 |
+| `/api/metrics` | GET | 最近 trace 的原始记录、P50/P95/P99、失败数、TTS worker 状态 |
+| `/api/trace/event` | POST | 客户端补记 `play_start` / `underrun` / `tts_segment_failed` |
+| `/api/output/stream` | GET | SSE；推送 `speech` / `cancel`；支持 `Last-Event-ID` 回放 |
 | `/api/output/cancel` | POST | `min_priority`；停止普通播报，不关引导 |
 | `/api/device/status` | GET | 摄像头、ALSA、设备语音与 sink 状态 |
 
@@ -276,7 +306,7 @@ $env:MEM_BUDGET_GB = "3.2"
 | 优化前（ASR 常驻 + 上下文 2048） | 3.58 GB |
 | 引导模型加载并推理（Windows，v1.2.0） | 进程内增量 288.5 MB（531.6 → 820.1 MB） |
 
-前几行为 v1.0.12 及以前的实测值，当时服务端 TTS 不加载；v1.2.0 的引导模型增量来自 Windows 基准工具，CM5 上的 ORT 内存与峰值仍需实测。v1.0.24 起 TTS 改为 Piper 子进程，用完即退，不再常驻服务进程。
+前几行为 v1.0.12 及以前的实测值，当时服务端 TTS 不加载；v1.2.0 的引导模型增量来自 Windows 基准工具，CM5 上的 ORT 内存与峰值仍需实测。v1.3.0 起 TTS 默认使用常驻 Piper worker（状态页显示 `worker.alive` 与 `load_ms`）；内存紧张时可设 `TTS_IDLE_SECONDS=60~120` 空闲释放，或 `TTS_BACKEND=subprocess` 回到逐次启动。常驻 Piper 的 RSS 增量在 Windows 上约 90 MB，需在 CM5 复测。
 
 页面右上角实时显示「模型内存 当前 / 预算」，超预算变红；旁边的「模型 CPU」显示模型侧进程占整机 CPU 的百分比，只统计 llama-server 与本服务进程（内含 OCR / ASR / 引导），按整机逻辑核心归一化，不含系统其它进程。Piper/aplay 只计入内存，不计入 CPU 读数。首次采样显示 `--`，第二次轮询起才有读数。
 
@@ -286,7 +316,7 @@ $env:MEM_BUDGET_GB = "3.2"
 
 1. **先立基准再动参数**：每次改动前用同一组图片和同一句话记录输出与耗时，改完复测；输出一致才保留，不一致就回退。
 2. **只压不影响精度的维度**：VLM 上下文 2048 降到 1024（单图加短 prompt 用不完）、VLM 输入长边 800 降到 512（实测 640 会触发切图、512 是延迟拐点）。OCR 输入保持 800，不跟着一起降，避免小字识别退化。
-3. **只有低频模块才按需加载**：ASR 在语音请求时才加载，闲置 60 秒释放；TTS 由 Piper 子进程按需启动，用完即退；VLM 每帧都要用，保持常驻。
+3. **只有低频模块才按需加载**：ASR 在语音请求时才加载，闲置 60 秒释放；VLM 每帧都要用，保持常驻；TTS 常驻 worker 可用 `TTS_IDLE_SECONDS` 控制释放，默认长驻以降低首声延迟。
 4. **不靠降精度省内存**：模型维持现有的 Q4_K_M、fp32、int8 精度，不再做更激进的量化，中文识别质量是底线。
 5. **宁可拒绝，不降级输出**：超出预算直接返回 503，不让模型在缺内存时返回截断或半截答案。
 6. **兜底句写死**：找不到目标时只念固定兜底句，避免小模型在低资源状态下自由发挥。
@@ -460,3 +490,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.1.0 | 新增无盲道引导（试验）：SegFormer-B0 分割 + 保守方向决策，测试台新增引导页签 |
 | v1.1.1 | 语音闭环与稳定性修复：回声过滤、服务端免唤醒窗口、无画面追问、意图归一化、VAD/ASR 门限、上下文收紧、llama API key/CORS、会话日志 |
 | v1.2.0 | 第一阶段改造：服务端持续引导循环 + 连通通道/瓶颈/前方物体 + 状态机/看门狗；KWS 唤醒；结构化意图与控制动作；统一输出仲裁与危险抢占；帧标识冲突检测；VLM 计时字段修正；设备摄像头/ALSA 适配；ARM64 部署脚本、回放/基准工具与 153 项测试 |
+| v1.3.0 | 第二阶段优化：流式语义分段（首段 12–25/后续 25–50 字）+ 常驻 Piper + 浏览器 `AudioContext` 连续调度 + 设备 ALSA 连续 PCM；分片段安全守卫与输出仲裁；引导状态/OCR 快路径；`trace_id` 分阶段延迟与 `/api/metrics`；TTS/VLM 候选实测与回滚开关；176 项测试 |

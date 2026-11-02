@@ -74,5 +74,43 @@ class OutputBusTests(unittest.TestCase):
         self.assertEqual(self.bus.stats()["subscribers"], 0)
 
 
+class SegmentOutputTests(unittest.TestCase):
+    def setUp(self):
+        self.bus = OutputBus()
+        self.q = self.bus.subscribe()
+
+    def test_segments_same_utterance_append(self):
+        uid = "u1"
+        first = self.bus.push_segment("第一段。", utterance_id=uid, segment_id="s1", sequence=1, is_final=False, preempt=True)
+        second = self.bus.push_segment("第二段。", utterance_id=uid, segment_id="s2", sequence=2, is_final=True)
+        self.assertTrue(first["preempt"])
+        self.assertFalse(second["preempt"])
+        self.assertEqual(second["utterance_id"], uid)
+        self.assertFalse(first["is_final"])
+        self.assertTrue(second["is_final"])
+
+    def test_duplicate_segment_ignored(self):
+        self.bus.push_segment("第一段。", utterance_id="u", segment_id="s1", sequence=1)
+        self.assertIsNone(
+            self.bus.push_segment("第一段。", utterance_id="u", segment_id="s1", sequence=1)
+        )
+
+    def test_history_replay(self):
+        first = self.bus.push_segment("一。", utterance_id="u", segment_id="s1", sequence=1)
+        second = self.bus.push_segment("二。", utterance_id="u", segment_id="s2", sequence=2)
+        history = self.bus.history_since(first["id"])
+        self.assertEqual([x["segment_id"] for x in history], ["s2"])
+
+    def test_danger_clears_history(self):
+        self.bus.push_segment("普通回答。", utterance_id="u", segment_id="s1", sequence=1)
+        self.bus.push_segment("危险", priority=PRIORITY_DANGER, source="guide", reason="stairs")
+        self.assertEqual(len(self.bus.history_since(0)), 1)
+        self.assertEqual(self.bus.history_since(0)[0]["priority"], PRIORITY_DANGER)
+
+    def test_playback_browser_by_default(self):
+        event = self.bus.push_segment("测试。", utterance_id="u", segment_id="s1", sequence=1)
+        self.assertEqual(event["playback"], "browser")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

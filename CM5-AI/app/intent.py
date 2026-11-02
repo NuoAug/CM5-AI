@@ -56,6 +56,10 @@ CAMERA_OFF = re.compile(
 )
 TOPIC_SWITCH = re.compile(r"换个话题|聊点别的|只聊天|继续聊天|不看东西|不想看图")
 DEFINITION = re.compile(r"是什么意思|什么意思|怎么理解|如何定义")
+GUIDE_QUERY = re.compile(
+    r"现在能走吗|前面能走吗|可以直行吗|现在安全吗|引导状态|前面通不通|"
+    r"能不能走|可以走吗|现在可以走吗|前方能走吗|还能走吗"
+)
 AMBIGUOUS_STOP = re.compile(r"^(?:停一下|停下来|暂停|先停|停停|等等|等一下)$")
 
 DATE_WORDS = ("日期", "生产", "保质期", "过期", "批号", "到期", "有效期")
@@ -290,6 +294,17 @@ def parse(
             session_id=session_id,
             clarify="现在没有正在进行的播报或引导。",
             note="无状态可消歧",
+        )
+
+    # 引导状态查询走快路径，不调用 VLM；语义只复用当前引导事件。
+    # 询问楼梯/扶梯/过马路时不是“当前能否直行”，继续走视觉/安全兜底。
+    if GUIDE_QUERY.search(cmd) and not re.search(r"楼梯|扶梯|电梯|马路|斑马线|过街", cmd):
+        return _task(
+            "guide_status",
+            priority=2,
+            confidence=0.95,
+            session_id=session_id,
+            deadline_s=5.0,
         )
 
     # 视觉任务：卫生间隔间/出口归入 find_object 的特殊目标

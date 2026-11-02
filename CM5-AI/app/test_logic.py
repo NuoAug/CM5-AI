@@ -250,7 +250,7 @@ class PromptTests(unittest.TestCase):
         self.assertNotIn("1到2句", prompt)
 
     def test_scene_uses_short_rule(self):
-        self.assertIn("1到2句", server.build_eyes_prompt("scene"))
+        self.assertIn("一到两句", server.build_eyes_prompt("scene"))
 
 
 class FrameAgeTests(unittest.TestCase):

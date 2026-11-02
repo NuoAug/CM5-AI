@@ -227,15 +227,102 @@ class AlsaCapture:
 
 
 class AlsaPlayer:
-    """aplay 播放 WAV；可被危险提示打断。"""
+    """aplay 连续 PCM 播放通道；可被危险提示打断。
+
+    逐段合成时把 PCM 写入同一个 aplay 进程，避免每句重新启动进程产生空隙。
+    如果无法建立流式通道，仍可通过 play() 逐文件播放作为兜底。
+    """
 
     def __init__(self, device: str = ""):
         self.device = device or os.environ.get("ALSA_OUTPUT", "plughw:0,0")
         self._proc: Optional[subprocess.Popen] = None
+        self._stream_proc: Optional[subprocess.Popen] = None
+        self._stream_rate = 0
+        self._stream_channels = 0
         self._lock = threading.RLock()
 
     def available(self) -> bool:
         return bool(audio_tools()["aplay"])
+
+    def _open_stream(self, rate: int, channels: int) -> bool:
+        exe = audio_tools()["aplay"]
+        try:
+            proc = subprocess.Popen(
+                [exe, "-q", "-D", self.device, "-t", "raw", "-f", "S16_LE",
+                 "-r", str(int(rate)), "-c", str(int(channels))],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        with self._lock:
+            self._stream_proc = proc
+            self._stream_rate = int(rate)
+            self._stream_channels = int(channels)
+        return True
+
+    def feed(self, wav_bytes: bytes, cancel_event: threading.Event) -> bool:
+        """把一段 WAV 的 PCM 追加到连续播放通道。"""
+        if cancel_event.is_set() or not self.available():
+            return False
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            rate = wf.getframerate()
+            channels = wf.getnchannels()
+            width = wf.getsampwidth()
+            pcm = wf.readframes(wf.getnframes())
+        if width != 2:
+            return False
+        with self._lock:
+            proc = self._stream_proc
+            stale = proc is None or proc.poll() is not None or rate != self._stream_rate \
+                or channels != self._stream_channels
+        if stale:
+            self.end_stream()
+            if not self._open_stream(rate, channels):
+                return False
+            with self._lock:
+                proc = self._stream_proc
+        try:
+            proc.stdin.write(pcm)
+            proc.stdin.flush()
+            return True
+        except (BrokenPipeError, OSError, AttributeError):
+            self.end_stream()
+            # 播放进程可能被设备重置；重建一次，避免整句丢失。
+            if cancel_event.is_set() or not self._open_stream(rate, channels):
+                return False
+            with self._lock:
+                proc = self._stream_proc
+            try:
+                proc.stdin.write(pcm)
+                proc.stdin.flush()
+                return True
+            except (BrokenPipeError, OSError, AttributeError):
+                self.end_stream()
+                return False
+
+    def end_stream(self) -> None:
+        with self._lock:
+            proc = self._stream_proc
+            self._stream_proc = None
+            self._stream_rate = 0
+            self._stream_channels = 0
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            proc.wait(timeout=60)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
 
     def play(self, wav_bytes: bytes, cancel_event: threading.Event) -> bool:
         if not self.available():
@@ -283,10 +370,15 @@ class AlsaPlayer:
                 proc.kill()
             except Exception:  # noqa: BLE001
                 pass
+        self.end_stream()
 
 
 class DeviceSink:
-    """把统一输出总线接到 Piper + aplay；播报前暂停麦克风，避免自听回环。"""
+    """把统一输出总线接到 Piper + 连续 PCM 播放。
+
+    同一 utterance 的多个片段只暂停一次麦克风，最后一段播完再恢复；
+    新回答或危险提示到来时由 OutputBus 调用 stop() 结束当前通道。
+    """
 
     def __init__(
         self,
@@ -301,30 +393,59 @@ class DeviceSink:
         self.after_speak = after_speak
         self._lock = threading.RLock()
         self._cancel = threading.Event()
+        self._utterance = ""
         self._speaking = False
 
-    def speak(self, text: str, cancel_event: threading.Event) -> None:
+    def speak(self, payload, cancel_event: threading.Event) -> None:
+        if isinstance(payload, dict):
+            text = str(payload.get("text") or "")
+            utterance = str(payload.get("utterance_id") or "")
+            is_final = bool(payload.get("is_final", True))
+        else:
+            text, utterance, is_final = str(payload or ""), "", True
+        if not text:
+            return
         with self._lock:
             self._cancel = cancel_event
-            self._speaking = True
-        if self.before_speak:
-            self.before_speak()
+            new_utterance = utterance and utterance != self._utterance
+            if new_utterance:
+                if self._speaking:
+                    self._finish_utterance()
+                self._utterance = utterance
+            if not self._speaking:
+                self._speaking = True
+                if self.before_speak:
+                    self.before_speak()
+        ok = False
         try:
             if cancel_event.is_set():
                 return
             wav = self.synth(text)
             if cancel_event.is_set():
                 return
-            self.player.play(wav, cancel_event)
+            if not self.player.feed(wav, cancel_event) and not cancel_event.is_set():
+                raise RuntimeError("ALSA 连续播放写入失败")
+            ok = True
         finally:
-            self._speaking = False
-            if self.after_speak:
-                self.after_speak()
+            if is_final or cancel_event.is_set() or not ok:
+                with self._lock:
+                    if self._speaking:
+                        self._finish_utterance()
+
+    def _finish_utterance(self) -> None:
+        self.player.end_stream()
+        self._utterance = ""
+        self._speaking = False
+        if self.after_speak:
+            self.after_speak()
 
     def stop(self) -> None:
         with self._lock:
             self._cancel.set()
         self.player.stop()
+        with self._lock:
+            if self._speaking:
+                self._finish_utterance()
 
 
 def encode_wav(samples: np.ndarray, sample_rate: int = 16000) -> bytes:

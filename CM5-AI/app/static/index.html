@@ -752,11 +752,14 @@ $('copy-ocr').onclick = async () => {
   catch (e) { toast('复制失败，请手动选择'); }
 };
 
-async function synthTts(text, engine = 'piper', speedOverride = null) {
+async function synthTts(text, engine = 'piper', speedOverride = null, signal = null, traceId = '') {
   const speed = Number(speedOverride) > 0 ? Number(speedOverride) : Number($('tts-speed').value);
+  const body = { text, engine, speed };
+  if (traceId) body.trace_id = traceId;
   const r = await fetch('/api/tts', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, engine, speed })
+    body: JSON.stringify(body),
+    signal
   });
   if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
   return {
@@ -787,8 +790,7 @@ $('tts-ocr').onclick = () => playTts(state.lastOcr);
 
 function speakAnswer(text) {
   if (!text) return;
-  const base = Number($('tts-speed').value) || 1.0;
-  const speed = text.length >= 60 ? Math.max(base, 1.15) : base;
+  const speed = Number($('tts-speed').value) || 1.0;
   speakAll(text, { speed });
 }
 
@@ -807,30 +809,52 @@ function handleOutputEvent(ev) {
     if (j.epoch != null && j.epoch < outputEpoch) return;
     outputEpoch = j.epoch != null ? j.epoch : outputEpoch;
     stopPlayer();
+    streamPlayer.stop();
     outputPriority = 99;
     voiceState('播报已停止', false);
     return;
   }
   if (j.type !== 'speech' || !j.text) return;
+  if (j.playback === 'device') return;  // 设备端 ALSA sink 已接管，避免浏览器重复发声
   if (j.epoch != null && j.epoch < outputEpoch) return;
+
+  const job = {
+    utteranceId: j.utterance_id || '',
+    segmentId: j.segment_id || '',
+    sequence: j.sequence || 0,
+    text: j.text,
+    priority: j.priority,
+    isFinal: !!j.is_final,
+    speed: Number($('tts-speed').value) || null,
+    deadlineMs: j.deadline_s ? Number(j.deadline_s) * 1000 : null,
+    receivedAt: Date.now(),
+    traceId: (j.meta && (j.meta.request_id || j.meta.trace_id)) || j.utterance_id || '',
+    answer: (j.meta && j.meta.answer) || '',
+  };
+
   if (j.priority === 0) {
-    // 危险/感知失效：无条件打断，忽略“自动朗读”和“引导语音”开关
     stopPlayer();
+    streamPlayer.stop();
     outputPriority = 0;
-    outputPlaying = speakAll(j.text).finally(() => { if (outputPriority === 0) outputPriority = 99; });
+    streamPlayer.enqueue(job);
     return;
   }
   if (j.source === 'guide' && j.priority <= 1 && !$('guide-voice').checked) return;
   if (j.priority >= 3 && !$('eyes-auto-tts').checked) return;
-  const now = Date.now();
-  if (j.text === outputLastText && now - outputLastAt < 1500) return;
+
+  const sameUtterance = streamPlayer.activeUtterance && j.utterance_id === streamPlayer.activeUtterance;
+  if (sameUtterance) {
+    streamPlayer.enqueue(job);
+    return;
+  }
   if (player.running && j.priority > outputPriority) return;
-  if (player.running) stopPlayer();
+  stopPlayer();
+  streamPlayer.stop();
   outputPriority = j.priority;
-  outputLastText = j.text;
-  outputLastAt = now;
-  outputPlaying = speakAll(j.text).finally(() => { if (outputPriority === j.priority) outputPriority = 99; });
+  streamPlayer.enqueue(job);
 }
+
+document.addEventListener('cm5-tts-end', () => { outputPriority = 99; });
 
 function connectOutput() {
   try {
@@ -847,9 +871,11 @@ connectOutput();
 
 async function runEyes(task, btn, question = '') {
   const it = beginInteraction();
+  const requestStart = Date.now();
+  const requestId = newFrameId('req');
   const frame = await captureFrame();
   if (!frame && task !== 'followup') return toast('请先拍照或打开相机');
-  const body = { task, session_id: sessionId };
+  const body = { task, session_id: sessionId, request_id: requestId, request_start_ms: requestStart };
   if (task === 'item') {
     const item = $('eyes-item').value.trim();
     if (!item) return toast('请输入要找的东西');
@@ -896,6 +922,8 @@ $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').cl
 // ---------- 合并输入：勾选「结合画面」走追问，否则走聊天 ----------
 async function sendChat(q, btn) {
   const it = beginInteraction();
+  const requestStart = Date.now();
+  const requestId = newFrameId('req');
   const out = $('out-eyes');
   out.classList.remove('empty');
   out.textContent = '思考中…';
@@ -904,7 +932,7 @@ async function sendChat(q, btn) {
     const resp = await fetch('/api/talk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'chat', question: q, frame_id: currentFrame.id, session_id: sessionId }),
+      body: JSON.stringify({ task: 'chat', question: q, frame_id: currentFrame.id, session_id: sessionId, request_id: requestId, request_start_ms: requestStart }),
       signal: it.signal
     });
     if (!resp.ok) {
@@ -930,8 +958,9 @@ async function sendChat(q, btn) {
         try { payload = JSON.parse(chunk.slice(5).trim()); } catch (e) { continue; }
         if (it.gen !== interactionGen) return;
         if (payload.error) throw new Error(payload.error);
-        if (payload.sentence) {
-          text += payload.sentence;
+        const piece = payload.segment && payload.segment.text ? payload.segment.text : payload.sentence;
+        if (piece) {
+          text += piece;
           out.textContent = text;
         }
         if (payload.done && payload.answer) {
@@ -940,7 +969,7 @@ async function sendChat(q, btn) {
         }
       }
     }
-    // 等整段回答生成完再一次性播报，避免流式逐句合成造成的句间停顿
+    // SSE 正常时由 streamPlayer 逐段播报；仅在 SSE 不可用时才整段兜底。
     if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(answerText || text);
     $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
   } catch (e) {
@@ -1005,6 +1034,10 @@ async function ensureKwsReady() {
 document.addEventListener('cm5-tts-start', (e) => {
   resetVad();
   vLastSpoken = (e.detail && e.detail.text) || '';
+  vSpokenAt = performance.now();
+});
+document.addEventListener('cm5-tts-text', (e) => {
+  vLastSpoken = (e.detail && e.detail.text) || vLastSpoken;
   vSpokenAt = performance.now();
 });
 document.addEventListener('cm5-tts-end', () => {
@@ -1084,6 +1117,9 @@ async function sendUtterance(chunks) {
   const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
   if (duration < 0.8) return;
   const it = beginInteraction();
+  const vadEndMs = Date.now();
+  const speechEndMs = vadEndMs - VAD_SILENCE * 1000;
+  const requestId = newFrameId('voice');
   vBusy = true;
   voiceState('识别中…', true);
   try {
@@ -1110,7 +1146,10 @@ async function sendUtterance(chunks) {
       }
     }
     const frame = await captureFrame();
-    const body = { audio, context: state.lastEyes, session_id: sessionId, wake_detected: wakeDetected };
+    const body = {
+      audio, context: state.lastEyes, session_id: sessionId, wake_detected: wakeDetected,
+      request_id: requestId, request_start_ms: vadEndMs, speech_end_ms: speechEndMs, vad_end_ms: vadEndMs,
+    };
     if (frame) {
       body.image = frame.full;
       body.image_vlm = frame.small;
