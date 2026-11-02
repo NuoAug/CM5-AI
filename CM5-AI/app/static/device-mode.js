@@ -9,7 +9,9 @@
   notice.className = 'hint';
   notice.id = 'device-source-status';
   notice.textContent = '正在确认外设来源…';
-  $('btn-cam').parentElement.before(notice);
+  const sourceSlot = $('device-source-slot');
+  if (sourceSlot && sourceSlot.appendChild) sourceSlot.appendChild(notice);
+  else $('sample-image').parentElement.before(notice);
 
   async function api(path, body) {
     const options = { cache: 'no-store' };
@@ -112,7 +114,10 @@
     clearTimeout(timer);
     if (inflight) inflight.abort();
     originalCloseCamera();
-    if (ui.remote) $('btn-cam').textContent = '打开树莓派摄像头';
+    if (ui.remote) {
+      $('btn-cam').textContent = '打开树莓派摄像头';
+      setCameraPlaceholder('树莓派预览已关闭', '点击「打开树莓派摄像头」恢复实时画面');
+    }
   };
 
   async function loadFrame(path, generation, preview) {
@@ -127,11 +132,15 @@
       }
       const blob = await response.blob();
       if (generation !== epoch) return false;
-      await loadImageFromBlob(blob, () => generation === epoch);
-      if (generation !== epoch) return false;
-      currentFrame = { id: response.headers.get('X-Frame-Id') || '',
-        at: response.headers.get('X-Captured-At') || '', source: 'device_camera' };
-      setImageSource((preview ? '树莓派实时预览' : '树莓派拍照（静态）') + ' · ' + currentFrame.at);
+      const at = response.headers.get('X-Captured-At') || '';
+      if (preview) {
+        await loadCameraPreviewFromBlob(blob, () => generation === epoch, '树莓派实时预览 · ' + at);
+      } else {
+        await loadImageFromBlob(blob, () => generation === epoch);
+        if (generation !== epoch) return false;
+        currentFrame = { id: response.headers.get('X-Frame-Id') || '', at, source: 'device_camera' };
+        setImageSource('树莓派拍照（静态） · ' + at);
+      }
       return true;
     } finally {
       clearTimeout(timeout);
@@ -144,8 +153,7 @@
       if (!document.hidden) await loadFrame('/api/camera/preview', generation, true);
     } catch (error) {
       if (generation === epoch && error.name !== 'AbortError') {
-        $('preview').style.display = 'none';
-        setImageSource('树莓派预览中断：' + error.message);
+        setCameraPlaceholder('树莓派预览中断', error.message);
       }
     } finally {
       if (ui.live && generation === epoch) timer = setTimeout(() => preview(generation), 1000);
@@ -156,6 +164,7 @@
       throw new Error('当前画面由主控提供，尚未开启独立树莓派相机测试');
     }
     closeCamera();
+    setCameraPlaceholder('正在连接树莓派摄像头…', '首帧到达前请稍候');
     render(await api('/api/device/camera', { action: 'start' }));
     ui.live = true;
     $('btn-cam').textContent = '关闭树莓派预览';
@@ -167,9 +176,12 @@
   $('btn-cam').onclick = async () => {
     try {
       if (!await remote()) return browserCameraClick();
-      if (ui.live) { closeCamera(); setImageSource('预览已关闭；树莓派设备端采集继续运行'); }
+      if (ui.live) closeCamera();
       else await openDeviceCamera();
-    } catch (error) { toast(error.message); }
+    } catch (error) {
+      if (ui.remote) setCameraPlaceholder('树莓派摄像头不可用', error.message);
+      toast(error.message);
+    }
   };
   const browserShot = $('btn-shot').onclick;
   $('btn-shot').onclick = async () => {
@@ -244,7 +256,7 @@
       catch (error) { $('device-volume-value').textContent = '不可用'; $('device-volume').disabled = true; }
     }
     if (ui.remote && ui.status.image_source === 'standalone-device-test') {
-      try { await openDeviceCamera(); } catch (error) { setImageSource(error.message); }
+      try { await openDeviceCamera(); } catch (error) { setCameraPlaceholder('树莓派摄像头不可用', error.message); }
     }
   }).catch(() => {});
 })();

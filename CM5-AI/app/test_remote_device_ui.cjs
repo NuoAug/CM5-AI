@@ -33,6 +33,8 @@ async function scenario(mode) {
     },
     toast() {}, voiceState() {},
     closeCamera() {}, captureFrame: async () => null,
+    setCameraPlaceholder() {}, loadImageFromBlob: async () => {},
+    loadCameraPreviewFromBlob: async () => {},
     playTts: async () => {local++;}, synthTts: async () => {local++;},
     speakAnswer: () => {local++;}, startVoice: () => {local++;}, stopVoice: () => {local++;},
     vOn: false,

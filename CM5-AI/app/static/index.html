@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.0</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.1</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -61,18 +61,46 @@
   .left { display: flex; flex-direction: column; gap: 16px; }
   h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
   h2 span { color: var(--cyan); margin-right: 6px; }
+  .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 270px; gap: 14px; align-items: stretch; }
+  .image-view, .camera-view {
+    position: relative; min-width: 0; aspect-ratio: 4 / 3; overflow: hidden;
+    border: 1px solid var(--line); border-radius: 12px; background: #08101d;
+  }
+  .image-view { cursor: pointer; transition: border-color .15s; }
+  .image-view:hover, .image-view.drag { border-color: var(--cyan); }
   .drop {
-    border: 1px dashed #34507d; border-radius: 12px; padding: 22px 14px; text-align: center;
-    color: var(--muted); font-size: 13px; cursor: pointer; transition: .2s;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; border: 1px dashed #34507d; border-radius: 11px; padding: 18px 14px;
+    text-align: center; color: var(--muted); font-size: 13px; cursor: pointer; transition: .2s;
     background: rgba(13, 24, 43, .5);
   }
-  .drop:hover, .drop.drag { border-color: var(--cyan); color: var(--text); background: rgba(77,208,225,.07); }
-  #preview { width: 100%; border-radius: 10px; margin-top: 12px; display: none; background: #08101d; }
-  .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; align-items: start; }
-  @media (max-width: 860px) { .image-layout { grid-template-columns: 1fr; } }
-  .image-view { min-width: 0; }
-  .image-actions { display: flex; flex-direction: column; gap: 9px; }
+  #preview, #video, #camera-preview {
+    display: none; width: 100%; height: 100%; margin: 0; background: #08101d;
+    object-fit: contain;
+  }
+  .camera-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 7px; padding: 18px; text-align: center; color: var(--muted); font-size: 13px;
+    background: rgba(13, 24, 43, .5);
+  }
+  .camera-placeholder span { color: #5f7192; font-size: 11px; }
+  .view-caption {
+    position: absolute; left: 10px; bottom: 10px; max-width: calc(100% - 20px);
+    padding: 4px 8px; border-radius: 7px; background: rgba(5, 10, 20, .78);
+    color: var(--muted); font-size: 11px; line-height: 1.4;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+  }
+  .image-actions { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
   .image-actions button, .image-actions select { width: 100%; }
+  @media (max-width: 1100px) {
+    .image-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .image-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; }
+    .image-actions button, .image-actions select { flex: 1 1 160px; width: auto; }
+  }
+  @media (max-width: 720px) {
+    .image-layout { grid-template-columns: 1fr; }
+    .image-actions { grid-column: auto; }
+  }
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
   .cmd-row { display: flex; gap: 8px; margin-top: 12px; }
   .cmd-row select { flex: 1 1 auto; min-width: 0; }
@@ -170,18 +198,25 @@
     <div class="card">
       <h2>选择图片</h2>
       <div class="image-layout">
-        <div class="image-view">
+        <div class="image-view" id="image-view">
           <div class="drop" id="drop">
             点击选择图片，或把图片拖到这里<br />
             <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
           </div>
-          <input type="file" id="file" accept="image/*" hidden />
           <canvas id="preview"></canvas>
-          <video id="video" autoplay playsinline></video>
-          <div class="hint" id="image-source">未选择图片</div>
+          <div class="view-caption" id="image-source">未选择图片</div>
         </div>
-        <div class="image-actions">
-          <button class="primary" id="btn-file">上传图片</button>
+        <div class="camera-view" id="camera-view">
+          <div class="camera-placeholder" id="camera-placeholder">
+            <div id="camera-placeholder-text">摄像头未开启</div>
+            <span id="camera-placeholder-hint">点击右侧「打开摄像头」查看实时画面</span>
+          </div>
+          <video id="video" autoplay playsinline></video>
+          <canvas id="camera-preview"></canvas>
+          <div class="view-caption" id="camera-source" style="display:none"></div>
+        </div>
+        <div class="image-actions" id="image-actions">
+          <div id="device-source-slot"></div>
           <select id="sample-image">
             <option value="" disabled selected hidden>选择示例图…</option>
             <option value="cats.jpg">示例：猫</option>
@@ -204,6 +239,7 @@
           <button id="btn-shot" disabled>拍照</button>
         </div>
       </div>
+      <input type="file" id="file" accept="image/*" hidden />
     </div>
   </section>
 
@@ -346,7 +382,7 @@
 <div id="toast"></div>
 <audio id="audio" hidden></audio>
 
-<script src="/static/app-core.js"></script>
+<script src="/static/app-core.js?v=3"></script>
 <script>
 const state = { image: null, imageFull: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
 const sessionId = (crypto.randomUUID ? crypto.randomUUID() : 's' + Date.now() + Math.random().toString(16).slice(2));
@@ -395,6 +431,7 @@ async function loadImageFromBlob(blob, isCurrent = () => true) {
   canvas.height = Math.round(img.height * scale);
   canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
   canvas.style.display = 'block';
+  $('drop').style.display = 'none';
   state.image = canvas.toDataURL('image/jpeg', 0.85);
   const vlmSide = 512;
   const vScale = Math.min(1, vlmSide / Math.max(img.width, img.height));
@@ -422,23 +459,50 @@ function setImageSource(text) {
   $('image-source').textContent = text;
 }
 
-$('btn-file').onclick = () => $('file').click();
-$('drop').onclick = () => $('file').click();
+function setCameraView(mode, caption = '') {
+  $('video').style.display = mode === 'video' ? 'block' : 'none';
+  $('camera-preview').style.display = mode === 'frame' ? 'block' : 'none';
+  $('camera-placeholder').style.display = mode === 'placeholder' ? 'flex' : 'none';
+  const label = $('camera-source');
+  label.textContent = caption;
+  label.style.display = caption ? 'block' : 'none';
+}
+
+function setCameraPlaceholder(text, hint) {
+  $('camera-placeholder-text').textContent = text;
+  $('camera-placeholder-hint').textContent = hint;
+  setCameraView('placeholder');
+}
+
+async function loadCameraPreviewFromBlob(blob, isCurrent = () => true, caption = '') {
+  const img = new Image();
+  const url = URL.createObjectURL(blob);
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+  if (!isCurrent()) { URL.revokeObjectURL(url); return; }
+  const max = 1280;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = $('camera-preview');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  setCameraView('frame', caption);
+  URL.revokeObjectURL(url);
+}
+
+$('image-view').onclick = () => $('file').click();
 $('file').onchange = async (e) => {
   if (e.target.files[0]) {
-    closeCamera();
     $('sample-image').value = '';
     await loadImageFromBlob(e.target.files[0]);
     setImageSource('上传图片（静态，非当前视野）');
     toast('图片已载入');
   }
 };
-$('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('drag'); };
-$('drop').ondragleave = () => $('drop').classList.remove('drag');
-$('drop').ondrop = async (e) => {
-  e.preventDefault(); $('drop').classList.remove('drag');
+$('image-view').ondragover = (e) => { e.preventDefault(); $('image-view').classList.add('drag'); };
+$('image-view').ondragleave = () => $('image-view').classList.remove('drag');
+$('image-view').ondrop = async (e) => {
+  e.preventDefault(); $('image-view').classList.remove('drag');
   if (e.dataTransfer.files[0]) {
-    closeCamera();
     $('sample-image').value = '';
     await loadImageFromBlob(e.dataTransfer.files[0]);
     setImageSource('拖入图片（静态，非当前视野）');
@@ -449,7 +513,6 @@ $('sample-image').onchange = async () => {
   const name = $('sample-image').value;
   if (!name) return;
   try {
-    closeCamera();
     await loadImageFromUrl('/api/sample/' + name);
     setImageSource('示例图（静态，非当前视野）');
     toast('已载入示例图');
@@ -462,6 +525,7 @@ $('btn-clear').onclick = () => {
   const canvas = $('preview');
   canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
   canvas.style.display = 'none';
+  $('drop').style.display = 'flex';
   $('sample-image').value = '';
   $('file').value = '';
   setImageSource('未选择图片');
@@ -476,8 +540,7 @@ function closeCamera() {
   }
   const v = $('video');
   v.srcObject = null;
-  v.style.display = 'none';
-  setImageSource(state.imageFull || state.image ? '静态图（非当前视野）' : '未选择图片');
+  setCameraPlaceholder('摄像头未开启', '点击右侧「打开摄像头」查看实时画面');
   $('btn-cam').textContent = '打开摄像头';
   $('btn-shot').disabled = true;
 }
@@ -485,8 +548,9 @@ $('btn-cam').onclick = async () => {
   if (stream) { closeCamera(); toast('摄像头已关闭'); return; }
   try {
     stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
-    const v = $('video'); v.srcObject = stream; v.style.display = 'block'; $('btn-shot').disabled = false;
-    setImageSource('摄像头实时');
+    const v = $('video'); v.srcObject = stream;
+    setCameraView('video', '摄像头实时（本机）');
+    $('btn-shot').disabled = false;
     $('btn-cam').textContent = '关闭摄像头';
     toast('摄像头已打开');
   } catch (e) {
@@ -1214,7 +1278,7 @@ document.querySelectorAll('.subtab').forEach(tab => {
   };
 });
 </script>
-<script src="/static/device-mode.js?v=2"></script>
+<script src="/static/device-mode.js?v=3"></script>
 <script src="/static/guide-mode.js?v=1"></script>
 </body>
 </html>
