@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.17</title>
+<title>CM5 AI 功能测试台 v1.1.18</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -156,8 +156,10 @@
   .voice-state.on { color: var(--cyan); }
   .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
   .meta b { color: var(--cyan); font-weight: 600; }
-  .ocr-lines { margin-top: 12px; border-top: 1px solid var(--line); }
+  .ocr-lines { margin-top: 12px; }
+  .ocr-lines:not(:empty) { border-top: 1px solid var(--line); }
   .ocr-line { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid #1b2942; font-size: 13px; }
+  .ocr-line:last-child { border-bottom: 0; }
   .ocr-line span:last-child { color: var(--green); font-size: 12px; white-space: nowrap; }
   .tts-box { display: flex; gap: 10px; flex-wrap: wrap; }
   .tts-box select, .tts-box input { flex: 1 1 150px; width: auto; }
@@ -349,13 +351,13 @@
 
         <div class="subpanel" id="sub-vqa">
           <p class="hint">自由提问，例如“桌子上有几个杯子？”“这个人手里拿的是什么？”</p>
+          <div class="result empty" id="out-vqa">等待提问…</div>
+          <div class="meta" id="meta-vqa"></div>
           <div class="row">
             <input type="text" id="vqa-q" placeholder="输入问题，回车提交" style="flex:1;min-width:220px" />
             <button class="primary" id="btn-vqa">提问</button>
             <button class="ghost" id="tts-vqa" disabled>朗读回答</button>
           </div>
-          <div class="result empty" id="out-vqa">等待提问…</div>
-          <div class="meta" id="meta-vqa"></div>
         </div>
 
         <div class="subpanel" id="sub-ocr">
@@ -1295,6 +1297,5 @@ document.querySelectorAll('.subtab').forEach(tab => {
 });
 </script>
 <script src="/static/device-mode.js?v=3"></script>
-<script src="/static/guide-mode.js?v=1"></script>
 </body>
 </html>
