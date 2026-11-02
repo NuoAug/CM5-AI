@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.14</title>
+<title>CM5 AI 功能测试台 v1.1.15</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -169,6 +169,7 @@
   input, textarea { -webkit-user-select: text; user-select: text; }
   select { -webkit-user-select: none; user-select: none; }
   .result { -webkit-user-select: text; user-select: text; }
+  .result.empty, .result.pending { -webkit-user-select: none; user-select: none; }
   audio { width: 100%; margin-top: 12px; }
   .loading { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff33; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -742,16 +743,17 @@ $('vqa-q').onkeydown = (e) => { if (e.key === 'Enter') runVqa(); };
 $('btn-ocr').onclick = async () => {
   if (!state.image) return toast('请先选择图片');
   const btn = $('btn-ocr'); setBusy(btn, true, '识别中…');
+  $('out-ocr').classList.add('pending');
   $('out-ocr').textContent = 'OCR 识别中…'; $('ocr-lines').innerHTML = '';
   try {
     const j = await postJSON('/api/ocr', { image: state.image });
-    $('out-ocr').classList.remove('empty');
+    $('out-ocr').classList.remove('empty', 'pending');
     $('out-ocr').textContent = j.text || '（未识别到文字）';
     $('meta-ocr').innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b> · 行数 <b>${j.lines.length}</b>`;
     state.lastOcr = j.text || '';
     $('tts-ocr').disabled = !j.text; $('copy-ocr').disabled = !j.text;
     $('ocr-lines').innerHTML = j.lines.map(x => `<div class="ocr-line"><span>${escapeHtml(x.text)}</span><span>${x.score == null ? '' : (x.score*100).toFixed(1)+'%'}</span></div>`).join('');
-  } catch (e) { $('out-ocr').textContent = '失败：' + e.message; }
+  } catch (e) { $('out-ocr').classList.remove('pending'); $('out-ocr').textContent = '失败：' + e.message; }
   finally { setBusy(btn, false, '重新识别'); }
 };
 
@@ -941,17 +943,20 @@ async function sendAsk(q, btn) {
   }
   const out = $('out-eyes');
   out.classList.remove('empty');
+  out.classList.add('pending');
   out.textContent = '思考中…';
   if (btn) setBusy(btn, true, '回答中…');
   try {
     const j = await postJSON('/api/ask', body, it.signal);
     if (it.gen !== interactionGen) return;
+    out.classList.remove('pending');
     out.textContent = j.answer || '（空回答）';
     const src = j.source === 'ocr' ? 'OCR' : j.source === 'rule' ? '规则' : 'VLM';
     $('meta-eyes').innerHTML = `任务 <b>${escapeHtml(j.intent || 'chat')}</b> · 来源 <b>${src}</b> · 延迟 <b>${(Number(j.latency_ms || 0)/1000).toFixed(2)} s</b>`;
     state.lastEyes = j.answer || '';
     if (!outputReady) speakAnswer(j.answer);
   } catch (e) {
+    out.classList.remove('pending');
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
   } finally {
     if (btn) setBusy(btn, false, '发送');
