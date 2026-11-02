@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.8</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.9</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -99,12 +99,13 @@
   }
   .image-actions { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
   .image-actions button, .image-actions select { width: 100%; }
-  #device-source-slot { margin-top: 2px; }
-  #device-source-slot .hint { margin: 0; }
+  #device-source-slot { width: 100%; margin-top: auto; }
+  #device-source-slot .hint { margin: 0; text-align: center; }
   @media (max-width: 1100px) {
     .image-layout { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
     .image-actions { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; align-items: center; }
     .image-actions button, .image-actions select { flex: 1 1 160px; width: auto; }
+    #device-source-slot { flex-basis: 100%; margin-top: 0; }
   }
   @media (max-width: 720px) {
     .image-layout { grid-template-columns: 1fr; }
