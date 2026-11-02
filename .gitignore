@@ -1,0 +1,14 @@
+# 大体积模型与运行时，不入库
+CM5-AI/models/
+CM5-AI/runtime/
+CM5-AI/app/.venv/
+
+# 运行产物
+CM5-AI/logs/
+CM5-AI/data/
+CM5-AI/app/__pycache__/
+__pycache__/
+*.pyc
+
+# 实机测试原始数据（报告进 docs/，原始包不入库）
+CM5-AI/test-runs/

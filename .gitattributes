@@ -1,0 +1,5 @@
+# Linux 部署脚本与 systemd 单元必须保持 LF，避免在 CM5 上出现 bad interpreter。
+*.sh text eol=lf
+CM5-AI/deploy/*.service text eol=lf
+CM5-AI/deploy/*.timer text eol=lf
+CM5-AI/deploy/*.env.example text eol=lf

@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CM5 边缘 AI 功能测试台 v1.0.0</title>
+<style>
+  :root {
+    --bg: #0b1220;
+    --panel: #111a2b;
+    --panel2: #16223a;
+    --line: #24314d;
+    --text: #e8eefc;
+    --muted: #93a4c3;
+    --cyan: #4dd0e1;
+    --green: #4ade80;
+    --amber: #fbbf24;
+    --red: #f87171;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: radial-gradient(1200px 600px at 10% -10%, #172554 0%, var(--bg) 55%);
+    color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    min-height: 100vh;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between;
+    padding: 18px 28px; border-bottom: 1px solid var(--line);
+    background: rgba(9, 15, 28, 0.82); backdrop-filter: blur(10px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  .brand h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
+  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .status { display: flex; gap: 10px; flex-wrap: wrap; }
+  .pill {
+    display: flex; align-items: center; gap: 7px;
+    padding: 7px 12px; border-radius: 999px;
+    background: var(--panel2); border: 1px solid var(--line); font-size: 12px; color: var(--muted);
+  }
+  .pill.over { border-color: var(--red); color: var(--red); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
+  .dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); }
+  .dot.off { background: var(--red); box-shadow: 0 0 10px var(--red); }
+  main {
+    display: grid; grid-template-columns: 390px minmax(0, 1fr); gap: 20px;
+    padding: 22px 28px 40px; max-width: 1500px; margin: 0 auto;
+  }
+  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: linear-gradient(180deg, rgba(22,34,58,.94), rgba(15,24,42,.94));
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
+  }
+  .left { display: flex; flex-direction: column; gap: 16px; }
+  h2 { margin: 0 0 12px; font-size: 15px; color: var(--text); font-weight: 600; }
+  h2 span { color: var(--cyan); margin-right: 6px; }
+  .drop {
+    border: 1px dashed #34507d; border-radius: 12px; padding: 22px 14px; text-align: center;
+    color: var(--muted); font-size: 13px; cursor: pointer; transition: .2s;
+    background: rgba(13, 24, 43, .5);
+  }
+  .drop:hover, .drop.drag { border-color: var(--cyan); color: var(--text); background: rgba(77,208,225,.07); }
+  #preview { width: 100%; border-radius: 10px; margin-top: 12px; display: none; background: #08101d; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button {
+    border: 1px solid var(--line); background: var(--panel2); color: var(--text);
+    padding: 9px 13px; border-radius: 9px; cursor: pointer; font-size: 13px;
+    transition: .15s; font-family: inherit;
+  }
+  button:hover { border-color: var(--cyan); color: var(--cyan); }
+  button.primary {
+    background: linear-gradient(135deg, #0e7490, #155e75); border-color: #22d3ee55; color: #e0fbff;
+    font-weight: 600;
+  }
+  button.primary:hover { filter: brightness(1.12); }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+  .tab { padding: 9px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); cursor: pointer; font-size: 13px; }
+  .tab.active { background: rgba(77,208,225,.13); border-color: var(--cyan); color: var(--cyan); }
+  .panel { display: none; }
+  .panel.active { display: block; }
+  .subtabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .subtab { padding: 7px 12px; border-radius: 8px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; font-size: 12.5px; }
+  .subtab.active { background: rgba(77,208,225,.1); border-color: var(--line); color: var(--cyan); }
+  .subpanel { display: none; }
+  .subpanel.active { display: block; }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0 0 12px; }
+  .prompt {
+    width: 100%; min-height: 74px; resize: vertical; background: #0c1627; color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 11px 12px; font-family: inherit;
+    font-size: 13px; line-height: 1.6;
+  }
+  .result {
+    margin-top: 14px; background: #09111f; border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; min-height: 96px; font-size: 14px; line-height: 1.75; white-space: pre-wrap; word-break: break-word;
+  }
+  .result.empty { color: #5f7192; }
+  .eyes-btn { padding: 12px 18px; font-size: 14px; }
+  #out-eyes { font-size: 18px; line-height: 1.8; }
+  label.auto { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
+  label.auto input { accent-color: var(--cyan); }
+  .voice-state { color: var(--muted); font-size: 13px; align-self: center; }
+  .voice-state.on { color: var(--cyan); }
+  .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .meta b { color: var(--cyan); font-weight: 600; }
+  .ocr-lines { margin-top: 12px; border-top: 1px solid var(--line); }
+  .ocr-line { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid #1b2942; font-size: 13px; }
+  .ocr-line span:last-child { color: var(--green); font-size: 12px; white-space: nowrap; }
+  .tts-box { display: flex; gap: 10px; flex-wrap: wrap; }
+  .tts-box select, .tts-box input { flex: 1 1 150px; width: auto; }
+  .tts-box button { flex: 0 0 auto; }
+  input[type="number"], select, textarea {
+    background: #0c1627; color: var(--text); border: 1px solid var(--line); border-radius: 9px;
+    padding: 9px 11px; font-family: inherit; font-size: 13px; width: 100%;
+  }
+  audio { width: 100%; margin-top: 12px; }
+  #video { width: 100%; border-radius: 10px; margin-top: 12px; display: none; }
+  .loading { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff33; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  footer { color: #5f7192; font-size: 12px; text-align: center; padding: 0 20px 30px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
+    background: #1f2b45; border: 1px solid #38507a; color: #fff; padding: 10px 16px; border-radius: 10px;
+    opacity: 0; pointer-events: none; transition: .25s; font-size: 13px; max-width: 80vw; z-index: 99;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>CM5 边缘 AI 功能测试台</h1>
+    <p>MiniCPM-V 4.7 1B · PP-OCRv6 · Paraformer · Piper · 本机调试版</p>
+  </div>
+  <div class="status">
+    <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
+    <div class="pill"><span class="dot" id="dot-ocr"></span>OCR</div>
+    <div class="pill"><span class="dot" id="dot-tts"></span>TTS</div>
+    <div class="pill" id="mem-pill">模型内存 <span id="mem-text">--</span></div>
+    <div class="pill" title="仅统计 llama-server 与本服务进程，按整机逻辑核心归一化">模型 CPU <span id="cpu-text">--</span></div>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="card">
+      <h2>选择图片</h2>
+      <div class="drop" id="drop">
+        点击选择图片，或把图片拖到这里<br />
+        <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
+      </div>
+      <input type="file" id="file" accept="image/*" hidden />
+      <canvas id="preview"></canvas>
+      <video id="video" autoplay playsinline></video>
+      <div class="hint" id="image-source">未选择图片</div>
+      <div class="row">
+        <button class="primary" id="btn-file">上传图片</button>
+        <select id="sample-image" style="flex:1;min-width:180px;width:auto">
+          <option value="" disabled selected hidden>选择示例图…</option>
+          <option value="cats.jpg">示例：猫</option>
+          <option value="ocr-test.png">示例：中文标牌</option>
+          <option value="scene-stairs.jpg">场景：楼梯</option>
+          <option value="scene-corridor.jpg">场景：走廊</option>
+          <option value="scene-crosswalk.jpg">场景：斑马线</option>
+          <option value="scene-desk.jpg">场景：桌面物品</option>
+          <option value="scene-elevator.jpg">场景：电梯</option>
+          <option value="scene-shelf.jpg">场景：超市货架</option>
+          <option value="scene-tactile-straight.jpg">盲道：直行</option>
+          <option value="scene-tactile-dots.jpg">盲道：圆点转向</option>
+          <option value="scene-tactile-crossing.jpg">盲道：过街</option>
+          <option value="scene-tactile-obstacle.jpg">盲道：被占用</option>
+          <option value="scene-tactile-station.jpg">盲道：站内</option>
+          <option value="scene-tactile-broken.jpg">盲道：破损</option>
+        </select>
+        <button id="btn-clear">清除图片</button>
+      </div>
+      <div class="row">
+        <button id="btn-cam">打开摄像头</button>
+        <button id="btn-shot" disabled>拍照</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="right">
+    <div class="tabs">
+      <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">语音交互</button>
+      <button type="button" class="tab" data-tab="debug" id="tab-debug">调试工具</button>
+      <button type="button" class="tab" data-tab="main-control" id="tab-main-control">主控接口</button>
+    </div>
+
+    <div class="card">
+      <div class="panel active" id="panel-eyes">
+        <h2>语音交互</h2>
+        <p class="hint">面向视障使用的单句播报。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
+        <div class="row">
+          <button class="primary eyes-btn" id="btn-eyes-scene">看前方</button>
+          <button class="eyes-btn" id="btn-eyes-toilet">找卫生间</button>
+          <button class="eyes-btn" id="btn-eyes-exit">找出口</button>
+          <button class="eyes-btn" id="btn-eyes-text">读文字</button>
+          <button class="eyes-btn" id="btn-eyes-date">读日期</button>
+          <button class="eyes-btn" id="btn-eyes-detail">详细描述</button>
+          <label class="auto"><input type="checkbox" id="eyes-auto-tts" checked /> 自动朗读</label>
+        </div>
+        <div class="row">
+          <input type="text" id="eyes-item" placeholder="要找的东西，例如 水杯 / 门 / 楼梯" style="flex:1;min-width:200px" />
+          <button id="btn-eyes-item">找物品</button>
+        </div>
+        <div class="result empty" id="out-eyes">等待提问…</div>
+        <div class="meta" id="meta-eyes"></div>
+        <div class="row">
+          <input type="text" id="eyes-input" placeholder="聊天或追问，例如 今天有点烦 / 左边那个是台阶吗" style="flex:1;min-width:220px" />
+          <button class="primary" id="btn-send">发送</button>
+          <button id="btn-stop">停止播报</button>
+          <label class="auto"><input type="checkbox" id="eyes-use-image" checked /> 结合画面</label>
+        </div>
+        <div class="row">
+          <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
+          <button id="btn-voice-test">语音试听</button>
+          <span id="voice-state" class="voice-state">未开启 · 先说「小冰小冰」再说指令</span>
+        </div>
+        <div class="row" id="device-volume-controls" style="display:none">
+          <label for="device-volume">树莓派音量</label>
+          <input id="device-volume" type="range" min="0" max="100" step="1" value="0" disabled style="flex:1;min-width:100px" />
+          <span id="device-volume-value" aria-live="polite">读取中…</span>
+          <button id="device-mute" disabled>静音</button>
+        </div>
+      </div>
+
+      <div class="panel" id="panel-main-control">
+        <h2>主控接口 interaction.v0.1</h2>
+        <p class="hint">仅调试与协议验证。正式行走判断、距离和通行结论由主控提供；测试替身只回放固定样例，不代表真实联调。</p>
+        <div class="row">
+          <button id="btn-mc-refresh">刷新状态</button>
+          <button class="primary" id="btn-mc-scene">查询场景</button>
+          <span id="mc-state" class="voice-state">未查询</span>
+        </div>
+        <div class="row">
+          <button id="btn-mc-start">开始</button>
+          <button id="btn-mc-pause">暂停</button>
+          <button id="btn-mc-resume">恢复</button>
+          <button id="btn-mc-end">结束</button>
+          <button id="btn-mc-repeat">重复</button>
+        </div>
+        <div class="result empty" id="out-mc">等待查询…</div>
+        <div class="meta" id="meta-mc"></div>
+      </div>
+
+      <div class="panel" id="panel-debug">
+        <div class="subtabs">
+          <button type="button" class="subtab active" data-sub="scene">场景识别</button>
+          <button type="button" class="subtab" data-sub="spatial">空间关系</button>
+          <button type="button" class="subtab" data-sub="vqa">图像问答</button>
+          <button type="button" class="subtab" data-sub="ocr">中文 OCR</button>
+          <button type="button" class="subtab" data-sub="tts">语音播报</button>
+        </div>
+
+        <div class="subpanel active" id="sub-scene">
+          <p class="hint">输出：主要物体、场景类型、明显异常。适合“画面里有什么”。</p>
+          <textarea class="prompt" id="prompt-scene">请用中文描述这张图片：1) 画面里有哪些主要物体（最多 8 个，每个只列一次，不要重复）；2) 这是什么场景；3) 有没有明显的危险或异常。只描述看得见的内容，不要猜测。</textarea>
+          <div class="row">
+            <button class="primary" id="btn-scene">开始识别</button>
+            <button class="ghost" id="tts-scene" disabled>朗读结果</button>
+          </div>
+          <div class="result empty" id="out-scene">等待识别…</div>
+          <div class="meta" id="meta-scene"></div>
+        </div>
+
+        <div class="subpanel" id="sub-spatial">
+          <p class="hint">强制输出 JSON，检查左右、上下、遮挡。2B 级模型会出错，建议多试几张。</p>
+          <div class="row">
+            <button class="primary" id="btn-spatial-left">左右关系</button>
+            <button id="btn-spatial-occlusion">遮挡判断</button>
+            <button id="btn-spatial-depth">前后 / 上下</button>
+            <button class="ghost" id="tts-spatial" disabled>朗读结果</button>
+          </div>
+          <div class="result empty" id="out-spatial">等待提问…</div>
+          <div class="meta" id="meta-spatial"></div>
+        </div>
+
+        <div class="subpanel" id="sub-vqa">
+          <p class="hint">自由提问，例如“桌子上有几个杯子？”“这个人手里拿的是什么？”</p>
+          <div class="row">
+            <input type="text" id="vqa-q" placeholder="输入问题，回车提交" style="flex:1;min-width:220px" />
+            <button class="primary" id="btn-vqa">提问</button>
+            <button class="ghost" id="tts-vqa" disabled>朗读回答</button>
+          </div>
+          <div class="result empty" id="out-vqa">等待提问…</div>
+          <div class="meta" id="meta-vqa"></div>
+        </div>
+
+        <div class="subpanel" id="sub-ocr">
+          <p class="hint">RapidOCR + PP-OCRv6_small，适合截图、说明书、路牌等印刷体。</p>
+          <div class="row">
+            <button class="primary" id="btn-ocr">识别文字</button>
+            <button class="ghost" id="tts-ocr" disabled>朗读文字</button>
+            <button class="ghost" id="copy-ocr" disabled>复制文本</button>
+          </div>
+          <div class="result empty" id="out-ocr">等待识别…</div>
+          <div class="meta" id="meta-ocr"></div>
+          <div class="ocr-lines" id="ocr-lines"></div>
+        </div>
+
+        <div class="subpanel" id="sub-tts">
+          <p class="hint">Piper 中文神经语音（zh_CN-huayan-medium，22.05 kHz，按需启动子进程）。</p>
+          <textarea class="prompt" id="tts-text">前方左边是楼梯，右边是电梯，请小心。</textarea>
+          <div class="row tts-box">
+            <span class="hint" style="align-self:center;margin:0">语速</span>
+            <input type="number" id="tts-speed" value="1.0" min="0.6" max="1.5" step="0.05" style="max-width:120px" />
+            <button class="primary" id="btn-tts">合成并播放</button>
+          </div>
+          <div class="meta" id="meta-tts"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 CM5-AI/models 与 CM5-AI/runtime</footer>
+<div id="toast"></div>
+<audio id="audio" hidden></audio>
+
+<script src="/static/app-core.js"></script>
+<script>
+const state = { image: null, imageFull: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
+const sessionId = (crypto.randomUUID ? crypto.randomUUID() : 's' + Date.now() + Math.random().toString(16).slice(2));
+const $ = (id) => document.getElementById(id);
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._timer); t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function setBusy(btn, busy, text) {
+  if (!btn) return;
+  if (busy) { btn.dataset.old = btn.textContent; btn.disabled = true; btn.innerHTML = '<span class="loading"></span>' + (text || '处理中…'); }
+  else { btn.disabled = false; btn.textContent = btn.dataset.old || text || '完成'; }
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status'); const s = await r.json();
+    $('dot-vlm').className = 'dot ' + (s.vlm.up ? 'on' : 'off');
+    $('dot-ocr').className = 'dot ' + (s.ocr.ready ? 'on' : 'off');
+    $('dot-tts').className = 'dot ' + (s.tts.ready ? 'on' : 'off');
+    $('mem-text').textContent = `${s.memory.sum_gb} / ${s.memory.budget_gb} GB`;
+    $('mem-pill').classList.toggle('over', s.memory.over_budget);
+    const cpu = s.cpu ? s.cpu.model_percent : null;
+    $('cpu-text').textContent = typeof cpu === 'number' ? cpu.toFixed(1) + '%' : '--';
+  } catch (e) { /* ignore */ }
+}
+setInterval(refreshStatus, 5000); refreshStatus();
+
+async function loadImageFromBlob(blob, isCurrent = () => true) {
+  const img = new Image();
+  const url = URL.createObjectURL(blob);
+  await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = url; });
+  if (!isCurrent()) { URL.revokeObjectURL(url); return; }
+  const max = 800;
+  const scale = Math.min(1, max / Math.max(img.width, img.height));
+  const canvas = $('preview');
+  canvas.width = Math.round(img.width * scale);
+  canvas.height = Math.round(img.height * scale);
+  canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+  canvas.style.display = 'block';
+  state.image = canvas.toDataURL('image/jpeg', 0.85);
+  const vlmSide = 512;
+  const vScale = Math.min(1, vlmSide / Math.max(img.width, img.height));
+  const vCanvas = document.createElement('canvas');
+  vCanvas.width = Math.round(img.width * vScale);
+  vCanvas.height = Math.round(img.height * vScale);
+  vCanvas.getContext('2d').drawImage(img, 0, 0, vCanvas.width, vCanvas.height);
+  state.imageVlm = vCanvas.toDataURL('image/jpeg', 0.85);
+  const fullSide = 1600;
+  const fScale = Math.min(1, fullSide / Math.max(img.width, img.height));
+  const fCanvas = document.createElement('canvas');
+  fCanvas.width = Math.round(img.width * fScale);
+  fCanvas.height = Math.round(img.height * fScale);
+  fCanvas.getContext('2d').drawImage(img, 0, 0, fCanvas.width, fCanvas.height);
+  state.imageFull = fCanvas.toDataURL('image/jpeg', 0.9);
+  URL.revokeObjectURL(url);
+}
+
+async function loadImageFromUrl(url) {
+  const r = await fetch(url); if (!r.ok) throw new Error('示例图加载失败');
+  await loadImageFromBlob(await r.blob());
+}
+
+function setImageSource(text) {
+  $('image-source').textContent = text;
+}
+
+$('btn-file').onclick = () => $('file').click();
+$('drop').onclick = () => $('file').click();
+$('file').onchange = async (e) => {
+  if (e.target.files[0]) {
+    closeCamera();
+    $('sample-image').value = '';
+    await loadImageFromBlob(e.target.files[0]);
+    setImageSource('上传图片（静态，非当前视野）');
+    toast('图片已载入');
+  }
+};
+$('drop').ondragover = (e) => { e.preventDefault(); $('drop').classList.add('drag'); };
+$('drop').ondragleave = () => $('drop').classList.remove('drag');
+$('drop').ondrop = async (e) => {
+  e.preventDefault(); $('drop').classList.remove('drag');
+  if (e.dataTransfer.files[0]) {
+    closeCamera();
+    $('sample-image').value = '';
+    await loadImageFromBlob(e.dataTransfer.files[0]);
+    setImageSource('拖入图片（静态，非当前视野）');
+    toast('图片已载入');
+  }
+};
+$('sample-image').onchange = async () => {
+  const name = $('sample-image').value;
+  if (!name) return;
+  try {
+    closeCamera();
+    await loadImageFromUrl('/api/sample/' + name);
+    setImageSource('示例图（静态，非当前视野）');
+    toast('已载入示例图');
+  } catch (e) {
+    toast('示例图载入失败：' + e.message);
+  }
+};
+$('btn-clear').onclick = () => {
+  state.image = null; state.imageVlm = null; state.imageFull = null;
+  const canvas = $('preview');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+  canvas.style.display = 'none';
+  $('sample-image').value = '';
+  $('file').value = '';
+  setImageSource('未选择图片');
+  toast('已清除图片');
+};
+
+let stream = null;
+function closeCamera() {
+  if (stream) {
+    stream.getTracks().forEach(t => t.stop());
+    stream = null;
+  }
+  const v = $('video');
+  v.srcObject = null;
+  v.style.display = 'none';
+  setImageSource(state.imageFull || state.image ? '静态图（非当前视野）' : '未选择图片');
+  $('btn-cam').textContent = '打开摄像头';
+  $('btn-shot').disabled = true;
+}
+$('btn-cam').onclick = async () => {
+  if (stream) { closeCamera(); toast('摄像头已关闭'); return; }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    const v = $('video'); v.srcObject = stream; v.style.display = 'block'; $('btn-shot').disabled = false;
+    setImageSource('摄像头实时');
+    $('btn-cam').textContent = '关闭摄像头';
+    toast('摄像头已打开');
+  } catch (e) {
+    closeCamera();
+    toast('摄像头打开失败：' + e.message);
+  }
+};
+$('btn-shot').onclick = async () => {
+  const v = $('video'); if (!v.videoWidth) return toast('摄像头还没准备好');
+  const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
+  c.getContext('2d').drawImage(v, 0, 0);
+  const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.9));
+  await loadImageFromBlob(blob);
+  $('sample-image').value = '';
+  setImageSource('摄像头拍照（静态）');
+  toast('拍照完成');
+};
+
+// ---------- 主控接口调试（只查询与提交意图，不做本地通行判断） ----------
+async function refreshMainControl() {
+  try {
+    const r = await fetch('/api/main-control/status');
+    const j = await r.json();
+    const s = j.status || {};
+    $('mc-state').textContent = s.connected
+      ? `已连接 · ${s.master_instance_id || '未知实例'} · ${s.evidence_mode || '未知来源'}`
+      : (s.configured ? '未连接 · ' + (s.last_error || '等待握手') : '未配置主控');
+    $('meta-mc').textContent = `instance ${s.instance_id || '--'} · clock ${s.clock_id || '--'} · 替身 ${s.fixture_allowed ? '允许' : '禁止'}`;
+  } catch (e) {
+    $('mc-state').textContent = '状态查询失败：' + e.message;
+  }
+}
+
+async function queryScene() {
+  try {
+    const r = await fetch('/api/main-control/scene');
+    const j = await r.json();
+    $('out-mc').classList.remove('empty');
+    $('out-mc').textContent = j.answer || j.error || '（无结果）';
+    if (j.scene) {
+      const nav = j.scene.navigation || {};
+      $('meta-mc').textContent = `state ${j.scene.state_id || '--'} · seq ${j.scene.sequence ?? '--'} · mode ${nav.mode || '--'} · reason ${nav.reason_code || '--'} · stale ${j.scene._stale ? '是' : '否'}`;
+    }
+  } catch (e) {
+    $('out-mc').textContent = '场景查询失败：' + e.message;
+  }
+}
+
+async function controlMain(action) {
+  const transcript = { start_guidance: '开始引导', pause_guidance: '暂停引导', resume_guidance: '恢复引导', end_guidance: '结束引导', repeat_guidance: '重复引导' }[action];
+  try {
+    const j = await postJSON('/api/main-control/control', { action, transcript, session_id: 'debug' });
+    $('out-mc').classList.remove('empty');
+    $('out-mc').textContent = j.answer || '（无结果）';
+    $('meta-mc').textContent = j.result ? `operation ${j.result.operation_state} · actual_mode ${j.result.actual_mode} · reason ${j.result.reason_code}` : '无控制结果';
+  } catch (e) {
+    $('out-mc').textContent = '控制请求失败：' + e.message;
+  }
+}
+
+$('btn-mc-refresh').onclick = refreshMainControl;
+$('btn-mc-scene').onclick = queryScene;
+$('btn-mc-start').onclick = () => controlMain('start_guidance');
+$('btn-mc-pause').onclick = () => controlMain('pause_guidance');
+$('btn-mc-resume').onclick = () => controlMain('resume_guidance');
+$('btn-mc-end').onclick = () => controlMain('end_guidance');
+$('btn-mc-repeat').onclick = () => controlMain('repeat_guidance');
+
+async function postJSON(url, body, signal) {
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
+  return j;
+}
+
+// ---------- 帧抓拍：相机开着就即时拍，否则用上传图 ----------
+let currentFrame = { id: '', at: '', source: '' };
+
+function canvasDataUrl(canvas, side, quality) {
+  const scale = Math.min(1, side / Math.max(canvas.width, canvas.height));
+  if (scale === 1) return canvas.toDataURL('image/jpeg', quality);
+  const c = document.createElement('canvas');
+  c.width = Math.round(canvas.width * scale);
+  c.height = Math.round(canvas.height * scale);
+  c.getContext('2d').drawImage(canvas, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', quality);
+}
+
+function waitNextVideoFrame(v) {
+  return new Promise((resolve) => {
+    if (!v.requestVideoFrameCallback) {
+      setTimeout(resolve, 80);
+      return;
+    }
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    const timer = setTimeout(finish, 150);
+    v.requestVideoFrameCallback(() => { clearTimeout(timer); finish(); });
+  });
+}
+
+async function captureFrame() {
+  const v = $('video');
+  let canvas = null;
+  let source = 'upload';
+  if (v.style.display === 'block' && v.videoWidth) {
+    await waitNextVideoFrame(v);
+    canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth;
+    canvas.height = v.videoHeight;
+    canvas.getContext('2d').drawImage(v, 0, 0);
+    source = 'camera';
+  } else if (state.imageFull || state.image) {
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = state.imageFull || state.image; });
+    canvas = document.createElement('canvas');
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').drawImage(img, 0, 0);
+  }
+  if (!canvas) return null;
+  currentFrame = { id: newFrameId('f'), at: new Date().toISOString(), source };
+  return { full: canvasDataUrl(canvas, 1600, 0.9), small: canvasDataUrl(canvas, 512, 0.85) };
+}
+
+async function runVlm(mode, prompt, outId, metaId, btn, targetKey) {
+  if (!state.image) return toast('请先选择图片');
+  setBusy(btn, true, '推理中…');
+  $(outId).classList.add('empty'); $(outId).textContent = '模型推理中，本机约需数秒…';
+  try {
+    const body = { image: state.imageVlm, mode, prompt };
+    if (mode === 'spatial') body.max_tokens = 300;
+    const j = await postJSON('/api/vlm', body);
+    $(outId).classList.remove('empty'); $(outId).textContent = j.answer || '（空回答）';
+    $(metaId).innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b> · 模式 <b>${mode}</b>`;
+    state[targetKey] = j.answer || '';
+    const ttsBtn = $({scene:'tts-scene',spatial:'tts-spatial',vqa:'tts-vqa'}[mode]);
+    if (ttsBtn) ttsBtn.disabled = false;
+  } catch (e) {
+    $(outId).textContent = '失败：' + e.message;
+  } finally { setBusy(btn, false, '重新识别'); }
+}
+
+$('btn-scene').onclick = () => runVlm('scene', $('prompt-scene').value, 'out-scene', 'meta-scene', $('btn-scene'), 'lastScene');
+$('btn-spatial-left').onclick = () => runVlm('spatial', $('prompt-spatial')?.value || undefined, 'out-spatial', 'meta-spatial', $('btn-spatial-left'), 'lastSpatial');
+$('btn-spatial-occlusion').onclick = () => runVlm('spatial', '请只输出 JSON：判断画面中主要物体是否被遮挡、谁遮挡谁，并给出每个物体的 position（left/center/right/top/bottom）。不确定填 unknown，不要猜。', 'out-spatial', 'meta-spatial', $('btn-spatial-occlusion'), 'lastSpatial');
+$('btn-spatial-depth').onclick = () => runVlm('spatial', '请只输出 JSON：判断画面中主要物体的前后、上下关系，并说明判断依据（例如谁更大、谁在下方）。不确定填 unknown，不要猜。', 'out-spatial', 'meta-spatial', $('btn-spatial-depth'), 'lastSpatial');
+
+async function runVqa() {
+  if (!state.image) return toast('请先选择图片');
+  const q = $('vqa-q').value.trim(); if (!q) return toast('请输入问题');
+  const btn = $('btn-vqa'); setBusy(btn, true, '推理中…');
+  $('out-vqa').classList.add('empty'); $('out-vqa').textContent = '模型推理中，本机约需数秒…';
+  try {
+    const j = await postJSON('/api/vlm', { image: state.imageVlm, mode: 'vqa', prompt: q, max_tokens: 220 });
+    $('out-vqa').classList.remove('empty'); $('out-vqa').textContent = j.answer || '（空回答）';
+    $('meta-vqa').innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
+    state.lastVqa = j.answer || ''; $('tts-vqa').disabled = false;
+  } catch (e) { $('out-vqa').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '提问'); }
+}
+$('btn-vqa').onclick = runVqa;
+$('vqa-q').onkeydown = (e) => { if (e.key === 'Enter') runVqa(); };
+
+$('btn-ocr').onclick = async () => {
+  if (!state.image) return toast('请先选择图片');
+  const btn = $('btn-ocr'); setBusy(btn, true, '识别中…');
+  $('out-ocr').textContent = 'OCR 识别中…'; $('ocr-lines').innerHTML = '';
+  try {
+    const j = await postJSON('/api/ocr', { image: state.image });
+    $('out-ocr').classList.remove('empty');
+    $('out-ocr').textContent = j.text || '（未识别到文字）';
+    $('meta-ocr').innerHTML = `延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b> · 行数 <b>${j.lines.length}</b>`;
+    state.lastOcr = j.text || '';
+    $('tts-ocr').disabled = !j.text; $('copy-ocr').disabled = !j.text;
+    $('ocr-lines').innerHTML = j.lines.map(x => `<div class="ocr-line"><span>${escapeHtml(x.text)}</span><span>${x.score == null ? '' : (x.score*100).toFixed(1)+'%'}</span></div>`).join('');
+  } catch (e) { $('out-ocr').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '重新识别'); }
+};
+
+function escapeHtml(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot'}[c])); }
+
+$('copy-ocr').onclick = async () => {
+  try { await navigator.clipboard.writeText(state.lastOcr); toast('已复制'); }
+  catch (e) { toast('复制失败，请手动选择'); }
+};
+
+async function synthTts(text, engine = 'piper', speedOverride = null, signal = null, traceId = '') {
+  const speed = Number(speedOverride) > 0 ? Number(speedOverride) : Number($('tts-speed').value);
+  const body = { text, engine, speed };
+  if (traceId) body.trace_id = traceId;
+  const r = await fetch('/api/tts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal
+  });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('HTTP ' + r.status)); }
+  return {
+    url: URL.createObjectURL(await r.blob()),
+    gen: r.headers.get('X-Gen-Ms'), dur: r.headers.get('X-Audio-Seconds'), eng: r.headers.get('X-TTS-Engine')
+  };
+}
+
+// 播放器与分句逻辑在 app-core.js，页面与测试共用同一份实现。
+
+async function playTts(text) {
+  if (!text) return toast('没有可朗读的文本');
+  const btn = $('btn-tts'); setBusy(btn, true, '合成中…');
+  $('meta-tts').textContent = 'TTS 合成中，本机约需数秒…';
+  try {
+    const t0 = performance.now();
+    const t = await synthTts(text);
+    const audio = $('audio'); audio.src = t.url; audio.play();
+    $('meta-tts').innerHTML = `引擎 <b>${t.eng || '?'}</b> · 合成 <b>${t.gen ? (t.gen/1000).toFixed(2)+' s' : ((performance.now()-t0)/1000).toFixed(2)+' s'}</b> · 音频 <b>${t.dur || '?'} s</b>`;
+  } catch (e) { $('meta-tts').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '合成并播放'); }
+}
+$('btn-tts').onclick = () => playTts($('tts-text').value.trim());
+$('tts-scene').onclick = () => playTts(state.lastScene);
+$('tts-spatial').onclick = () => playTts(state.lastSpatial);
+$('tts-vqa').onclick = () => playTts(state.lastVqa);
+$('tts-ocr').onclick = () => playTts(state.lastOcr);
+
+function speakAnswer(text) {
+  if (!text) return;
+  const speed = Number($('tts-speed').value) || 1.0;
+  speakAll(text, { speed });
+}
+
+// ---------- 统一输出流：危险提示可抢占普通播报 ----------
+let outputReady = false;
+let outputEpoch = -1;
+let outputPriority = 99;
+let outputLastText = '';
+let outputLastAt = 0;
+let outputPlaying = null;
+
+function handleOutputEvent(ev) {
+  let j = null;
+  try { j = JSON.parse(ev.data || '{}'); } catch (e) { return; }
+  if (j.type === 'cancel') {
+    if (j.epoch != null && j.epoch < outputEpoch) return;
+    outputEpoch = j.epoch != null ? j.epoch : outputEpoch;
+    stopPlayer();
+    streamPlayer.stop();
+    outputPriority = 99;
+    voiceState('播报已停止', false);
+    return;
+  }
+  if (j.type !== 'speech' || !j.text) return;
+  if (window.CM5DeviceUI && window.CM5DeviceUI.remote) {
+    window.CM5DeviceUI.showSpeech(j);
+    return;
+  }
+  if (j.playback === 'device') return;  // 设备端 ALSA sink 已接管，避免浏览器重复发声
+  if (j.epoch != null && j.epoch < outputEpoch) return;
+
+  const job = {
+    utteranceId: j.utterance_id || '',
+    segmentId: j.segment_id || '',
+    sequence: j.sequence || 0,
+    text: j.text,
+    priority: j.priority,
+    isFinal: !!j.is_final,
+    speed: Number($('tts-speed').value) || null,
+    deadlineMs: j.deadline_s ? Number(j.deadline_s) * 1000 : null,
+    receivedAt: Date.now(),
+    traceId: (j.meta && (j.meta.request_id || j.meta.trace_id)) || j.utterance_id || '',
+    answer: (j.meta && j.meta.answer) || '',
+  };
+
+  if (j.priority === 0) {
+    stopPlayer();
+    streamPlayer.stop();
+    outputPriority = 0;
+    streamPlayer.enqueue(job);
+    return;
+  }
+  // 主控紧急提示始终播放；普通回答按用户设置。
+  if (j.priority >= 3 && !$('eyes-auto-tts').checked) return;
+
+  const sameUtterance = streamPlayer.activeUtterance && j.utterance_id === streamPlayer.activeUtterance;
+  if (sameUtterance) {
+    streamPlayer.enqueue(job);
+    return;
+  }
+  if (player.running && j.priority > outputPriority) return;
+  stopPlayer();
+  streamPlayer.stop();
+  outputPriority = j.priority;
+  streamPlayer.enqueue(job);
+}
+
+document.addEventListener('cm5-tts-end', () => { outputPriority = 99; });
+
+function connectOutput() {
+  try {
+    const es = new EventSource('/api/output/stream');
+    es.onopen = () => { outputReady = true; };
+    es.onerror = () => { outputReady = false; };
+    es.onmessage = handleOutputEvent;
+  } catch (e) {
+    outputReady = false;
+  }
+}
+
+connectOutput();
+
+async function runEyes(task, btn, question = '') {
+  const it = beginInteraction();
+  const requestStart = Date.now();
+  const requestId = newFrameId('req');
+  const frame = await captureFrame();
+  if (!frame && task !== 'followup') return toast('请先拍照或打开相机');
+  const body = { task, session_id: sessionId, request_id: requestId, request_start_ms: requestStart };
+  if (task === 'item') {
+    const item = $('eyes-item').value.trim();
+    if (!item) return toast('请输入要找的东西');
+    body.item = item;
+  }
+  if (task === 'followup') {
+    const q = question || $('eyes-input').value.trim();
+    if (!q) return toast('请输入内容');
+    body.question = q;
+    body.context = state.lastEyes || '';
+  }
+  if (frame) {
+    body.image = frame.full;
+    body.image_vlm = frame.small;
+    body.frame_id = currentFrame.id;
+    body.captured_at = currentFrame.at;
+    body.image_source = currentFrame.source;
+  }
+  setBusy(btn, true, '识别中…');
+  $('out-eyes').classList.add('empty'); $('out-eyes').textContent = '识别中，本机约需数秒…';
+  try {
+    const j = await postJSON('/api/eyes', body, it.signal);
+    if (it.gen !== interactionGen) return;
+    $('out-eyes').classList.remove('empty');
+    $('out-eyes').textContent = j.answer || '（空回答）';
+    $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
+    if (task !== 'followup') state.lastEyes = j.answer || '';
+    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(j.answer);
+  } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
+  finally { setBusy(btn, false, '重试'); }
+}
+
+$('btn-eyes-scene').onclick = () => runEyes('scene', $('btn-eyes-scene'));
+$('btn-eyes-toilet').onclick = () => runEyes('toilet', $('btn-eyes-toilet'));
+$('btn-eyes-exit').onclick = () => runEyes('exit', $('btn-eyes-exit'));
+$('btn-eyes-text').onclick = () => runEyes('text', $('btn-eyes-text'));
+$('btn-eyes-date').onclick = () => runEyes('date', $('btn-eyes-date'));
+$('btn-eyes-detail').onclick = () => runEyes('detail', $('btn-eyes-detail'));
+$('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
+$('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
+
+// 交互代次由 app-core.js 提供。
+
+// ---------- 合并输入：勾选「结合画面」走追问，否则走聊天 ----------
+async function sendChat(q, btn) {
+  const it = beginInteraction();
+  const requestStart = Date.now();
+  const requestId = newFrameId('req');
+  const out = $('out-eyes');
+  out.classList.remove('empty');
+  out.textContent = '思考中…';
+  if (btn) setBusy(btn, true, '回答中…');
+  try {
+    const resp = await fetch('/api/talk', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task: 'chat', question: q, frame_id: currentFrame.id, session_id: sessionId, request_id: requestId, request_start_ms: requestStart }),
+      signal: it.signal
+    });
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({}));
+      throw new Error(j.error || ('HTTP ' + resp.status));
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let text = '';
+    let answerText = '';
+    out.textContent = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (it.gen !== interactionGen) { try { reader.cancel(); } catch (e) { /* ignore */ } return; }
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split('\n\n');
+      buffer = chunks.pop();
+      for (const chunk of chunks) {
+        if (!chunk.startsWith('data:')) continue;
+        let payload = null;
+        try { payload = JSON.parse(chunk.slice(5).trim()); } catch (e) { continue; }
+        if (it.gen !== interactionGen) return;
+        if (payload.error) throw new Error(payload.error);
+        const piece = payload.segment && payload.segment.text ? payload.segment.text : payload.sentence;
+        if (piece) {
+          text += piece;
+          out.textContent = text;
+        }
+        if (payload.done && payload.answer) {
+          answerText = payload.answer;
+          out.textContent = payload.answer;
+        }
+      }
+    }
+    // SSE 正常时由 streamPlayer 逐段播报；仅在 SSE 不可用时才整段兜底。
+    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(answerText || text);
+    $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
+  } catch (e) {
+    if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
+  } finally {
+    if (btn) setBusy(btn, false, '发送');
+  }
+}
+
+async function sendMerged() {
+  const q = $('eyes-input').value.trim();
+  if (!q) return toast('请输入内容');
+  const withImage = $('eyes-use-image').checked && (!!currentFrame.id || !!state.image);
+  if (withImage) await runEyes('followup', $('btn-send'), q);
+  else await sendChat(q, $('btn-send'));
+}
+
+$('btn-send').onclick = sendMerged;
+$('eyes-input').onkeydown = (e) => { if (e.key === 'Enter') sendMerged(); };
+$('btn-stop').onclick = () => {
+  cancelInteraction();
+  postJSON('/api/output/cancel', { min_priority: 1 }).catch(() => {});
+  voiceState('已停止播报', false);
+};
+
+let vctx = null, vproc = null, vstream = null, vOn = false, vSampleRate = 16000;
+let vChunks = [], vSilence = 0, vSpeaking = false, vBusy = false;
+let vVoiced = 0, vMuteUntil = 0, vNoise = 0.006, vLastSpoken = '', vSpokenAt = 0;
+let vPreRoll = [], vArmed = false, vKwsReady = null;
+const VAD_RMS = 0.012;      // 带降噪后正常说话约 0.01–0.03，0.02 会漏掉小音量
+const VAD_SILENCE = 0.7;    // 停顿多久算一句话结束
+const PRE_ROLL_SECONDS = 1.5;  // 唤醒词之前的音频，防止“唤醒词+指令”丢开头
+const WAKE_WORD = '小冰小冰';    // 显示用唤醒词；服务端同时接受单个「小冰」及同音词
+
+function pushPreRoll(data) {
+  vPreRoll.push(new Float32Array(data));
+  let total = vPreRoll.reduce((s, c) => s + c.length, 0);
+  while (total > vSampleRate * PRE_ROLL_SECONDS && vPreRoll.length) {
+    total -= vPreRoll[0].length;
+    vPreRoll.shift();
+  }
+}
+
+function resetVad() {
+  vChunks = [];
+  vPreRoll = [];
+  vSpeaking = false;
+  vSilence = 0;
+  vVoiced = 0;
+}
+
+async function ensureKwsReady() {
+  if (vKwsReady !== null) return vKwsReady;
+  try {
+    const r = await fetch('/api/status');
+    const s = await r.json();
+    vKwsReady = !!(s.kws && s.kws.ready);
+  } catch (e) { vKwsReady = false; }
+  return vKwsReady;
+}
+
+document.addEventListener('cm5-tts-start', (e) => {
+  resetVad();
+  vLastSpoken = (e.detail && e.detail.text) || '';
+  vSpokenAt = performance.now();
+});
+document.addEventListener('cm5-tts-text', (e) => {
+  vLastSpoken = (e.detail && e.detail.text) || vLastSpoken;
+  vSpokenAt = performance.now();
+});
+document.addEventListener('cm5-tts-end', () => {
+  resetVad();
+  vMuteUntil = performance.now() + 500;
+});
+
+function echoLike(text) {
+  if (!text || !vLastSpoken || performance.now() - vSpokenAt > 10000) return false;
+  const norm = (s) => (s || '').replace(/[^\u4e00-\u9fa5a-z0-9]/gi, '');
+  const a = norm(text), b = norm(vLastSpoken);
+  if (a.length < 3 || b.length < 3) return false;
+  const grams = (s) => {
+    const out = [];
+    for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2));
+    return out;
+  };
+  const ga = grams(a), gb = new Set(grams(b));
+  const hit = ga.filter((g) => gb.has(g)).length;
+  return hit / Math.max(1, ga.length) > 0.7;
+}
+
+function voiceState(text, on) {
+  $('voice-state').textContent = text;
+  $('voice-state').classList.toggle('on', !!on);
+}
+
+function encodeWav(chunks, sr) {
+  const len = chunks.reduce((s, c) => s + c.length, 0);
+  const buf = new ArrayBuffer(44 + len * 2);
+  const view = new DataView(buf);
+  view.setUint32(0, 0x46464952, true);
+  view.setUint32(4, 36 + len * 2, true);
+  view.setUint32(8, 0x45564157, true);
+  view.setUint32(12, 0x20746d66, true);
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sr, true);
+  view.setUint32(28, sr * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  view.setUint32(36, 0x61746164, true);
+  view.setUint32(40, len * 2, true);
+  let off = 44;
+  for (const c of chunks) {
+    for (let i = 0; i < c.length; i++) {
+      const s = Math.max(-1, Math.min(1, c[i]));
+      view.setInt16(off, s * 0x7fff, true);
+      off += 2;
+    }
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.readAsDataURL(blob);
+  });
+}
+
+function boostChunks(chunks) {
+  let peak = 0;
+  for (const c of chunks) for (let i = 0; i < c.length; i++) if (Math.abs(c[i]) > peak) peak = Math.abs(c[i]);
+  if (peak <= 0.001 || peak >= 0.4) return chunks;
+  const gain = Math.min(4, 0.4 / peak);
+  return chunks.map((c) => {
+    const o = new Float32Array(c.length);
+    for (let i = 0; i < c.length; i++) o[i] = c[i] * gain;
+    return o;
+  });
+}
+
+async function sendUtterance(chunks) {
+  const duration = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
+  if (duration < 0.8) return;
+  const it = beginInteraction();
+  const vadEndMs = Date.now();
+  const speechEndMs = vadEndMs - VAD_SILENCE * 1000;
+  const requestId = newFrameId('voice');
+  vBusy = true;
+  voiceState('识别中…', true);
+  try {
+    const audio = await blobToDataUrl(encodeWav(boostChunks(chunks), vSampleRate));
+    let wakeDetected = false;
+    const kwsReady = await ensureKwsReady();
+    if (kwsReady && !vArmed) {
+      // KWS 常开监听：先确认唤醒词，再送 ASR；模型不可用时退回 ASR 文本匹配。
+      let kws = null;
+      try {
+        kws = await postJSON('/api/kws', { audio }, it.signal);
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        kws = null;
+      }
+      if (it.gen !== interactionGen) return;
+      if (kws && kws.error) {
+        voiceState('KWS 不可用，改用语音识别兜底', true);
+      } else if (kws && !kws.keyword) {
+        voiceState(`没听到「${WAKE_WORD}」`, true);
+        return;
+      } else if (kws && kws.keyword) {
+        wakeDetected = true;
+      }
+    }
+    const frame = await captureFrame();
+    const body = {
+      audio, context: state.lastEyes, session_id: sessionId, wake_detected: wakeDetected,
+      request_id: requestId, request_start_ms: vadEndMs, speech_end_ms: speechEndMs, vad_end_ms: vadEndMs,
+    };
+    if (frame) {
+      body.image = frame.full;
+      body.image_vlm = frame.small;
+      body.frame_id = currentFrame.id;
+      body.captured_at = currentFrame.at;
+      body.image_source = currentFrame.source;
+    }
+    const j = await postJSON('/api/voice', body, it.signal);
+    if (it.gen !== interactionGen) return;
+    vArmed = !!j.armed || j.intent === 'wake';
+    if (j.text && echoLike(j.text)) {
+      voiceState('已忽略播报回声', true);
+      return;
+    }
+    if (j.intent === 'none') {
+      voiceState(`没听到唤醒词或指令 · 识别到「${j.text || '空'}」`, true);
+      return;
+    }
+    if (j.intent === 'silent') {
+      voiceState('没听到有效语音', true);
+      return;
+    }
+    if (j.intent === 'ack') {
+      voiceState('我在听，请继续说', true);
+      return;
+    }
+    if (j.intent === 'speech_stop') {
+      cancelInteraction();
+      stopPlayer();
+      voiceState('已停止播报', false);
+      return;
+    }
+    if (j.close_camera) {
+      closeCamera();
+    }
+    $('out-eyes').classList.remove('empty');
+    $('out-eyes').textContent = j.answer || '（空回答）';
+    $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
+    if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
+    voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
+    if (!outputReady && $('eyes-auto-tts').checked && j.answer && j.spoken !== false) speakAnswer(j.answer);
+  } catch (e) {
+    if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
+  } finally {
+    vBusy = false;
+  }
+}
+
+function onAudio(e) {
+  if (!vOn || vBusy || player.running || performance.now() < vMuteUntil) return;
+  const data = e.inputBuffer.getChannelData(0);
+  let sum = 0;
+  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+  const rms = Math.sqrt(sum / data.length);
+  const threshold = Math.max(VAD_RMS, vNoise * 3);
+  if (rms > threshold) {
+    if (!vSpeaking) voiceState('听到声音，说完停一下…', true);
+    vSpeaking = true;
+    vSilence = 0;
+    vVoiced += data.length;
+    vChunks.push(new Float32Array(data));
+  } else if (vSpeaking) {
+    vSilence += data.length / vSampleRate;
+    vChunks.push(new Float32Array(data));
+    if (vSilence > VAD_SILENCE) {
+      const chunks = vPreRoll.concat(vChunks);
+      const voiced = vVoiced / vSampleRate;
+      const total = chunks.reduce((s, c) => s + c.length, 0) / vSampleRate;
+      resetVad();
+      if (voiced >= 0.5 && total >= 0.8) sendUtterance(chunks);
+      else if (voiced >= 0.2) voiceState('没听清，再说一次', true);
+    }
+  } else {
+    pushPreRoll(data);
+    vNoise = Math.min(0.03, vNoise * 0.95 + rms * 0.05);
+  }
+}
+
+function withTimeout(promise, ms, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms)),
+  ]);
+}
+
+async function startVoice() {
+  $('btn-voice').disabled = true;
+  voiceState('正在打开麦克风…', true);
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      throw new Error('当前页面无法访问麦克风，需要用 localhost 或 HTTPS 打开');
+    }
+    const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+    if (devices.length && !devices.some((d) => d.kind === 'audioinput')) {
+      throw new Error('系统里没有检测到麦克风设备');
+    }
+    vstream = await withTimeout(
+      navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }),
+      8000,
+      '麦克风授权超时，请在系统设置里允许浏览器使用麦克风'
+    );
+    vctx = new AudioContext({ sampleRate: 16000 });
+    await vctx.resume();
+    vSampleRate = vctx.sampleRate || 16000;
+    const src = vctx.createMediaStreamSource(vstream);
+    vproc = vctx.createScriptProcessor(1024, 1, 1);
+    vproc.onaudioprocess = onAudio;
+    src.connect(vproc);
+    vproc.connect(vctx.destination);
+    vOn = true;
+    vNoise = 0.006;
+    vMuteUntil = 0;
+    vArmed = false;
+    vKwsReady = null;
+    resetVad();
+    $('btn-voice').textContent = '关闭语音唤醒';
+    const kwsOk = await ensureKwsReady();
+    voiceState(kwsOk ? `监听中 · 说「${WAKE_WORD}」` : `KWS 未就绪，用 ASR 兜底 · 说「${WAKE_WORD}」`, true);
+  } catch (e) {
+    stopVoice();
+    voiceState('麦克风打开失败：' + e.message, false);
+  } finally {
+    $('btn-voice').disabled = false;
+  }
+}
+
+function stopVoice() {
+  vOn = false;
+  vArmed = false;
+  if (vproc) { vproc.disconnect(); vproc.onaudioprocess = null; vproc = null; }
+  if (vctx) { vctx.close(); vctx = null; }
+  if (vstream) { vstream.getTracks().forEach((t) => t.stop()); vstream = null; }
+  resetVad();
+  $('btn-voice').textContent = '开启语音唤醒';
+  voiceState(`未开启 · 先说「${WAKE_WORD}」再说指令`, false);
+}
+
+$('btn-voice').onclick = () => (vOn ? stopVoice() : startVoice());
+
+$('btn-voice-test').onclick = async () => {
+  voiceState('Piper 合成中…', true);
+  try {
+    const t = await synthTts('你好，我是你的AI助手，现在可以听到我说话吗', 'piper');
+    await playUrl(t.url);
+    URL.revokeObjectURL(t.url);
+    voiceState('Piper 播放完成', true);
+  } catch (e) {
+    voiceState('Piper 播放失败：' + e.message, false);
+  }
+};
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'main-control') refreshMainControl();
+  };
+});
+
+document.querySelectorAll('.subtab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.subtab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.subpanel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active'); $('sub-' + tab.dataset.sub).classList.add('active');
+  };
+});
+</script>
+<script src="/static/device-mode.js?v=2"></script>
+<script src="/static/guide-mode.js?v=1"></script>
+</body>
+</html>

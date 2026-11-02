@@ -1,0 +1,18 @@
+{
+  "data_kind": "ai_generated_samples",
+  "note": "samples/ 下均为 AI 生成图片，只用于接口与决策回归，不能代表真实场景分布。真实数据需按地点/视频批次另行划分。",
+  "cases": [
+    {"image": "scene-corridor.jpg", "expected_direction": "straight", "expected_reason": "clear", "expect_danger": false, "note": "走廊近中连续"},
+    {"image": "scene-stairs.jpg", "expected_direction": "stop", "expected_reason": "stairs", "expect_danger": true, "note": "楼梯，危险优先"},
+    {"image": "scene-crosswalk.jpg", "expected_direction": "stop", "expected_reason": "road", "expect_danger": true, "note": "斑马线，道路"},
+    {"image": "scene-desk.jpg", "expected_direction": "unavailable", "expected_reason": "no_seed", "expect_danger": false, "note": "桌面无近处地面种子"},
+    {"image": "scene-elevator.jpg", "expected_direction": "stop", "expected_reason": "ahead", "expect_danger": false, "note": "电梯门，前方不连续"},
+    {"image": "scene-shelf.jpg", "expected_direction": "stop", "expected_reason": "blocked", "expect_danger": false, "note": "货架挡路"},
+    {"image": "scene-tactile-straight.jpg", "expected_direction": "straight", "expected_reason": "clear", "expect_danger": false, "note": "盲道直行"},
+    {"image": "scene-tactile-dots.jpg", "expected_direction": "straight", "expected_reason": "clear", "expect_danger": false, "note": "圆点盲道，近中连续"},
+    {"image": "scene-tactile-broken.jpg", "expected_direction": "left", "expected_reason": "narrow", "expect_danger": false, "note": "盲道破损，中路瓶颈，向左绕"},
+    {"image": "scene-tactile-obstacle.jpg", "expected_direction": "stop", "expected_reason": "obstacle", "expect_danger": false, "note": "回归：盲道被自行车/垃圾桶占用，不得再判 straight/clear"},
+    {"image": "scene-tactile-station.jpg", "expected_direction": "stop", "expected_reason": "blocked", "expect_danger": false, "note": "站内灰色地面近处不连续，保守停车"},
+    {"image": "scene-tactile-crossing.jpg", "expected_direction": "unavailable", "expected_reason": "no_seed", "expect_danger": false, "note": "过街场景，单目分割不能确认安全，返回未知"}
+  ]
+}

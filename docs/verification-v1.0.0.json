@@ -1,0 +1,35 @@
+{
+  "version": "1.0.0",
+  "timezone": "Asia/Shanghai",
+  "environment": "Windows development machine; no CM5 deployment",
+  "scope": "Python rule/interface regressions and mocked DOM UI behavior; not hardware/model acceptance",
+  "tests": [
+    {
+      "name": "python-regression",
+      "started_utc": "2026-11-02T15:23:07.889Z",
+      "finished_utc": "2026-11-02T15:23:31.349Z",
+      "exit_code": 0,
+      "result": "passed",
+      "summary": "Ran 194 tests in 21.877s; OK",
+      "raw_evidence": "CM5-AI/test-runs/v1.0.0-documentation-20261102/python-regression.log"
+    },
+    {
+      "name": "remote-device-ui",
+      "started_utc": "2026-11-02T15:19:29.610Z",
+      "finished_utc": "2026-11-02T15:19:30.357Z",
+      "exit_code": 0,
+      "result": "passed",
+      "summary": "PASS: remote device routing, offline fail-closed, unsupported-policy fail-closed, explicit browser mode",
+      "raw_evidence": "CM5-AI/test-runs/v1.0.0-documentation-20261102/remote-device-ui.log"
+    },
+    {
+      "name": "guide-ui",
+      "started_utc": "2026-11-02T15:19:30.257Z",
+      "finished_utc": "2026-11-02T15:19:30.341Z",
+      "exit_code": 0,
+      "result": "passed",
+      "summary": "PASS: device-only start/stop, bounded polling, hidden/tab switch keeps device guide, missing model blocks start, failed status clears old direction, single in-flight request",
+      "raw_evidence": "CM5-AI/test-runs/v1.0.0-documentation-20261102/guide-ui.log"
+    }
+  ]
+}
