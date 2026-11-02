@@ -17,11 +17,17 @@ class TestbenchCompatibilityTests(unittest.TestCase):
         with mock.patch.object(server, "piper_error", return_value="missing Piper model"):
             self.assertEqual(self.client.get("/api/health").status_code, 503)
 
-    def test_main_control_tab_reports_unavailable(self):
-        status = self.client.get("/api/main-control/status").json["status"]
-        self.assertFalse(status["connected"])
-        self.assertEqual(self.client.get("/api/main-control/scene").status_code, 409)
-        self.assertEqual(self.client.post("/api/main-control/control", json={"action": "start_guidance"}).status_code, 409)
+    def test_main_control_routes_and_panel_are_removed(self):
+        for method, route in (("get", "/api/main-control/status"),
+                              ("get", "/api/main-control/scene"),
+                              ("post", "/api/main-control/control")):
+            with self.subTest(route=route):
+                self.assertEqual(getattr(self.client, method)(route).status_code, 404)
+        with self.client.get("/") as response:
+            page = response.get_data(as_text=True)
+        self.assertNotIn("main-control", page)
+        self.assertNotIn("refreshMainControl", page)
+        self.assertNotIn("btn-mc-", page)
 
     def test_web_preview_starts_camera_without_navigation_callback(self):
         with mock.patch.object(server, "IMAGE_SOURCE", "standalone-device-test"), mock.patch.object(server.DEVICE_CAMERA, "start", return_value=True) as start:

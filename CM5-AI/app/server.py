@@ -2335,18 +2335,6 @@ def api_ocr():
         leave()
 
 
-@app.get("/api/main-control/status")
-def main_control_status():
-    return jsonify({"status": {"configured": False, "connected": False,
-                    "last_error": "v1.0.0 未启用主控合同适配"}})
-
-
-@app.route("/api/main-control/scene", methods=["GET"])
-@app.route("/api/main-control/control", methods=["POST"])
-def main_control_unavailable():
-    return jsonify({"error": "主控合同接口暂不可用。"}), 409
-
-
 @app.get("/api/device/status")
 def api_device_status():
     return jsonify(device_status())
@@ -2375,13 +2363,13 @@ def api_device_voice():
 
 @app.post("/api/device/camera")
 def api_device_camera():
-    """显式独立设备测试；主控模式不允许网页抢占相机。"""
+    """显式独立设备测试；不支持的图像来源不允许启用本机相机。"""
     body = request.get_json(silent=True) or {}
     action = body.get("action")
     if action not in ("start", "stop"):
         return jsonify({"error": "action 必须为 start 或 stop"}), 400
     if IMAGE_SOURCE != "standalone-device-test":
-        return jsonify({"error": "当前由主控提供画面；未启用独立设备测试"}), 409
+        return jsonify({"error": "当前图像来源不支持设备摄像头；未启用独立设备测试"}), 409
     with DEVICE_CONTROL_LOCK:
         if action == "start":
             if not DEVICE_CAMERA.start():
@@ -2448,9 +2436,9 @@ def api_device_speak():
 
 @app.get("/api/camera/still")
 def api_camera_still():
-    """独立设备测试的高清抓图；正式取图必须走主控 FrameProvider。"""
+    """独立设备测试的高清抓图。"""
     if IMAGE_SOURCE != "standalone-device-test":
-        return jsonify({"error": "正式模式不使用本机相机，请通过主控 FrameProvider 取图"}), 409
+        return jsonify({"error": "当前图像来源不支持设备拍照，请启用独立设备测试"}), 409
     st = DEVICE_CAMERA.status()
     if not st.get("running"):
         return jsonify({"error": "设备摄像头未运行"}), 409

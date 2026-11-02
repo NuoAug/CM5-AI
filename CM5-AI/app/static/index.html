@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.19</title>
+<title>CM5 AI 功能测试台 v1.1.20</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -261,7 +261,6 @@
     <div class="tabs">
       <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">语音交互</button>
       <button type="button" class="tab" data-tab="debug" id="tab-debug">调试工具</button>
-      <button type="button" class="tab" data-tab="main-control" id="tab-main-control">主控接口</button>
     </div>
 
     <div class="card">
@@ -297,25 +296,6 @@
           <span id="device-volume-value" aria-live="polite">读取中…</span>
           <button id="device-mute" disabled>静音</button>
         </div>
-      </div>
-
-      <div class="panel" id="panel-main-control">
-        <h2>主控接口 interaction.v0.1</h2>
-        <p class="hint">仅调试与协议验证。正式行走判断、距离和通行结论由主控提供；测试替身只回放固定样例，不代表真实联调。</p>
-        <div class="row">
-          <button id="btn-mc-refresh">刷新状态</button>
-          <button class="primary" id="btn-mc-scene">查询场景</button>
-          <span id="mc-state" class="voice-state">未查询</span>
-        </div>
-        <div class="row">
-          <button id="btn-mc-start">开始</button>
-          <button id="btn-mc-pause">暂停</button>
-          <button id="btn-mc-resume">恢复</button>
-          <button id="btn-mc-end">结束</button>
-          <button id="btn-mc-repeat">重复</button>
-        </div>
-        <div class="result empty" id="out-mc">等待查询…</div>
-        <div class="meta" id="meta-mc"></div>
       </div>
 
       <div class="panel" id="panel-debug">
@@ -577,56 +557,6 @@ $('btn-shot').onclick = async () => {
   setImageSource('摄像头拍照（静态）');
   toast('拍照完成');
 };
-
-// ---------- 主控接口调试（只查询与提交意图，不做本地通行判断） ----------
-async function refreshMainControl() {
-  try {
-    const r = await fetch('/api/main-control/status');
-    const j = await r.json();
-    const s = j.status || {};
-    $('mc-state').textContent = s.connected
-      ? `已连接 · ${s.master_instance_id || '未知实例'} · ${s.evidence_mode || '未知来源'}`
-      : (s.configured ? '未连接 · ' + (s.last_error || '等待握手') : '未配置主控');
-    $('meta-mc').textContent = `instance ${s.instance_id || '--'} · clock ${s.clock_id || '--'} · 替身 ${s.fixture_allowed ? '允许' : '禁止'}`;
-  } catch (e) {
-    $('mc-state').textContent = '状态查询失败：' + e.message;
-  }
-}
-
-async function queryScene() {
-  try {
-    const r = await fetch('/api/main-control/scene');
-    const j = await r.json();
-    $('out-mc').classList.remove('empty');
-    $('out-mc').textContent = j.answer || j.error || '（无结果）';
-    if (j.scene) {
-      const nav = j.scene.navigation || {};
-      $('meta-mc').textContent = `state ${j.scene.state_id || '--'} · seq ${j.scene.sequence ?? '--'} · mode ${nav.mode || '--'} · reason ${nav.reason_code || '--'} · stale ${j.scene._stale ? '是' : '否'}`;
-    }
-  } catch (e) {
-    $('out-mc').textContent = '场景查询失败：' + e.message;
-  }
-}
-
-async function controlMain(action) {
-  const transcript = { start_guidance: '开始引导', pause_guidance: '暂停引导', resume_guidance: '恢复引导', end_guidance: '结束引导', repeat_guidance: '重复引导' }[action];
-  try {
-    const j = await postJSON('/api/main-control/control', { action, transcript, session_id: 'debug' });
-    $('out-mc').classList.remove('empty');
-    $('out-mc').textContent = j.answer || '（无结果）';
-    $('meta-mc').textContent = j.result ? `operation ${j.result.operation_state} · actual_mode ${j.result.actual_mode} · reason ${j.result.reason_code}` : '无控制结果';
-  } catch (e) {
-    $('out-mc').textContent = '控制请求失败：' + e.message;
-  }
-}
-
-$('btn-mc-refresh').onclick = refreshMainControl;
-$('btn-mc-scene').onclick = queryScene;
-$('btn-mc-start').onclick = () => controlMain('start_guidance');
-$('btn-mc-pause').onclick = () => controlMain('pause_guidance');
-$('btn-mc-resume').onclick = () => controlMain('resume_guidance');
-$('btn-mc-end').onclick = () => controlMain('end_guidance');
-$('btn-mc-repeat').onclick = () => controlMain('repeat_guidance');
 
 async function postJSON(url, body, signal) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
@@ -1285,7 +1215,6 @@ document.querySelectorAll('.tab').forEach(tab => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
-    if (tab.dataset.tab === 'main-control') refreshMainControl();
   };
 });
 

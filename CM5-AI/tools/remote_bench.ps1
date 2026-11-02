@@ -76,7 +76,7 @@ switch ($Action) {
         if (-not (Test-PortInUse $LocalPort)) { throw "本机 $LocalPort 没有隧道；先运行 start" }
         $h = Invoke-Api "/api/health"
         $s = Invoke-Api "/api/status"
-        Write-Output "health=$($h.ok) main_control=$($h.main_control_connected)"
+        Write-Output "health=$($h.ok)"
         Write-Output "image_source=$($s.image_source) voice_source=$($s.device.voice_source) sink=$($s.output.sink)"
         Write-Output "vlm_up=$($s.vlm.up) ocr=$($s.ocr.ready) asr_loaded=$($s.asr.ready) tts=$($s.tts.ready)"
         Write-Output "memory_gb=$($s.memory.sum_gb) available_mb=$($s.memory.available_mb) over_budget=$($s.memory.over_budget)"

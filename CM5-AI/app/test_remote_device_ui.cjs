@@ -17,7 +17,7 @@ async function scenario(mode) {
     });
     return elements.get(id);
   }
-  const status = { remote_device_mode: true, image_source: 'main_control',
+  const status = { remote_device_mode: true, image_source: 'external',
     voice_source: 'device', output_sink: 'alsa', sink: true,
     camera: {running: false}, voice: {running: true, capture: true} };
   if (mode === 'legacy') delete status.remote_device_mode;
@@ -51,7 +51,7 @@ async function scenario(mode) {
   if (mode === 'remote') {
     assert.ok(calls.some(c => c.url === '/api/device/voice' && c.body.action === 'stop'));
     assert.equal(calls.filter(c => c.url === '/api/device/speak').length, 1);
-    assert.equal(calls.filter(c => c.url === '/api/device/camera').length, 0, 'main-control camera must not be stolen');
+    assert.equal(calls.filter(c => c.url === '/api/device/camera').length, 0, 'unsupported image source must not start device camera');
   }
   if (mode === 'browser') assert.ok(local > 0, 'explicit browser debug mode still works');
 }

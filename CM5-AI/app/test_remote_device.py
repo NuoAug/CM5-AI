@@ -1,4 +1,4 @@
-"""远程测试台外设路由：只操作设备，不绕过正式主控相机策略。"""
+"""远程测试台外设路由：只操作设备，不绕过图像来源策略。"""
 import time
 import unittest
 from unittest import mock
@@ -17,8 +17,8 @@ class RemoteDeviceTests(unittest.TestCase):
         with mock.patch.object(server, "VOICE_SOURCE", "browser"), mock.patch.object(server, "OUTPUT_SINK", "browser"):
             self.assertFalse(self.client.get("/api/device/status").json["remote_device_mode"])
 
-    def test_camera_controls_cannot_bypass_main_control(self):
-        with mock.patch.object(server, "IMAGE_SOURCE", "main_control"), mock.patch.object(server, "DEVICE_CAMERA") as camera:
+    def test_camera_controls_reject_unsupported_image_source(self):
+        with mock.patch.object(server, "IMAGE_SOURCE", "external"), mock.patch.object(server, "DEVICE_CAMERA") as camera:
             self.assertEqual(self.client.post("/api/device/camera", json={"action": "start"}).status_code, 409)
             self.assertEqual(self.client.get("/api/camera/preview").status_code, 409)
             camera.start.assert_not_called()

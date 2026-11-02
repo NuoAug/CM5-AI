@@ -155,7 +155,7 @@
   }
   async function openDeviceCamera() {
     if (ui.status.image_source !== 'standalone-device-test') {
-      throw new Error('当前画面由主控提供，尚未开启独立树莓派相机测试');
+      throw new Error('当前图像来源不支持设备摄像头，请启用独立树莓派相机测试');
     }
     closeCamera();
     setCameraPlaceholder('正在连接树莓派摄像头…', '首帧到达前请稍候');
