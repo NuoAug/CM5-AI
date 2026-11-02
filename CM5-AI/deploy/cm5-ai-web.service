@@ -1,5 +1,5 @@
 [Unit]
-Description=CM5-AI web, guide loop, KWS and device audio
+Description=CM5-AI web, KWS and device audio
 After=network.target cm5-ai-vlm.service
 Wants=cm5-ai-vlm.service
 StartLimitIntervalSec=300

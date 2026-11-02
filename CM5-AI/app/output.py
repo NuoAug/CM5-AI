@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 PRIORITY_DANGER = 0
-PRIORITY_GUIDE = 1
+PRIORITY_INTERRUPT = 1
 PRIORITY_CONFIRM = 2
 PRIORITY_ANSWER = 3
 
@@ -208,7 +208,7 @@ class OutputBus:
         sid = segment_id or f"{uid}-{int(sequence)}"
         now = time.monotonic()
         key = dedupe_key or f"{uid}|{sid}|{int(sequence)}|{text}"
-        window = 3.0 if priority <= PRIORITY_GUIDE else 2.0
+        window = 3.0 if priority <= PRIORITY_INTERRUPT else 2.0
         with self._lock:
             last = self._last.get(key)
             if last is not None and now - last < window:
@@ -244,7 +244,7 @@ class OutputBus:
                 source=source,
                 reason=reason,
                 ttl=float(ttl),
-                preempt=(priority <= PRIORITY_GUIDE if preempt is None else bool(preempt)),
+                preempt=(priority <= PRIORITY_INTERRUPT if preempt is None else bool(preempt)),
                 dedupe_key=key,
                 epoch=self._epoch,
                 meta=meta or {},
@@ -272,13 +272,13 @@ class OutputBus:
             }
             sink = self._sink
         if sink is not None:
-            if priority <= PRIORITY_GUIDE or event.preempt:
+            if priority <= PRIORITY_INTERRUPT or event.preempt:
                 try:
                     sink.stop()
                 except Exception:  # noqa: BLE001
                     pass
             if priority <= PRIORITY_DANGER:
-                self._drain_sink_queue(PRIORITY_GUIDE)
+                self._drain_sink_queue(PRIORITY_INTERRUPT)
             elif event.preempt:
                 # 新回答的第一段抢占旧回答，丢弃尚未播出的旧片段。
                 self._drain_sink_queue(int(priority))
@@ -318,8 +318,8 @@ class OutputBus:
             meta=meta,
         )
 
-    def cancel(self, min_priority: int = PRIORITY_GUIDE, source: str = "voice") -> dict:
-        """停止普通播报，但保留尚未播出的危险提示；不关闭引导检测。"""
+    def cancel(self, min_priority: int = PRIORITY_INTERRUPT, source: str = "voice") -> dict:
+        """停止普通播报，保留尚未播出的高优先级提示。"""
         with self._lock:
             self._epoch += 1
             epoch = self._epoch

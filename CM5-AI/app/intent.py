@@ -34,20 +34,17 @@ WAKE_SEP = r"[\s，,。.、！!？?·]*"
 WAKE_PATTERN = re.compile(rf"[{WAKE_HEAD}]{WAKE_SEP}[{WAKE_TAIL}]", re.I)
 
 NEGATED_STOP = re.compile(
-    r"(?:不要|别|不用|不想|没必要)(?:再)?(?:停止|停掉|关掉|关闭|停(?!止))(?:播报|语音|引导|导航)?"
+    r"(?:不要|别|不用|不想|没必要)(?:再)?(?:停止|停掉|关掉|关闭|停(?!止))(?:播报|语音)?"
 )
 SPEECH_STOP = re.compile(
     r"停止播报|停止语音|停止说话|别播报|别念了|别说了|不要播报|不要念|关闭播报|关掉播报|"
     r"停播|闭嘴|安静|声音停|停止播放|别出声"
 )
-GUIDE_STOP = re.compile(
-    r"停止引导|停止导航|关闭引导|关闭导航|关掉引导|关掉导航|结束引导|结束导航|"
-    r"退出引导|退出导航|不用引导|不用导航|别引导|别导航|不要引导|不要导航|"
-    r"停止带路|别带路"
-)
-GUIDE_START = re.compile(
-    r"开始引导|开始导航|打开引导|开启引导|打开导航|继续引导|继续导航|帮我导航|给我导航|"
-    r"带我走|开始带路|开始引路|开始走路引导"
+# 已移除的导航控制只返回固定能力说明，不进入模型推理。
+UNSUPPORTED_NAVIGATION = re.compile(
+    r"(?:开始|打开|开启|继续|恢复|暂停|停止|关闭|关掉|结束|退出|不用|别|不要)(?:引导|导航|带路|引路)|"
+    r"(?:帮我|给我)(?:导航|引导|带路)|带我走|开始走路引导|"
+    r"(?:导航|带路|引路)(?:到|去|至)|^(?:请|请你)?(?:引导|导航|带路|引路)(?:模式|状态|功能)?$"
 )
 CAMERA_OFF = re.compile(
     r"(?:不要|别|不用)(?:再)?(?:打开|开启|用)?(?:摄像头|相机|镜头)"
@@ -56,10 +53,14 @@ CAMERA_OFF = re.compile(
 )
 TOPIC_SWITCH = re.compile(r"换个话题|聊点别的|只聊天|继续聊天|不看东西|不想看图")
 DEFINITION = re.compile(r"是什么意思|什么意思|怎么理解|如何定义")
-GUIDE_QUERY = re.compile(
-    r"现在能走吗|前面能走吗|可以直行吗|现在安全吗|引导状态|前面通不通|"
-    r"能不能走|可以走吗|现在可以走吗|前方能走吗|还能走吗"
+PASSAGE_QUERY = re.compile(
+    r"能不能(?:走|直行|通行|过马路|过街)|(?:能|可以)(?:直行|走|通行|过马路|过街).{0,12}(?:吗|么|不)|"
+    r"(?:能不能|能|可以)通过(?:这|那|路口|通道|马路|街道|楼梯|走廊|大门)|"
+    r"(?:前面|前方|这里|那里|路口|通道).{0,8}(?:能不能|能|可以)通过|^(?:能不能|能|可以)通过(?:吗|么)?$|"
+    r"现在安全吗|前面通不通|前方通不通"
 )
+UNSUPPORTED_NAVIGATION_REPLY = "当前版本不提供引导或通行判断，请使用看前方、读文字或找物品。"
+
 AMBIGUOUS_STOP = re.compile(r"^(?:停一下|停下来|暂停|先停|停停|等等|等一下)$")
 
 DATE_WORDS = ("日期", "生产", "保质期", "过期", "批号", "到期", "有效期")
@@ -186,7 +187,6 @@ def parse(
     text: str,
     *,
     has_context: bool = False,
-    guide_active: bool = False,
     speech_active: bool = False,
     session_id: str = "",
 ) -> Task:
@@ -201,8 +201,15 @@ def parse(
     if not WAKE_PATTERN.search(normalized):
         pass  # 调用方已处理唤醒；这里保留原文用于日志
 
-    # 否定“停止”优先：不要停止引导 = 不执行停止
-    if NEGATED_STOP.search(cmd) and not re.search(r"不要(引导|导航)", cmd):
+    if not DEFINITION.search(cmd) and (UNSUPPORTED_NAVIGATION.search(cmd) or PASSAGE_QUERY.search(cmd)):
+        return _task(
+            "unsupported", priority=2, confidence=0.98, session_id=session_id,
+            clarify=UNSUPPORTED_NAVIGATION_REPLY, deadline_s=5.0,
+            note="请求的导航或通行判断能力已移除",
+        )
+
+    # 否定“停止”优先，不取消正在进行的播报。
+    if NEGATED_STOP.search(cmd):
         return _task(
             "ack",
             confidence=0.9,
@@ -221,28 +228,6 @@ def parse(
             deadline_s=5.0,
         )
 
-    # 明确关闭引导/导航
-    if GUIDE_STOP.search(cmd):
-        return _task(
-            "guide_stop",
-            priority=2,
-            confidence=0.98,
-            session_id=session_id,
-            actions=["stop_guide"],
-            deadline_s=5.0,
-        )
-
-    # 明确开启引导
-    if GUIDE_START.search(cmd):
-        return _task(
-            "guide_start",
-            priority=2,
-            confidence=0.98,
-            session_id=session_id,
-            actions=["start_guide"],
-            deadline_s=5.0,
-        )
-
     # 换话题/只聊天优先于“不看东西”这类关闭摄像头词
     if TOPIC_SWITCH.search(cmd):
         return _task(
@@ -250,61 +235,30 @@ def parse(
             priority=3,
             confidence=0.9,
             session_id=session_id,
-            actions=["stop_guide"] if guide_active else [],
         )
 
-    # 关闭摄像头：在引导中同时停止引导，避免继续输出旧方向
+    # 关闭摄像头只控制相机。
     if CAMERA_OFF.search(cmd):
         return _task(
             "camera_off",
             priority=2,
             confidence=0.95,
             session_id=session_id,
-            actions=["stop_guide", "close_camera"],
+            actions=["close_camera"],
             deadline_s=5.0,
         )
 
-    # 只说“停一下/暂停”：结合当前状态消歧
+    # “停一下/暂停”只按当前播报状态解释。
     if AMBIGUOUS_STOP.match(cmd) or cmd in ("停", "停止", "停下"):
-        if guide_active and not speech_active:
-            return _task(
-                "guide_stop", priority=2, confidence=0.75, session_id=session_id,
-                actions=["stop_guide"], deadline_s=5.0,
-                note="按当前状态解释为停止引导",
-            )
-        if speech_active and not guide_active:
+        if speech_active:
             return _task(
                 "speech_stop", priority=2, confidence=0.75, session_id=session_id,
                 actions=["cancel_speech"], deadline_s=5.0,
                 note="按当前状态解释为停止播报",
             )
-        if guide_active and speech_active:
-            return _task(
-                "clarify",
-                priority=2,
-                confidence=0.4,
-                session_id=session_id,
-                clarify="你是要停止播报，还是关闭引导？",
-                note="两种控制都在进行，不能猜",
-            )
         return _task(
-            "clarify",
-            priority=2,
-            confidence=0.4,
-            session_id=session_id,
-            clarify="现在没有正在进行的播报或引导。",
-            note="无状态可消歧",
-        )
-
-    # 引导状态查询走快路径，不调用 VLM；语义只复用当前引导事件。
-    # 询问楼梯/扶梯/过马路时不是“当前能否直行”，继续走视觉/安全兜底。
-    if GUIDE_QUERY.search(cmd) and not re.search(r"楼梯|扶梯|电梯|马路|斑马线|过街", cmd):
-        return _task(
-            "guide_status",
-            priority=2,
-            confidence=0.95,
-            session_id=session_id,
-            deadline_s=5.0,
+            "clarify", priority=2, confidence=0.4, session_id=session_id,
+            clarify="现在没有正在进行的播报。", note="无播报可停止",
         )
 
     # 视觉任务：卫生间隔间/出口归入 find_object 的特殊目标

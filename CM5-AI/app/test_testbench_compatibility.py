@@ -1,4 +1,4 @@
-"""v1.0.0 测试台与设备相机的兼容性。"""
+"""测试台、设备相机和已移除导航功能的兼容性。"""
 import base64
 import unittest
 from unittest import mock
@@ -8,11 +8,13 @@ class TestbenchCompatibilityTests(unittest.TestCase):
     def setUp(self):
         self.client = server.app.test_client()
 
-    def test_optional_guide_missing_does_not_break_idle_web_health(self):
-        state = {"running": False, "model": {"ready": False}}
-        with mock.patch.object(server.GUIDE, "status", return_value=state), mock.patch.object(server, "piper_error", return_value=None), mock.patch.object(server, "over_budget", return_value=False):
-            self.assertEqual(self.client.get("/api/health").status_code, 200)
-            state["running"] = True
+    def test_health_uses_current_models_without_navigation_fields(self):
+        with mock.patch.object(server, "piper_error", return_value=None), mock.patch.object(server, "over_budget", return_value=False):
+            response = self.client.get("/api/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["ok"])
+        self.assertFalse(any(key.startswith("guide") for key in response.json))
+        with mock.patch.object(server, "piper_error", return_value="missing Piper model"):
             self.assertEqual(self.client.get("/api/health").status_code, 503)
 
     def test_main_control_tab_reports_unavailable(self):
@@ -21,20 +23,44 @@ class TestbenchCompatibilityTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/main-control/scene").status_code, 409)
         self.assertEqual(self.client.post("/api/main-control/control", json={"action": "start_guidance"}).status_code, 409)
 
-    def test_web_preview_preserves_guide_frame_callback(self):
+    def test_web_preview_starts_camera_without_navigation_callback(self):
         with mock.patch.object(server, "IMAGE_SOURCE", "standalone-device-test"), mock.patch.object(server.DEVICE_CAMERA, "start", return_value=True) as start:
             self.assertEqual(self.client.post("/api/device/camera", json={"action": "start"}).status_code, 200)
-            start.assert_called_once_with(server._on_device_frame)
+            start.assert_called_once_with()
 
-    def test_stop_guide_keeps_camera_for_device_voice_and_preview(self):
-        with mock.patch.object(server, "VOICE_SOURCE", "device"), mock.patch.object(server.GUIDE, "stop", return_value={"mode": "device"}), mock.patch.object(server.DEVICE_CAMERA, "stop") as stop:
-            self.assertEqual(self.client.post("/api/guide/stop", json={}).status_code, 200)
+    def test_removed_navigation_routes_are_not_available(self):
+        routes = (("post", "/api/guide"), ("post", "/api/guide/start"),
+                  ("post", "/api/guide/stop"), ("post", "/api/guide/frame"),
+                  ("get", "/api/guide/status"))
+        with mock.patch.object(server.DEVICE_CAMERA, "start") as start, mock.patch.object(server.DEVICE_CAMERA, "stop") as stop:
+            for method, route in routes:
+                with self.subTest(route=route):
+                    self.assertEqual(getattr(self.client, method)(route).status_code, 404)
+            start.assert_not_called()
             stop.assert_not_called()
 
     def test_status_exposes_model_and_machine_metrics(self):
         data = self.client.get("/api/status").json
         self.assertIn("mem_used_gb", data["system"])
         self.assertIn("system_percent", data["cpu"])
+        self.assertNotIn("guide", data)
+        self.assertNotIn("guide_model", data)
+        self.assertNotIn("guide_running", data["active"])
+        self.assertNotIn("guide_source", data["device"])
+
+    def test_ask_removed_navigation_never_falls_through_to_model(self):
+        image = "data:image/jpeg;base64," + base64.b64encode(b"x").decode()
+        for text in ("开始引导", "关闭引导", "引导状态", "现在能走吗", "前面能不能走楼梯"):
+            for picture in ("", image):
+                with self.subTest(text=text, has_image=bool(picture)), mock.patch.object(server, "run_eyes") as run_eyes:
+                    response = self.client.post("/api/ask", json={"text": text, "image": picture})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.json["intent"], "unsupported")
+                    self.assertEqual(response.json["source"], "rule")
+                    self.assertIn("不提供引导或通行判断", response.json["answer"])
+                    self.assertEqual(response.json["task"]["actions"], [])
+                    self.assertFalse(response.json["task"]["needs_image"])
+                    run_eyes.assert_not_called()
 
     def test_ask_visual_without_image_does_not_call_model(self):
         with mock.patch.object(server, "run_eyes") as run_eyes:

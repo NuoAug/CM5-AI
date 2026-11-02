@@ -11,11 +11,10 @@
 | 中文语音指令 | sherpa-onnx Paraformer small int8，整句离线识别 |
 | “小冰小冰 / 小冰”唤醒 | sherpa-onnx Zipformer 3.3M KWS + 规则意图 |
 | 语音播报 | 常驻 Piper huayan medium、语义分段、输出优先级与取消 |
-| 无盲道引导实验 | SegFormer-B0 ADE20K + 通道规则 + 状态机 |
 | 远程外设调试 | Picamera2 摄像头、ALSA 录放音、音量/静音、设备启停 |
 | 网页与监控 | Flask + 原生 HTML/JS，SSE、状态、延迟 trace |
 
-主控 interaction.v0.1 页面目前只提供未接入提示；场景/控制接口返回 409。深度传感器和 IMU 尚未接入。引导结果是单目图像实验，像素宽度未标定为真实距离，使用范围不包括过马路或上下楼梯。
+主控 interaction.v0.1 页面目前只提供未接入提示；场景/控制接口返回 409。引导模式已移除。
 
 文字回答支持增量分段；语音输入仍先完成整句 ASR，再执行任务，不能据此称为全双工实时对话。
 
@@ -75,7 +74,7 @@ CM5-AI/
   app/          服务、网页和回归测试
   deploy/       ARM64 系统部署模板
   tools/        基准、回放和远程隧道工具
-  testsets/     意图与引导案例
+  testsets/     意图回归案例
   samples/      测试示例图
   models/       本地模型，不入库
   runtime/      本地运行时，不入库
@@ -92,7 +91,6 @@ Git 仓库只分发代码、文档、示例和测试集。模型、运行时、�
 ```powershell
 CM5-AI/app/.venv/Scripts/python.exe -m unittest discover -s CM5-AI/app -p "test_*.py"
 node CM5-AI/app/test_remote_device_ui.cjs
-node CM5-AI/app/test_guide_ui.cjs
 ```
 
 当前回归与历史实机数据的来源及结果详见测试日志汇总。Windows、历史 Qwen3-VL 设备性能和当前 MiniCPM-V 配置分别记录。

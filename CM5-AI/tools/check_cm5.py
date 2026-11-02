@@ -54,8 +54,8 @@ def main() -> int:
         "config": {
             key: os.environ.get(key, "(默认)")
             for key in (
-                "MEM_BUDGET_GB", "VLM_THREADS", "VLM_CTX", "GUIDE_THREADS", "GUIDE_FPS",
-                "KWS_THREADS", "ASR_THREADS", "OCR_INTRA_THREADS", "VOICE_SOURCE", "GUIDE_SOURCE", "OUTPUT_SINK",
+                "MEM_BUDGET_GB", "VLM_THREADS", "VLM_CTX",
+                "KWS_THREADS", "ASR_THREADS", "OCR_INTRA_THREADS", "VOICE_SOURCE", "OUTPUT_SINK",
             )
         },
         "warnings": [],
@@ -85,7 +85,6 @@ def main() -> int:
     for name, rel in (
         ("vlm_model", "vlm/minicpm-v-4.7-1b/MiniCPM-V-4_7-1B-Q4_K_M.gguf"),
         ("vlm_mmproj", "vlm/minicpm-v-4.7-1b/mmproj-model-f16.gguf"),
-        ("guide", "guide/segformer-b0-ade/model.onnx"),
         ("asr", "asr/sherpa-onnx-paraformer-zh-small-2024-03-09/model.int8.onnx"),
         ("piper", "tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx"),
     ):
@@ -99,7 +98,7 @@ def main() -> int:
     if data["memory"]["total_gb"] < 3.8 and data["is_aarch64"]:
         data["warnings"].append("可用内存低于 4GB 标称，检查是否被其它服务占用")
     if data["memory"]["available_gb"] < 1.2:
-        data["warnings"].append("可用内存低于 1.2GB，引导启动前先释放内存")
+        data["warnings"].append("可用内存低于 1.2GB，加载模型前先释放内存")
 
     print(json.dumps(data, ensure_ascii=False, indent=2))
     return 0

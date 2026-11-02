@@ -17,7 +17,7 @@ import json,sys
 j=json.load(sys.stdin)
 ok=bool(j.get("ok"))
 over=bool(j.get("memory_over_budget"))
-print("FAIL" if (not ok or over) else "OK", "guide="+str(j.get("guide_state")), "reason="+str(j.get("guide_reason")), "over_budget="+str(over))
+print("FAIL" if (not ok or over) else "OK", "over_budget="+str(over))
 sys.exit(0 if (ok and not over) else 1)
 ' >>"$LOG" 2>&1; then
   status=1

@@ -40,7 +40,7 @@ powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 stop
 
 ## 通用新机部署模板
 
-deploy/ 保留系统级安装模板，使用 /opt/cm5-ai 和 cm5 系统用户。它适合另行规划的新安装，与现有 /home/mylin 用户部署分开。模板参数未在本轮修改。
+deploy/ 保留系统级安装模板，使用 /opt/cm5-ai 和 cm5 系统用户。它适合另行规划的新安装，与现有 /home/mylin 用户部署分开。引导相关模板参数已清理；其余模板参数和实际设备配置保持原样。
 
 - install_cm5.sh：aarch64 检查、依赖安装、虚拟环境、服务用户及 systemd 单元。
 - cm5-ai.env.example：模型路径、线程和设备示例；实际 ALSA 应使用 Array 卡名。
@@ -63,7 +63,7 @@ amixer -c Array sget PCM,0
 
 在设备已有 Python 环境中运行 app/precheck.py --allow-busy；当前工具 tools/check_cm5.py 可作只读环境检查。具体服务日志通过已有服务单元的 journalctl 查询。
 
-/api/status.version 应为 1.0.0。health 在引导未启动时不要求可选引导模型就绪；引导运行时会检查。状态正常不能替代模型精度、扬声器真实出声或长期稳定性验收。
+/api/status.version 应与 CM5-AI/VERSION 一致。引导模式已移除，健康检查不再依赖分割模型。状态正常不能替代模型精度、扬声器真实出声或长期稳定性验收。
 
 ## 数据与备份
 

@@ -27,15 +27,14 @@ class GoldenIntentTests(unittest.TestCase):
             task = intent.parse(
                 case["text"],
                 has_context=case.get("has_context", False),
-                guide_active=case.get("guide_active", False),
                 speech_active=case.get("speech_active", False),
             )
             expect = case["expect"]
             ok = task.intent == expect["intent"]
             for key, value in expect.get("slots", {}).items():
                 ok = ok and task.slots.get(key) == value
-            for action in expect.get("actions", []):
-                ok = ok and action in task.actions
+            if "actions" in expect:
+                ok = ok and task.actions == expect["actions"]
             if not ok:
                 failures.append(
                     f"{case['text']!r}: got {task.intent} {task.slots} {task.actions}, "
@@ -49,40 +48,68 @@ class GoldenIntentTests(unittest.TestCase):
 
 class ControlIntentTests(unittest.TestCase):
     def test_negated_stop_is_not_stop(self):
-        for text in ("不要停止引导", "别停", "别停播", "不用关闭引导"):
-            task = intent.parse(text, guide_active=True, speech_active=True)
+        for text in ("不要停止播报", "别停", "别停播", "不用关闭播报"):
+            task = intent.parse(text, speech_active=True)
             self.assertEqual(task.intent, "ack", text)
+            self.assertEqual(task.actions, [], text)
 
-    def test_stop_speech_does_not_stop_guide(self):
-        task = intent.parse("别念了", guide_active=True, speech_active=True)
+    def test_explicit_stop_only_cancels_speech(self):
+        task = intent.parse("别念了", speech_active=True)
         self.assertEqual(task.intent, "speech_stop")
         self.assertEqual(task.actions, ["cancel_speech"])
-        self.assertNotIn("stop_guide", task.actions)
 
-    def test_stop_guide_does_not_cancel_speech(self):
-        task = intent.parse("关闭引导", guide_active=True, speech_active=True)
-        self.assertEqual(task.intent, "guide_stop")
-        self.assertEqual(task.actions, ["stop_guide"])
-        self.assertNotIn("cancel_speech", task.actions)
+    def test_removed_navigation_commands_return_capability_message(self):
+        for text in ("开始引导", "关闭引导", "打开导航", "不用导航", "不要停止引导",
+                     "引导状态", "带我走", "导航到卫生间", "请导航"):
+            with self.subTest(text=text):
+                task = intent.parse(text, has_context=True, speech_active=True)
+                self.assertEqual(task.intent, "unsupported")
+                self.assertEqual(task.clarify, intent.UNSUPPORTED_NAVIGATION_REPLY)
+                self.assertFalse(task.needs_image)
+                self.assertEqual(task.slots, {})
+                self.assertEqual(task.actions, [])
 
-    def test_ambiguous_stop_with_guide_only(self):
-        task = intent.parse("停一下", guide_active=True, speech_active=False)
-        self.assertEqual(task.intent, "guide_stop")
-        self.assertIn("stop_guide", task.actions)
+    def test_passage_questions_do_not_become_visual_followups(self):
+        for text in ("现在能走吗", "前面能走吗", "前面通不通", "可以直行吗",
+                     "能不能走楼梯", "前面能不能走楼梯", "可以过马路吗", "这里可以通过吗"):
+            with self.subTest(text=text):
+                task = intent.parse(text, has_context=True)
+                self.assertEqual(task.intent, "unsupported")
+                self.assertFalse(task.needs_image)
+                self.assertEqual(task.actions, [])
 
-    def test_ambiguous_stop_with_speech_only(self):
-        task = intent.parse("停一下", guide_active=False, speech_active=True)
+    def test_non_navigation_questions_keep_regular_routing(self):
+        for text, expected in (("今天可以过生日吗", "chat"), ("能不能过生日", "unknown"),
+                               ("能不能通过考试", "unknown"), ("带我去聊聊音乐", "chat")):
+            with self.subTest(text=text):
+                task = intent.parse(text)
+                self.assertEqual(task.intent, expected)
+                self.assertEqual(task.actions, [])
+
+    def test_camera_off_only_closes_camera(self):
+        task = intent.parse("关闭摄像头", speech_active=True)
+        self.assertEqual(task.intent, "camera_off")
+        self.assertEqual(task.actions, ["close_camera"])
+
+    def test_topic_switch_has_no_device_actions(self):
+        task = intent.parse("只聊天", speech_active=True)
+        self.assertEqual(task.intent, "chat")
+        self.assertEqual(task.actions, [])
+
+    def test_ambiguous_stop_with_speech(self):
+        task = intent.parse("停一下", speech_active=True)
         self.assertEqual(task.intent, "speech_stop")
+        self.assertEqual(task.actions, ["cancel_speech"])
 
-    def test_ambiguous_stop_with_both(self):
-        task = intent.parse("停一下", guide_active=True, speech_active=True)
-        self.assertEqual(task.intent, "clarify")
-        self.assertIn("停止播报", task.clarify)
-
-    def test_ambiguous_stop_with_none(self):
+    def test_ambiguous_stop_without_speech(self):
         task = intent.parse("停一下")
         self.assertEqual(task.intent, "clarify")
-        self.assertIn("没有", task.clarify)
+        self.assertEqual(task.clarify, "现在没有正在进行的播报。")
+        self.assertEqual(task.actions, [])
+
+    def test_navigation_definition_remains_chat(self):
+        task = intent.parse("导航是什么意思")
+        self.assertEqual(task.intent, "chat")
 
 
 class TaskShapeTests(unittest.TestCase):
@@ -111,7 +138,7 @@ class TaskShapeTests(unittest.TestCase):
             self.assertTrue(task.needs_image, text)
 
     def test_confidence_is_rule_strength(self):
-        task = intent.parse("停止引导")
+        task = intent.parse("停止播报")
         self.assertGreaterEqual(task.confidence, 0.9)
         self.assertEqual(task.source, "rule")
 

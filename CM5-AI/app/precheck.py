@@ -84,17 +84,6 @@ def check_piper():
     record("piper 可执行", exe.exists(), str(exe.relative_to(ROOT)) if exe.exists() else "未找到")
 
 
-def check_guide():
-    model = Path(
-        os.environ.get("GUIDE_MODEL")
-        or (MODELS / "guide" / "segformer-b0-ade" / "model.onnx")
-    )
-    if model.exists():
-        print("PASS 引导模型  " + str(model.relative_to(ROOT)))
-    else:
-        print("WARN 引导模型未下载，无盲道引导不可用（不影响其它功能）")
-
-
 def check_ports():
     if os.environ.get("PRECHECK_ALLOW_BUSY", "0").lower() in ("1", "true", "yes") or "--allow-busy" in sys.argv:
         print("SKIP 端口检查（systemd 启动时模型服务可能已占用 8091）")
@@ -137,8 +126,7 @@ def check_devices():
 
 def check_env():
     keys = (
-        "VLM_THREADS", "VLM_CTX", "GUIDE_THREADS", "GUIDE_INPUT_W", "GUIDE_INPUT_H",
-        "GUIDE_FPS", "GUIDE_FRAME_MAX_AGE", "GUIDE_WATCHDOG_SECONDS",
+        "VLM_THREADS", "VLM_CTX",
         "KWS_THREADS", "KWS_SCORE", "KWS_THRESHOLD", "KWS_MODEL_DIR",
         "ASR_THREADS", "OCR_INTRA_THREADS", "MEM_BUDGET_GB", "VOICE_SOURCE", "OUTPUT_SINK",
     )
@@ -154,7 +142,6 @@ def main():
     check_models()
     check_llama()
     check_piper()
-    check_guide()
     check_devices()
     check_env()
     check_ports()

@@ -56,7 +56,7 @@ def alsa_card_present(device: str, tool: str) -> bool:
 
 
 class DeviceCamera:
-    """Picamera2 CSI 采集：低分辨率连续帧给引导，高清帧按需给 OCR/VLM。"""
+    """Picamera2 CSI 采集：低分辨率连续帧用于预览，高清帧按需给 OCR/VLM。"""
 
     def __init__(self, high_size=(1280, 720), low_size=(512, 384), fps=5.0):
         self.high_size = high_size
@@ -86,7 +86,7 @@ class DeviceCamera:
             "error": self._error,
         }
 
-    def start(self, callback: Callable) -> bool:
+    def start(self, callback: Optional[Callable] = None) -> bool:
         if not self.available():
             self._error = "picamera2 未安装"
             return False
