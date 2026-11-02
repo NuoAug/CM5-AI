@@ -82,6 +82,7 @@ class OutputBus:
             "subscribers": 0,
             "sink": "none",
             "sink_played": 0,
+            "stale_generation": 0,
             "last_event": None,
         }
         self._sink = None
@@ -94,6 +95,14 @@ class OutputBus:
 
     def new_utterance_id(self, prefix: str = "u") -> str:
         return f"{prefix}-{uuid.uuid4().hex[:12]}"
+
+    def current_epoch(self) -> int:
+        with self._lock:
+            return self._epoch
+
+    def is_current(self, epoch: int) -> bool:
+        with self._lock:
+            return int(epoch) == self._epoch
 
     def history_since(self, last_id: Optional[int]) -> list[dict]:
         with self._lock:
@@ -219,6 +228,7 @@ class OutputBus:
         preempt: Optional[bool] = None,
         deadline_s: Optional[float] = None,
         meta: Optional[dict] = None,
+        generation_epoch: Optional[int] = None,
     ) -> Optional[dict]:
         text = (text or "").strip()
         if not text:
@@ -231,6 +241,9 @@ class OutputBus:
         key = dedupe_key or f"{uid}|{sid}|{int(sequence)}|{text}"
         window = 3.0 if priority <= PRIORITY_GUIDE else 2.0
         with self._lock:
+            if generation_epoch is not None and int(generation_epoch) != self._epoch:
+                self._stats["stale_generation"] += 1
+                return None
             last = self._last.get(key)
             if last is not None and now - last < window:
                 self._stats["deduped"] += 1

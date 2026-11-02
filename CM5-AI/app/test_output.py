@@ -111,6 +111,23 @@ class SegmentOutputTests(unittest.TestCase):
         event = self.bus.push_segment("测试。", utterance_id="u", segment_id="s1", sequence=1)
         self.assertEqual(event["playback"], "browser")
 
+    def test_stale_generation_dropped_after_cancel(self):
+        epoch = self.bus.current_epoch()
+        self.assertIsNotNone(self.bus.push_segment(
+            "旧回答第一段。", utterance_id="u1", segment_id="u1-1", sequence=1,
+            generation_epoch=epoch,
+        ))
+        self.bus.cancel(min_priority=PRIORITY_ANSWER, source="voice")
+        self.assertIsNone(self.bus.push_segment(
+            "取消后晚到的旧片段。", utterance_id="u1", segment_id="u1-2", sequence=2,
+            generation_epoch=epoch,
+        ))
+        self.assertEqual(self.bus.stats()["stale_generation"], 1)
+        self.assertIsNotNone(self.bus.push_segment(
+            "新回答。", utterance_id="u2", segment_id="u2-1", sequence=1,
+            generation_epoch=self.bus.current_epoch(),
+        ))
+
     def test_queued_status_hook_reports_browser_queued_only(self):
         seen = []
         self.bus.set_status_hook(lambda payload, state, basis, reason: seen.append((state, basis)))

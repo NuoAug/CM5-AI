@@ -2,14 +2,14 @@
 
 目标：Raspberry Pi Compute Module 5，四核 Cortex-A76，4 GB 内存，32 GB eMMC，纯 CPU 推理。实机为 Debian 13（trixie）+ Python 3.13.5。
 
-本版对应 `v1.4.1`（M0 清理 + interaction.v0.1 适配 + ALSA 掉线检查）。历史实测报告见 [CM5 实机测试报告](CM5-实机测试报告-2026-11-02.md)，其中引导与 Qwen 数据只作历史证据，不再代表当前默认路径。
+本版对应 `v1.5.0`（M0 清理 + interaction.v0.1 适配 + ALSA 掉线检查 + 流式 Paraformer）。历史实测报告见 [CM5 实机测试报告](CM5-实机测试报告-2026-11-02.md)，其中引导与 Qwen 数据只作历史证据，不再代表当前默认路径。
 
 ## 1. 目录与权限
 
 ```text
 /home/mylin/cm5-ai/
-├─ releases/v1.4.1-cm5/     发布：app、venv、deploy、tools、testsets、samples、manifest
-├─ current -> releases/v1.4.1-cm5
+├─ releases/v1.5.0-cm5/     发布：app、venv、deploy、tools、testsets、samples、manifest
+├─ current -> releases/v1.5.0-cm5
 ├─ models/                  共享模型（只放本机发布清单中的制品）
 ├─ runtime/
 │  ├─ llama.cpp -> llama.cpp-8ca4060/build
@@ -38,7 +38,8 @@ cd D:\Desktop\AI-Deployment\CM5-AI
 |---|---|---|
 | VLM 基线 | `models/vlm/minicpm-v-4.7-1b/` | MiniCPM-V 4.7 1B Q4_K_M + mmproj f16；CM5 视觉编码约 118 s/帧，不能实时 |
 | OCR | `models/ocr/pp-ocrv6-small/` | det/rec/cls 三个 ONNX |
-| ASR | `models/asr/sherpa-onnx-paraformer-zh-small-2024-03-09/` | int8，按需加载 |
+| 流式 ASR | `models/asr-streaming/sherpa-onnx-streaming-paraformer-bilingual-zh-en/` | int8 encoder/decoder + tokens，约 226 MB |
+| 离线 ASR（回退） | `models/asr/sherpa-onnx-paraformer-zh-small-2024-03-09/` | int8，按需加载 |
 | TTS | `models/tts/piper-zh_CN-huayan-medium/` | 常驻 Piper；音色许可 Unknown |
 | KWS | `models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01/` | 唤醒词 |
 
@@ -69,7 +70,7 @@ Piper 使用 Pi 端 aarch64 可执行文件；不能复制 Windows 的 `piper.ex
 
 ```bash
 cd ~/cm5-ai/staging
-GIT_COMMIT=<commit> GIT_DIRTY=<entries> RELEASE_ID=v1.4.1-cm5 bash deploy/install_cm5_user.sh
+GIT_COMMIT=<commit> GIT_DIRTY=<entries> RELEASE_ID=v1.5.0-cm5 bash deploy/install_cm5_user.sh
 ```
 
 脚本只做：复制代码到 `releases/<id>`、建共享目录链接、创建 venv、生成 env（已存在则保留）、写 user systemd 单元、`current` 指向新发布、只读预检。不下载模型、不升级系统包、不启动服务。
@@ -99,6 +100,10 @@ MAIN_CONTROL_ALLOW_FIXTURE=0
 
 ASR_THREADS=1
 ASR_IDLE_SECONDS=180
+ASR_STREAM=1
+ASR_STREAM_MODEL_DIR=/home/mylin/cm5-ai/models/asr-streaming/sherpa-onnx-streaming-paraformer-bilingual-zh-en
+ASR_STREAM_THREADS=1
+ASR_STREAM_INT8=1
 OCR_INTRA_THREADS=2
 OCR_INTER_THREADS=1
 KWS_THREADS=1

@@ -51,10 +51,10 @@ class VoiceActionTests(unittest.TestCase):
         self.client = server.app.test_client()
         server.SESSIONS.clear()
 
-    def send(self, text, **extra):
+    def send(self, utterance, **extra):
         body = {"audio": voice_audio(), "session_id": "action-test"}
         body.update(extra)
-        spoken = text if server.WAKE_PATTERN.search(text) else f"小冰小冰，{text}"
+        spoken = utterance if server.WAKE_PATTERN.search(utterance) else f"小冰小冰，{utterance}"
         with mock.patch.object(server, "asr_transcribe", lambda samples: spoken):
             return self.client.post("/api/voice", json=body).get_json()
 
@@ -139,6 +139,35 @@ class VoiceActionTests(unittest.TestCase):
             result = self.send("现在能走吗")
         self.assertIn("暂时测不准", result["answer"])
         self.assertNotIn("0 米", result["answer"])
+
+    def test_partial_transcript_never_triggers_control(self):
+        with mock.patch.object(server.MAIN_CONTROL, "control") as control:
+            result = self.send("开始引导", text="开始引导", final_text=False, audio="")
+        self.assertEqual(result["intent"], "partial")
+        self.assertFalse(result["final"])
+        control.assert_not_called()
+
+    def test_final_stream_text_triggers_control(self):
+        with mock.patch.object(server.MAIN_CONTROL, "control",
+                               return_value=control_result("walking")) as control:
+            result = self.send("开始引导", text="小冰小冰开始引导", final_text=True,
+                               duration_s=1.2, audio="")
+        self.assertEqual(result["intent"], "guide_start")
+        control.assert_called_once()
+        self.assertEqual(control.call_args.args[0], "start_guidance")
+
+    def test_cancel_during_model_drops_old_answer(self):
+        def fake_run_eyes(*args, **kwargs):
+            server.OUTPUT.cancel(min_priority=server.PRIORITY_ANSWER, source="voice")
+            return {"task": "scene", "source": "vlm", "answer": "取消前的旧回答", "latency_ms": 1}
+
+        image = "data:image/jpeg;base64," + base64.b64encode(b"x").decode()
+        with mock.patch.object(server, "run_eyes", side_effect=fake_run_eyes) as run_eyes:
+            result = self.send("前面有什么", image=image, frame_id="f-cancel")
+        run_eyes.assert_called_once()
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result["spoken"])
+        self.assertEqual(result["answer"], "")
 
     def test_clarify_does_not_call_model(self):
         with mock.patch.object(server.MAIN_CONTROL, "guidance_active", return_value=True), \

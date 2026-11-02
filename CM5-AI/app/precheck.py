@@ -98,6 +98,28 @@ def check_piper():
     record("piper 可执行", exe.exists(), detail)
 
 
+def check_stream_asr():
+    root = Path(os.environ.get("ASR_STREAM_MODEL_DIR")
+                or (MODELS / "asr-streaming" / "sherpa-onnx-streaming-paraformer-bilingual-zh-en"))
+    need = [root / "tokens.txt", root / "encoder.int8.onnx", root / "decoder.int8.onnx"]
+    missing = []
+    for p in need:
+        if p.exists():
+            continue
+        try:
+            missing.append(str(p.relative_to(ROOT)))
+        except ValueError:
+            missing.append(str(p))
+    if missing:
+        print("WARN 流式 ASR 模型缺失，语音将回退整段 Paraformer：" + "，".join(missing))
+    else:
+        try:
+            detail = str(root.relative_to(ROOT))
+        except ValueError:
+            detail = str(root)
+        print("PASS 流式 ASR 模型  " + detail)
+
+
 def check_main_control():
     url = os.environ.get("MAIN_CONTROL_URL", "").strip()
     source = os.environ.get("IMAGE_SOURCE", "main_control").strip().lower()
@@ -168,6 +190,7 @@ def main():
     check_models()
     check_llama()
     check_piper()
+    check_stream_asr()
     check_main_control()
     check_devices()
     check_env()

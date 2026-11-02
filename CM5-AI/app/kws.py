@@ -261,15 +261,18 @@ class WakeGate:
 
         rms = float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
         command = None
+        chunks: list[np.ndarray] = []
         if now < self.armed_until:
             if rms >= self.threshold:
                 self.speaking = True
                 self.silence = 0.0
                 self.voiced += x.size
                 self.command.append(x)
+                chunks.append(x)
             elif self.speaking:
                 self.silence += x.size / self.sample_rate
                 self.command.append(x)
+                chunks.append(x)
                 if self.silence >= self.silence_seconds:
                     spoken = self.voiced / self.sample_rate
                     data = np.concatenate(self.command) if self.command else np.zeros(0, dtype=np.float32)
@@ -286,6 +289,7 @@ class WakeGate:
             "wake": wake,
             "keyword": keyword,
             "command": command,
+            "chunks": chunks,
             "armed": now < self.armed_until,
             "rms": round(rms, 4),
         }

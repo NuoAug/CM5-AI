@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import base64
 import io
+import os
 import threading
 import time
 from typing import Optional
 
+import numpy as np
 import requests
 from PIL import Image
 
@@ -22,7 +24,9 @@ import kws
 from device_io import AlsaCapture, DeviceCamera, encode_wav
 from output import OUTPUT, PRIORITY_CONFIRM
 
-VOICE_URL = "http://127.0.0.1:8090/api/voice"
+BASE_URL = os.environ.get("DEVICE_API_BASE", "http://127.0.0.1:8090").rstrip("/")
+VOICE_URL = BASE_URL + "/api/voice"
+ASR_STREAM = os.environ.get("ASR_STREAM", "1").strip().lower() in ("1", "true", "yes")
 
 
 def jpeg_b64(img: Image.Image, max_side: int = 1600, quality: int = 88) -> str:
@@ -58,6 +62,9 @@ class DeviceVoice:
         self._last_error = None
         self._last_command_at = 0.0
         self._seq = 0
+        self._stream_id: Optional[str] = None
+        self._stream_text = ""
+        self._stream_chunks = 0
 
     def available(self) -> bool:
         return self.capture.available() and kws.status().get("ready", False)
@@ -72,6 +79,12 @@ class DeviceVoice:
             "kws": kws.status(),
             "error": self._last_error,
             "last_command_age_s": round(time.monotonic() - self._last_command_at, 1) if self._last_command_at else None,
+            "asr_stream": {
+                "enabled": ASR_STREAM,
+                "active": self._stream_id is not None,
+                "chunks": self._stream_chunks,
+                "partial_chars": len(self._stream_text),
+            },
         }
 
     def set_sink_present(self, present: bool) -> None:
@@ -107,19 +120,84 @@ class DeviceVoice:
                 time.sleep(0.2)
                 continue
             if event.get("wake"):
+                self._start_asr_stream()
                 OUTPUT.push(
                     "我在，请说", priority=PRIORITY_CONFIRM, source="device",
                     reason="wake", ttl=2.0, dedupe_key="device-wake",
                 )
+            for chunk in event.get("chunks") or []:
+                self._feed_asr_stream(chunk)
             command = event.get("command")
             if command is not None and len(command):
-                threading.Thread(target=self._handle_command, args=(command,), daemon=True).start()
+                final_text = self._end_asr_stream()
+                threading.Thread(
+                    target=self._handle_command,
+                    args=(command, final_text),
+                    daemon=True,
+                ).start()
 
-    def _handle_command(self, samples) -> None:
+    def _start_asr_stream(self) -> None:
+        self._stream_id = None
+        self._stream_text = ""
+        self._stream_chunks = 0
+        if not ASR_STREAM:
+            return
+        try:
+            r = requests.post(BASE_URL + "/api/asr/stream/start", timeout=8)
+            j = r.json() if r.content else {}
+            if not r.ok:
+                raise RuntimeError(j.get("error") or f"HTTP {r.status_code}")
+            self._stream_id = j.get("stream_id")
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"流式 ASR 启动失败，回退整段识别：{exc}"
+            self._stream_id = None
+
+    def _feed_asr_stream(self, samples) -> None:
+        if not self._stream_id or samples is None or len(samples) == 0:
+            return
+        pcm = (np.clip(np.asarray(samples, dtype=np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+        try:
+            r = requests.post(
+                BASE_URL + "/api/asr/stream/chunk",
+                json={"stream_id": self._stream_id,
+                      "pcm": base64.b64encode(pcm.tobytes()).decode("ascii")},
+                timeout=10,
+            )
+            j = r.json() if r.content else {}
+            if not r.ok:
+                raise RuntimeError(j.get("error") or f"HTTP {r.status_code}")
+            self._stream_text = str(j.get("text") or "")
+            self._stream_chunks += 1
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"流式 ASR 中断，回退整段识别：{exc}"
+            self._stream_id = None
+
+    def _end_asr_stream(self) -> str:
+        sid = self._stream_id
+        self._stream_id = None
+        if not sid:
+            return ""
+        try:
+            r = requests.post(BASE_URL + "/api/asr/stream/end",
+                              json={"stream_id": sid}, timeout=12)
+            j = r.json() if r.content else {}
+            if not r.ok:
+                raise RuntimeError(j.get("error") or f"HTTP {r.status_code}")
+            return str(j.get("text") or "")
+        except Exception as exc:  # noqa: BLE001
+            self._last_error = f"流式 ASR 收尾失败，回退整段识别：{exc}"
+            return ""
+
+    def _handle_command(self, samples, final_text: str = "") -> None:
         self.pause()
         self._last_command_at = time.monotonic()
-        body = {"audio": "data:audio/wav;base64," + base64.b64encode(encode_wav(samples)).decode("ascii"),
-                "session_id": self.session_id, "wake_detected": True}
+        if final_text:
+            body = {"text": final_text, "final_text": True,
+                    "duration_s": round(len(samples) / 16000, 2),
+                    "session_id": self.session_id, "wake_detected": True}
+        else:
+            body = {"audio": "data:audio/wav;base64," + base64.b64encode(encode_wav(samples)).decode("ascii"),
+                    "session_id": self.session_id, "wake_detected": True}
         if self.capture_images and self.camera is not None and self.camera.status().get("running"):
             still = self.camera.capture_still()
             if still is not None:
@@ -174,6 +252,7 @@ class DeviceVoice:
 
     def stop(self) -> None:
         self._running = False
+        self._stream_id = None
         if self._resume_timer is not None:
             self._resume_timer.cancel()
             self._resume_timer = None

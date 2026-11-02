@@ -2,7 +2,7 @@
 
 面向视障辅助场景的离线多模态服务，模型全部本地推理，不联网。Windows 本机用于开发与调优，CM5 实机用于部署与验收。
 
-当前代码版本：v1.4.1（M0：移除独立 SegFormer 引导与本地通行判断，新增 interaction.v0.1 主控适配器；补充 ALSA 设备存在检查，音频掉线时不再误报可采集）。本机模型与工具清单见 [模型与工具发布清单](docs/模型与工具发布清单.md)，M0 改动与验证见 [M0 职责清理与主控适配](docs/M0-职责清理与主控适配-2026-11-02.md)。早期阶段说明、CM5 实机报告与性能模板保留为历史证据，不再代表当前默认路径。
+当前代码版本：v1.5.0（M1：新增原生流式 Paraformer 与设备端分块喂入；取消后按 generation 丢弃旧片段；保留 M0 主控适配与 ALSA 掉线检查）。本机模型与工具清单见 [模型与工具发布清单](docs/模型与工具发布清单.md)，M0 改动与验证见 [M0 职责清理与主控适配](docs/M0-职责清理与主控适配-2026-11-02.md)，M1 流式语音与取消见 [M1 流式语音与取消](docs/M1-流式语音与取消-2026-11-02.md)。早期阶段说明、CM5 实机报告与性能模板保留为历史证据，不再代表当前默认路径。
 
 ## 目标硬件
 
@@ -97,7 +97,8 @@ AI-Deployment/
 | 场景 / VQA / 聊天（唯一 VLM 基线） | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091；CM5 视觉编码约 118 s/帧，不能实时 |
 | 中文 OCR | RapidOCR + PP-OCRv6_small | ONNX | det / rec / cls 三个模型 |
 | 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎；常驻 worker 一次加载，约 63 MB；音色许可未闭合 |
-| 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置释放；不是原生流式 |
+| 流式语音识别 | sherpa-onnx Streaming Paraformer 中英 | int8 | encoder 157.8 MB + decoder 68.3 MB + tokens；边收边解码，临时/最终区分 |
+| 离线语音识别（回退/对照） | Paraformer-zh-small | int8 | 按需加载，闲置释放；流式不可用时回退 |
 | 语音唤醒 | sherpa-onnx-kws-zipformer-wenetspeech-3.3M | ONNX | 中文拼音 KWS，Apache-2.0，关键词见 `app/config/keywords.txt` |
 
 行走判断、测距、空间检查和引导不再由本仓库提供。独立 SegFormer 引导、Qwen3-VL 设备残留与相关工具已从当前交付移除，历史代码由 `archive/pre-interaction-v11-20261102` 分支保留。SmolVLM-256M 仅作 M3 对照，不进入发布清单。
@@ -130,7 +131,8 @@ x iǎo b īng @小冰
   → 输出仲裁（紧急 priority 0，导航 priority 1）→ 唯一播放器
   → playback.status 回报 queued/started/completed/cancelled/failed
 
-语音交互：麦克风 → KWS「小冰小冰」→ VAD → ASR
+语音交互：麦克风 → KWS「小冰小冰」→ VAD 分块
+  → 流式 Paraformer 边收边出临时文本 → 端点后最终文本
   → 规则意图（控制动作 / 视觉任务 / 聊天 / 未知）
   → control.intent / scene.query / FrameProvider 取图
   → OCR 快路径 / VLM 慢路径 → 语义片段 → 事实守卫
@@ -219,8 +221,11 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 | `/api/health` | GET | 无；systemd 健康检查，不做模型加载 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question`、`frame_id`、`captured_at`、`request_id` |
 | `/api/talk` | POST | 同上；SSE 逐段返回 `segment`，最后 `done`；视觉任务流式输出 |
-| `/api/voice` | POST | `audio`（16kHz WAV base64）、`image`、`context`、`session_id`、`wake_detected`、`request_id`、`speech_end_ms`、`vad_end_ms`；免唤醒窗口由服务端维护 |
+| `/api/voice` | POST | `audio`（16kHz WAV base64）或 `text`+`final_text`、`image`、`context`、`session_id`、`wake_detected`、`request_id`、`speech_end_ms`、`vad_end_ms`；临时文本不触发控制 |
 | `/api/kws` | POST | `audio`（WAV base64）；返回 `keyword` / `hits` / `latency_ms` |
+| `/api/asr/stream/start` | POST | 创建流式识别会话，返回 `stream_id` |
+| `/api/asr/stream/chunk` | POST | `stream_id`、`pcm`（int16 base64）；返回临时 `text` |
+| `/api/asr/stream/end` | POST | `stream_id`；返回最终 `text` |
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`speed`、`trace_id` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
@@ -342,8 +347,12 @@ $env:MEM_BUDGET_GB = "3.2"
 |---|---|---|
 | `DATA_DIR` | `CM5-AI/data` | 覆盖数据目录，Windows 默认路径不变 |
 | `DEBUG_SNAPSHOT` | `0` | 设为 `1` 才写调试快照，文件名带时间戳与线程号，避免并发串图 |
-| `ASR_THREADS` | 4 | sherpa 语音识别线程数 |
-| `ASR_IDLE_SECONDS` | 180 | ASR 空闲释放秒数；调大可减少反复加载，占用更多内存 |
+| `ASR_THREADS` | 4 | 离线回退 ASR 线程数 |
+| `ASR_IDLE_SECONDS` | 180 | 离线 ASR 空闲释放秒数 |
+| `ASR_STREAM` | 1 | 1=设备端使用流式 ASR；0=整段离线识别 |
+| `ASR_STREAM_MODEL_DIR` | `models/asr-streaming/...` | 流式 Paraformer int8 三件套目录 |
+| `ASR_STREAM_THREADS` | 1 | 流式 ASR ORT 线程数 |
+| `ASR_STREAM_INT8` | 1 | 优先使用 int8 encoder/decoder |
 | `MIN_VOICE_SECONDS` | 0.6 | 服务端最短有效语音时长，低于此值不送 ASR |
 | `MIN_VOICE_RMS` | 0.008 | 服务端最低平均音量，低于此值判无效语音 |
 | `ARMED_SECONDS` | 15 | 唤醒后免唤醒窗口秒数 |
@@ -465,3 +474,4 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.3.1 | CM5 实机部署与修复：Qwen3-VL-2B 替代 MiniCPM（MiniCPM 视觉编码 118 s/帧）、256 px、VLM 3 线程绑 0–2 核、取消播报立即断流、追问统一 256、复读/截断/障碍矛盾守卫、ASR 同音别名、关闭引导不关摄像头、引导模型关闭卸载、PSS 统计；新增用户级部署、实机验收、并发/稳定性/回放工具与 CM5 实测报告（历史） |
 | v1.4.0 | M0：移除独立 SegFormer 引导、二维连通通道与本地导航决策及专属路由/UI/配置/工具；新增 interaction.v0.1 MainControlAdapter、主控替身、握手/取图/场景/控制/事件/取消/播放反馈；行走语音改为控制意图，取图改 FrameProvider；新增合同回归测试与唯一发布清单 |
 | v1.4.1 | CM5 部署与音频掉线修复：ALSA 采集/播放前检查卡片是否真实存在，arecord 早退时不再保持 `capture=true`；记录 XVF3800 未枚举时的明确不可用状态 |
+| v1.5.0 | M1：新增原生流式 Paraformer（中英 int8）与 `/api/asr/stream/*`；设备端唤醒后分块喂入，临时文本不触发控制；取消按 generation 丢弃旧片段并阻断晚到回答写入会话 |
