@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.1</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.2</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -44,7 +44,15 @@
   .pill.metric { gap: 9px; }
   .metric-name { color: var(--muted); }
   .metric-item { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
-  .metric-item b { color: var(--cyan); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .metric-item b {
+    display: inline-block; color: var(--cyan); font-weight: 600;
+    text-align: right; white-space: nowrap;
+    font-family: "Consolas", "SFMono-Regular", "Courier New", monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  #mem-model { width: 8ch; }
+  #mem-device { width: 17ch; }
+  #cpu-model, #cpu-device { width: 6ch; }
   .metric-sep { width: 1px; height: 12px; background: var(--line); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
   .dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); }
