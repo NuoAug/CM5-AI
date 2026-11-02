@@ -132,6 +132,7 @@
         await loadImageFromBlob(blob, () => generation === epoch);
         if (generation !== epoch) return false;
         currentFrame = { id: response.headers.get('X-Frame-Id') || '', at, source: 'device_camera' };
+        $('sample-image').value = '';
         setImageSource((label || '树莓派拍照（静态）') + ' · ' + at);
       }
       return true;

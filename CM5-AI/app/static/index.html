@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.15</title>
+<title>CM5 AI 功能测试台 v1.1.16</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -267,6 +267,7 @@
         <p class="hint">面向视障使用的单句播报，回答默认自动朗读。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
         <div class="cmd-row">
           <select id="eyes-command" aria-label="选择要发送给模型的指令">
+            <option value="" disabled selected hidden>选择指令…</option>
             <option value="scene">看前方</option>
             <option value="toilet">找卫生间</option>
             <option value="exit">找出口</option>
@@ -645,6 +646,7 @@ function canvasDataUrl(canvas, side, quality) {
 }
 
 function showCapturedFrame(canvas, full, small, label) {
+  $('sample-image').value = '';
   const max = 800;
   const scale = Math.min(1, max / Math.max(canvas.width, canvas.height));
   const preview = $('preview');
@@ -918,7 +920,11 @@ async function runEyes(task, btn) {
   finally { setBusy(btn, false, '发送指令'); }
 }
 
-$('btn-command').onclick = () => runEyes($('eyes-command').value, $('btn-command'));
+$('btn-command').onclick = () => {
+  const task = $('eyes-command').value;
+  if (!task) return toast('请先选择指令');
+  runEyes(task, $('btn-command'));
+};
 
 // 交互代次由 app-core.js 提供。
 
