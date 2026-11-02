@@ -30,12 +30,6 @@
     ui.status = status;
     ui.remote = !!status.remote_device_mode;
     if (!ui.remote) { notice.textContent = '开发模式：使用本机浏览器外设'; return; }
-    if (document.querySelector) {
-      const brand = document.querySelector('.brand p');
-      if (brand) brand.textContent = '树莓派远程设备测试 · 麦克风 / 摄像头 / 扬声器均在 CM5';
-      const footer = document.querySelector('footer');
-      if (footer) footer.textContent = '树莓派设备测试台 · ' + location.origin + ' · 独立设备测试不代表主控联调通过';
-    }
     const voice = status.voice || {};
     const camera = status.camera || {};
     notice.textContent = '摄像头：树莓派' + (camera.running ? '（采集中）' : '（未采集）') +

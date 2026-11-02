@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.1.7</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.8</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -33,7 +33,6 @@
     position: sticky; top: 0; z-index: 10;
   }
   .brand h1 { margin: 0; font-size: 20px; letter-spacing: .5px; }
-  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
   .status { display: flex; gap: 10px; flex-wrap: wrap; }
   .pill {
     display: flex; align-items: center; gap: 7px;
@@ -166,10 +165,8 @@
     padding: 9px 11px; font-family: inherit; font-size: 13px; width: 100%;
   }
   audio { width: 100%; margin-top: 12px; }
-  #video { width: 100%; border-radius: 10px; margin-top: 12px; display: none; }
   .loading { display: inline-block; width: 13px; height: 13px; border: 2px solid #ffffff33; border-top-color: var(--cyan); border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -2px; margin-right: 6px; }
   @keyframes spin { to { transform: rotate(360deg); } }
-  footer { color: #5f7192; font-size: 12px; text-align: center; padding: 0 20px 30px; }
   #toast {
     position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%) translateY(20px);
     background: #1f2b45; border: 1px solid #38507a; color: #fff; padding: 10px 16px; border-radius: 10px;
@@ -182,7 +179,6 @@
 <header>
   <div class="brand">
     <h1>CM5 边缘 AI 功能测试台</h1>
-    <p>MiniCPM-V 4.7 1B · PP-OCRv6 · Paraformer · Piper · 本机调试版</p>
   </div>
   <div class="status">
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
@@ -382,7 +378,6 @@
   </section>
 </main>
 
-<footer>CM5 边缘 AI 选型方案 · 本机测试入口 http://127.0.0.1:8090 · 模型与工具统一存放于 CM5-AI/models 与 CM5-AI/runtime</footer>
 <div id="toast"></div>
 <audio id="audio" hidden></audio>
 
