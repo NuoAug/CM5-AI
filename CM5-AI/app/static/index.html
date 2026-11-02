@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.13</title>
+<title>CM5 AI 功能测试台 v1.1.14</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -643,6 +643,21 @@ function canvasDataUrl(canvas, side, quality) {
   return c.toDataURL('image/jpeg', quality);
 }
 
+function showCapturedFrame(canvas, full, small, label) {
+  const max = 800;
+  const scale = Math.min(1, max / Math.max(canvas.width, canvas.height));
+  const preview = $('preview');
+  preview.width = Math.round(canvas.width * scale);
+  preview.height = Math.round(canvas.height * scale);
+  preview.getContext('2d').drawImage(canvas, 0, 0, preview.width, preview.height);
+  preview.style.display = 'block';
+  $('drop').style.display = 'none';
+  state.image = preview.toDataURL('image/jpeg', 0.85);
+  state.imageFull = full;
+  state.imageVlm = small;
+  setImageSource(label);
+}
+
 function waitNextVideoFrame(v) {
   return new Promise((resolve) => {
     if (!v.requestVideoFrameCallback) {
@@ -676,8 +691,13 @@ async function captureFrame() {
     canvas.getContext('2d').drawImage(img, 0, 0);
   }
   if (!canvas) return null;
+  const full = canvasDataUrl(canvas, 1600, 0.9);
+  const small = canvasDataUrl(canvas, 512, 0.85);
+  if (source === 'camera') {
+    showCapturedFrame(canvas, full, small, '自动抽帧（本机摄像头）');
+  }
   currentFrame = { id: newFrameId('f'), at: new Date().toISOString(), source };
-  return { full: canvasDataUrl(canvas, 1600, 0.9), small: canvasDataUrl(canvas, 512, 0.85) };
+  return { full, small };
 }
 
 async function runVlm(mode, prompt, outId, metaId, btn, targetKey) {

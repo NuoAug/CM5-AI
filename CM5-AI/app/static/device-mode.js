@@ -113,7 +113,7 @@
     }
   };
 
-  async function loadFrame(path, generation, preview) {
+  async function loadFrame(path, generation, preview, label = '') {
     const controller = new AbortController();
     if (preview) inflight = controller;
     const timeout = setTimeout(() => controller.abort(), 8000);
@@ -132,7 +132,7 @@
         await loadImageFromBlob(blob, () => generation === epoch);
         if (generation !== epoch) return false;
         currentFrame = { id: response.headers.get('X-Frame-Id') || '', at, source: 'device_camera' };
-        setImageSource('树莓派拍照（静态） · ' + at);
+        setImageSource((label || '树莓派拍照（静态）') + ' · ' + at);
       }
       return true;
     } finally {
@@ -190,7 +190,7 @@
     try {
       if (!await remote()) return browserCapture();
       if (ui.live) {
-        if (!await loadFrame('/api/camera/still', epoch, false)) return null;
+        if (!await loadFrame('/api/camera/still', epoch, false, '自动抽帧（树莓派摄像头）')) return null;
         return { full: state.imageFull, small: state.imageVlm };
       }
       if (ui.pinned) return { full: state.imageFull, small: state.imageVlm };
