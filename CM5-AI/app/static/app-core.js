@@ -3,6 +3,10 @@ const player = { gen: 0, queue: [], running: false, audio: null, resolver: null,
 let interactionGen = 0;
 let activeCtrl = null;
 
+function newFrameId(prefix = 'f') {
+  return prefix + '-' + Date.now().toString(36) + '-' + Math.random().toString(16).slice(2, 8);
+}
+
 function stopPlayer() {
   player.gen += 1;
   player.queue = [];

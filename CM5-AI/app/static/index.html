@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 边缘 AI 功能测试台 v1.0.0</title>
+<title>CM5 边缘 AI 功能测试台 v1.1.0</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -41,14 +41,18 @@
     background: var(--panel2); border: 1px solid var(--line); font-size: 12px; color: var(--muted);
   }
   .pill.over { border-color: var(--red); color: var(--red); }
+  .pill.metric { gap: 9px; }
+  .metric-name { color: var(--muted); }
+  .metric-item { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
+  .metric-item b { color: var(--cyan); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .metric-sep { width: 1px; height: 12px; background: var(--line); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #64748b; }
   .dot.on { background: var(--green); box-shadow: 0 0 10px var(--green); }
   .dot.off { background: var(--red); box-shadow: 0 0 10px var(--red); }
   main {
-    display: grid; grid-template-columns: 390px minmax(0, 1fr); gap: 20px;
+    display: flex; flex-direction: column; gap: 20px;
     padding: 22px 28px 40px; max-width: 1500px; margin: 0 auto;
   }
-  @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
   .card {
     background: linear-gradient(180deg, rgba(22,34,58,.94), rgba(15,24,42,.94));
     border: 1px solid var(--line); border-radius: var(--radius);
@@ -64,7 +68,15 @@
   }
   .drop:hover, .drop.drag { border-color: var(--cyan); color: var(--text); background: rgba(77,208,225,.07); }
   #preview { width: 100%; border-radius: 10px; margin-top: 12px; display: none; background: #08101d; }
+  .image-layout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; align-items: start; }
+  @media (max-width: 860px) { .image-layout { grid-template-columns: 1fr; } }
+  .image-view { min-width: 0; }
+  .image-actions { display: flex; flex-direction: column; gap: 9px; }
+  .image-actions button, .image-actions select { width: 100%; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .cmd-row { display: flex; gap: 8px; margin-top: 12px; }
+  .cmd-row select { flex: 1 1 auto; min-width: 0; }
+  .cmd-row button { flex: 0 0 auto; white-space: nowrap; }
   button {
     border: 1px solid var(--line); background: var(--panel2); color: var(--text);
     padding: 9px 13px; border-radius: 9px; cursor: pointer; font-size: 13px;
@@ -101,8 +113,6 @@
   .result.empty { color: #5f7192; }
   .eyes-btn { padding: 12px 18px; font-size: 14px; }
   #out-eyes { font-size: 18px; line-height: 1.8; }
-  label.auto { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; cursor: pointer; }
-  label.auto input { accent-color: var(--cyan); }
   .voice-state { color: var(--muted); font-size: 13px; align-self: center; }
   .voice-state.on { color: var(--cyan); }
   .meta { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin-top: 10px; }
@@ -140,8 +150,18 @@
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
     <div class="pill"><span class="dot" id="dot-ocr"></span>OCR</div>
     <div class="pill"><span class="dot" id="dot-tts"></span>TTS</div>
-    <div class="pill" id="mem-pill">模型内存 <span id="mem-text">--</span></div>
-    <div class="pill" title="仅统计 llama-server 与本服务进程，按整机逻辑核心归一化">模型 CPU <span id="cpu-text">--</span></div>
+    <div class="pill metric" id="mem-pill" title="左：模型侧进程内存；右：本机整机内存">
+      <span class="metric-name">内存占用</span>
+      <span class="metric-item">模型 <b id="mem-model">--</b></span>
+      <span class="metric-sep"></span>
+      <span class="metric-item">本机 <b id="mem-device">--</b></span>
+    </div>
+    <div class="pill metric" id="cpu-pill" title="左：模型侧进程占整机 CPU；右：本机整机 CPU 使用率">
+      <span class="metric-name">CPU占用</span>
+      <span class="metric-item">模型 <b id="cpu-model">--</b></span>
+      <span class="metric-sep"></span>
+      <span class="metric-item">本机 <b id="cpu-device">--</b></span>
+    </div>
   </div>
 </header>
 
@@ -149,38 +169,40 @@
   <section class="left">
     <div class="card">
       <h2>选择图片</h2>
-      <div class="drop" id="drop">
-        点击选择图片，或把图片拖到这里<br />
-        <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
-      </div>
-      <input type="file" id="file" accept="image/*" hidden />
-      <canvas id="preview"></canvas>
-      <video id="video" autoplay playsinline></video>
-      <div class="hint" id="image-source">未选择图片</div>
-      <div class="row">
-        <button class="primary" id="btn-file">上传图片</button>
-        <select id="sample-image" style="flex:1;min-width:180px;width:auto">
-          <option value="" disabled selected hidden>选择示例图…</option>
-          <option value="cats.jpg">示例：猫</option>
-          <option value="ocr-test.png">示例：中文标牌</option>
-          <option value="scene-stairs.jpg">场景：楼梯</option>
-          <option value="scene-corridor.jpg">场景：走廊</option>
-          <option value="scene-crosswalk.jpg">场景：斑马线</option>
-          <option value="scene-desk.jpg">场景：桌面物品</option>
-          <option value="scene-elevator.jpg">场景：电梯</option>
-          <option value="scene-shelf.jpg">场景：超市货架</option>
-          <option value="scene-tactile-straight.jpg">盲道：直行</option>
-          <option value="scene-tactile-dots.jpg">盲道：圆点转向</option>
-          <option value="scene-tactile-crossing.jpg">盲道：过街</option>
-          <option value="scene-tactile-obstacle.jpg">盲道：被占用</option>
-          <option value="scene-tactile-station.jpg">盲道：站内</option>
-          <option value="scene-tactile-broken.jpg">盲道：破损</option>
-        </select>
-        <button id="btn-clear">清除图片</button>
-      </div>
-      <div class="row">
-        <button id="btn-cam">打开摄像头</button>
-        <button id="btn-shot" disabled>拍照</button>
+      <div class="image-layout">
+        <div class="image-view">
+          <div class="drop" id="drop">
+            点击选择图片，或把图片拖到这里<br />
+            <span style="font-size:11px">支持 JPG / PNG；会自动缩放到 800px 以内</span>
+          </div>
+          <input type="file" id="file" accept="image/*" hidden />
+          <canvas id="preview"></canvas>
+          <video id="video" autoplay playsinline></video>
+          <div class="hint" id="image-source">未选择图片</div>
+        </div>
+        <div class="image-actions">
+          <button class="primary" id="btn-file">上传图片</button>
+          <select id="sample-image">
+            <option value="" disabled selected hidden>选择示例图…</option>
+            <option value="cats.jpg">示例：猫</option>
+            <option value="ocr-test.png">示例：中文标牌</option>
+            <option value="scene-stairs.jpg">场景：楼梯</option>
+            <option value="scene-corridor.jpg">场景：走廊</option>
+            <option value="scene-crosswalk.jpg">场景：斑马线</option>
+            <option value="scene-desk.jpg">场景：桌面物品</option>
+            <option value="scene-elevator.jpg">场景：电梯</option>
+            <option value="scene-shelf.jpg">场景：超市货架</option>
+            <option value="scene-tactile-straight.jpg">盲道：直行</option>
+            <option value="scene-tactile-dots.jpg">盲道：圆点转向</option>
+            <option value="scene-tactile-crossing.jpg">盲道：过街</option>
+            <option value="scene-tactile-obstacle.jpg">盲道：被占用</option>
+            <option value="scene-tactile-station.jpg">盲道：站内</option>
+            <option value="scene-tactile-broken.jpg">盲道：破损</option>
+          </select>
+          <button id="btn-clear">清除图片</button>
+          <button id="btn-cam">打开摄像头</button>
+          <button id="btn-shot" disabled>拍照</button>
+        </div>
       </div>
     </div>
   </section>
@@ -195,15 +217,17 @@
     <div class="card">
       <div class="panel active" id="panel-eyes">
         <h2>语音交互</h2>
-        <p class="hint">面向视障使用的单句播报。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
-        <div class="row">
-          <button class="primary eyes-btn" id="btn-eyes-scene">看前方</button>
-          <button class="eyes-btn" id="btn-eyes-toilet">找卫生间</button>
-          <button class="eyes-btn" id="btn-eyes-exit">找出口</button>
-          <button class="eyes-btn" id="btn-eyes-text">读文字</button>
-          <button class="eyes-btn" id="btn-eyes-date">读日期</button>
-          <button class="eyes-btn" id="btn-eyes-detail">详细描述</button>
-          <label class="auto"><input type="checkbox" id="eyes-auto-tts" checked /> 自动朗读</label>
+        <p class="hint">面向视障使用的单句播报，回答默认自动朗读。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
+        <div class="cmd-row">
+          <select id="eyes-command" aria-label="选择要发送给模型的指令">
+            <option value="scene">看前方</option>
+            <option value="toilet">找卫生间</option>
+            <option value="exit">找出口</option>
+            <option value="text">读文字</option>
+            <option value="date">读日期</option>
+            <option value="detail">详细描述</option>
+          </select>
+          <button class="primary" id="btn-command">发送指令给模型</button>
         </div>
         <div class="row">
           <input type="text" id="eyes-item" placeholder="要找的东西，例如 水杯 / 门 / 楼梯" style="flex:1;min-width:200px" />
@@ -215,7 +239,6 @@
           <input type="text" id="eyes-input" placeholder="聊天或追问，例如 今天有点烦 / 左边那个是台阶吗" style="flex:1;min-width:220px" />
           <button class="primary" id="btn-send">发送</button>
           <button id="btn-stop">停止播报</button>
-          <label class="auto"><input type="checkbox" id="eyes-use-image" checked /> 结合画面</label>
         </div>
         <div class="row">
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
@@ -346,10 +369,16 @@ async function refreshStatus() {
     $('dot-vlm').className = 'dot ' + (s.vlm.up ? 'on' : 'off');
     $('dot-ocr').className = 'dot ' + (s.ocr.ready ? 'on' : 'off');
     $('dot-tts').className = 'dot ' + (s.tts.ready ? 'on' : 'off');
-    $('mem-text').textContent = `${s.memory.sum_gb} / ${s.memory.budget_gb} GB`;
-    $('mem-pill').classList.toggle('over', s.memory.over_budget);
-    const cpu = s.cpu ? s.cpu.model_percent : null;
-    $('cpu-text').textContent = typeof cpu === 'number' ? cpu.toFixed(1) + '%' : '--';
+    const mem = s.memory || {};
+    const sys = s.system || {};
+    $('mem-model').textContent = typeof mem.sum_gb === 'number' ? mem.sum_gb.toFixed(2) + ' GB' : '--';
+    $('mem-device').textContent = typeof sys.mem_used_gb === 'number'
+      ? sys.mem_used_gb.toFixed(2) + ' / ' + sys.mem_total_gb.toFixed(2) + ' GB'
+      : '--';
+    $('mem-pill').classList.toggle('over', !!mem.over_budget);
+    const cpu = s.cpu || {};
+    $('cpu-model').textContent = typeof cpu.model_percent === 'number' ? cpu.model_percent.toFixed(1) + '%' : '--';
+    $('cpu-device').textContent = typeof cpu.system_percent === 'number' ? cpu.system_percent.toFixed(1) + '%' : '--';
   } catch (e) { /* ignore */ }
 }
 setInterval(refreshStatus, 5000); refreshStatus();
@@ -736,9 +765,6 @@ function handleOutputEvent(ev) {
     streamPlayer.enqueue(job);
     return;
   }
-  // 主控紧急提示始终播放；普通回答按用户设置。
-  if (j.priority >= 3 && !$('eyes-auto-tts').checked) return;
-
   const sameUtterance = streamPlayer.activeUtterance && j.utterance_id === streamPlayer.activeUtterance;
   if (sameUtterance) {
     streamPlayer.enqueue(job);
@@ -766,31 +792,33 @@ function connectOutput() {
 
 connectOutput();
 
-async function runEyes(task, btn, question = '') {
+async function runEyes(task, btn) {
   const it = beginInteraction();
   const requestStart = Date.now();
   const requestId = newFrameId('req');
-  const frame = await captureFrame();
-  if (!frame && task !== 'followup') return toast('请先拍照或打开相机');
   const body = { task, session_id: sessionId, request_id: requestId, request_start_ms: requestStart };
   if (task === 'item') {
     const item = $('eyes-item').value.trim();
     if (!item) return toast('请输入要找的东西');
     body.item = item;
   }
-  if (task === 'followup') {
-    const q = question || $('eyes-input').value.trim();
-    if (!q) return toast('请输入内容');
-    body.question = q;
-    body.context = state.lastEyes || '';
+  let frame = null;
+  try {
+    frame = await captureFrame();
+  } catch (e) {
+    toast('取画面失败：' + e.message);
   }
-  if (frame) {
-    body.image = frame.full;
-    body.image_vlm = frame.small;
-    body.frame_id = currentFrame.id;
-    body.captured_at = currentFrame.at;
-    body.image_source = currentFrame.source;
+  if (!frame) {
+    $('out-eyes').classList.remove('empty');
+    $('out-eyes').textContent = '当前没有画面，请先上传图片、拍照或打开摄像头';
+    toast('请先拍照或打开相机');
+    return;
   }
+  body.image = frame.full;
+  body.image_vlm = frame.small;
+  body.frame_id = currentFrame.id;
+  body.captured_at = currentFrame.at;
+  body.image_source = currentFrame.source;
   setBusy(btn, true, '识别中…');
   $('out-eyes').classList.add('empty'); $('out-eyes').textContent = '识别中，本机约需数秒…';
   try {
@@ -798,77 +826,50 @@ async function runEyes(task, btn, question = '') {
     if (it.gen !== interactionGen) return;
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
-    $('meta-eyes').innerHTML = `任务 <b>${j.task}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
-    if (task !== 'followup') state.lastEyes = j.answer || '';
-    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(j.answer);
+    $('meta-eyes').innerHTML = `任务 <b>${escapeHtml(j.task)}</b> · 来源 <b>${j.source === 'ocr' ? 'OCR' : 'VLM'}</b> · 延迟 <b>${(j.latency_ms/1000).toFixed(2)} s</b>`;
+    state.lastEyes = j.answer || '';
+    if (!outputReady) speakAnswer(j.answer);
   } catch (e) { if (e.name !== 'AbortError' && it.gen === interactionGen) $('out-eyes').textContent = '失败：' + e.message; }
-  finally { setBusy(btn, false, '重试'); }
+  finally { setBusy(btn, false, '发送指令给模型'); }
 }
 
-$('btn-eyes-scene').onclick = () => runEyes('scene', $('btn-eyes-scene'));
-$('btn-eyes-toilet').onclick = () => runEyes('toilet', $('btn-eyes-toilet'));
-$('btn-eyes-exit').onclick = () => runEyes('exit', $('btn-eyes-exit'));
-$('btn-eyes-text').onclick = () => runEyes('text', $('btn-eyes-text'));
-$('btn-eyes-date').onclick = () => runEyes('date', $('btn-eyes-date'));
-$('btn-eyes-detail').onclick = () => runEyes('detail', $('btn-eyes-detail'));
+$('btn-command').onclick = () => runEyes($('eyes-command').value, $('btn-command'));
 $('btn-eyes-item').onclick = () => runEyes('item', $('btn-eyes-item'));
 $('eyes-item').onkeydown = (e) => { if (e.key === 'Enter') $('btn-eyes-item').click(); };
 
 // 交互代次由 app-core.js 提供。
 
-// ---------- 合并输入：勾选「结合画面」走追问，否则走聊天 ----------
-async function sendChat(q, btn) {
+// ---------- 文字输入：服务端按意图决定是否结合画面 ----------
+async function sendAsk(q, btn) {
   const it = beginInteraction();
   const requestStart = Date.now();
   const requestId = newFrameId('req');
+  let frame = null;
+  try {
+    frame = await captureFrame();
+  } catch (e) {
+    frame = null;
+  }
+  const body = { text: q, session_id: sessionId, request_id: requestId, request_start_ms: requestStart };
+  if (frame) {
+    body.image = frame.full;
+    body.image_vlm = frame.small;
+    body.frame_id = currentFrame.id;
+    body.captured_at = currentFrame.at;
+    body.image_source = currentFrame.source;
+  }
   const out = $('out-eyes');
   out.classList.remove('empty');
   out.textContent = '思考中…';
   if (btn) setBusy(btn, true, '回答中…');
   try {
-    const resp = await fetch('/api/talk', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task: 'chat', question: q, frame_id: currentFrame.id, session_id: sessionId, request_id: requestId, request_start_ms: requestStart }),
-      signal: it.signal
-    });
-    if (!resp.ok) {
-      const j = await resp.json().catch(() => ({}));
-      throw new Error(j.error || ('HTTP ' + resp.status));
-    }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let text = '';
-    let answerText = '';
-    out.textContent = '';
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (it.gen !== interactionGen) { try { reader.cancel(); } catch (e) { /* ignore */ } return; }
-      buffer += decoder.decode(value, { stream: true });
-      const chunks = buffer.split('\n\n');
-      buffer = chunks.pop();
-      for (const chunk of chunks) {
-        if (!chunk.startsWith('data:')) continue;
-        let payload = null;
-        try { payload = JSON.parse(chunk.slice(5).trim()); } catch (e) { continue; }
-        if (it.gen !== interactionGen) return;
-        if (payload.error) throw new Error(payload.error);
-        const piece = payload.segment && payload.segment.text ? payload.segment.text : payload.sentence;
-        if (piece) {
-          text += piece;
-          out.textContent = text;
-        }
-        if (payload.done && payload.answer) {
-          answerText = payload.answer;
-          out.textContent = payload.answer;
-        }
-      }
-    }
-    // SSE 正常时由 streamPlayer 逐段播报；仅在 SSE 不可用时才整段兜底。
-    if (!outputReady && $('eyes-auto-tts').checked) speakAnswer(answerText || text);
-    $('meta-eyes').innerHTML = '任务 <b>聊天</b> · 流式回答';
+    const j = await postJSON('/api/ask', body, it.signal);
+    if (it.gen !== interactionGen) return;
+    out.textContent = j.answer || '（空回答）';
+    const src = j.source === 'ocr' ? 'OCR' : j.source === 'rule' ? '规则' : 'VLM';
+    $('meta-eyes').innerHTML = `任务 <b>${escapeHtml(j.intent || 'chat')}</b> · 来源 <b>${src}</b> · 延迟 <b>${(Number(j.latency_ms || 0)/1000).toFixed(2)} s</b>`;
+    state.lastEyes = j.answer || '';
+    if (!outputReady) speakAnswer(j.answer);
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) out.textContent = '失败：' + e.message;
   } finally {
@@ -879,9 +880,7 @@ async function sendChat(q, btn) {
 async function sendMerged() {
   const q = $('eyes-input').value.trim();
   if (!q) return toast('请输入内容');
-  const withImage = $('eyes-use-image').checked && (!!currentFrame.id || !!state.image);
-  if (withImage) await runEyes('followup', $('btn-send'), q);
-  else await sendChat(q, $('btn-send'));
+  await sendAsk(q, $('btn-send'));
 }
 
 $('btn-send').onclick = sendMerged;
@@ -1087,7 +1086,7 @@ async function sendUtterance(chunks) {
     $('meta-eyes').innerHTML = `语音 <b>${escapeHtml(j.text)}</b> · 意图 <b>${j.intent}</b>${j.item ? ' · 物品 <b>' + escapeHtml(j.item) + '</b>' : ''} · 延迟 <b>${(j.latency_ms / 1000).toFixed(2)} s</b>`;
     if (j.intent !== 'followup' && j.intent !== 'wake') state.lastEyes = j.answer || '';
     voiceState(`监听中 · 说「${WAKE_WORD}」`, true);
-    if (!outputReady && $('eyes-auto-tts').checked && j.answer && j.spoken !== false) speakAnswer(j.answer);
+    if (!outputReady && j.answer && j.spoken !== false) speakAnswer(j.answer);
   } catch (e) {
     if (e.name !== 'AbortError' && it.gen === interactionGen) voiceState('出错：' + e.message, false);
   } finally {

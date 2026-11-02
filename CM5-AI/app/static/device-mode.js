@@ -47,8 +47,6 @@
     $('audio').style.display = 'none';
     $('btn-voice-test').textContent = '树莓派扬声器试听';
     $('btn-tts').textContent = '在树莓派播报';
-    $('eyes-auto-tts').disabled = true;
-    $('eyes-auto-tts').parentElement.title = '设备端统一播报；停止按钮可立即取消普通语音';
   }
 
   let confirmedVolume = null;

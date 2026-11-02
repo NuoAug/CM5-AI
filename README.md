@@ -1,6 +1,6 @@
-# CM5-AI v1.0.0
+# CM5-AI v1.1.0
 
-面向视障辅助实验的本地多模态测试台。软件版本以 [CM5-AI/VERSION](CM5-AI/VERSION) 为准。本版以既有本地交互核心为基线，保留远程设备测试台、设备音量控制与无盲道引导页，重新从 v1.0.0 编号。
+面向视障辅助实验的本地多模态测试台。软件版本以 [CM5-AI/VERSION](CM5-AI/VERSION) 为准。本版以既有本地交互核心为基线，保留远程设备测试台、设备音量控制与无盲道引导页，重新从 v1.0.0 编号；v1.1.0 调整测试台布局、默认播报与意图路由。
 
 ## 功能
 
@@ -19,6 +19,35 @@
 
 文字回答支持增量分段；语音输入仍先完成整句 ASR，再执行任务，不能据此称为全双工实时对话。
 
+## 树莓派配置
+
+下表整理自 2026-11-02 的既有设备清单和实机记录，保留原配置；本轮未连接树莓派实时核验，也未部署或修改设备。板端当前运行版本和模型须另行检查，不能由本仓库版本推定。
+
+| 项目 | 已有配置与记录 |
+|---|---|
+| 核心与载板 | Raspberry Pi Compute Module 5 Rev 1.0；官方 CM5 IO Board R2 |
+| CPU / 内存 / 存储 | 四核 Cortex-A76，最高 2.4 GHz；4 GB RAM；32 GB eMMC |
+| 已部署系统记录 | Debian GNU/Linux 13（trixie），aarch64；内核 6.18.50+rpt-rpi-2712；Python 3.13.5 |
+| 主机 / 用户 | EYES / mylin |
+| 已有应用入口 | /home/mylin/cm5-ai/current（用户部署路径） |
+| 摄像头 | Camera Module 3 Wide（IMX708 / SC0874），CSI 接入，Picamera2 采集 |
+| 录音 / 播放 | ReSpeaker XVF3800 USB 四麦阵列；4Ω / 5W 扬声器接音频板 SPK |
+| ALSA 配置 | 输入、输出均为 plughw:CARD=Array,DEV=0；混音器 Array，播放控制 PCM,0 |
+| 电源 / 散热 | 27W USB-C 5.1V/5A；散热片、风扇及金属机壳 |
+| 设备模式 | IMAGE_SOURCE=standalone-device-test；VOICE_SOURCE=device；OUTPUT_SINK=alsa |
+| 服务与访问 | 板端 Web 127.0.0.1:8090、VLM 127.0.0.1:8091；SSH 将本机 127.0.0.1:18090 转发到板端 Web |
+
+沿用已有 SSH 地址、身份和密钥，在仓库根目录执行以下命令，再打开 [远程测试台](http://127.0.0.1:18090)：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 start
+powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 check
+# 测试结束后关闭该工具创建的隧道
+powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 stop
+```
+
+仓库 deploy/ 中的 /opt/cm5-ai、cm5 用户和数字 ALSA 卡号是通用安装示例，与这台设备的已有用户部署不同。设备配置、环境文件和音量保持原样；完整模型路径、校验值和参数来源见[设备与模型](docs/设备与模型-v1.0.0.md)。
+
 ## 文档
 
 - [功能与架构](docs/功能与架构-v1.0.0.md)：交互流程、接口和边界。
@@ -36,7 +65,7 @@ Windows 环境已具备模型、Python 虚拟环境和运行时后，双击 `CM5
 powershell -ExecutionPolicy Bypass -File CM5-AI/app/start.ps1
 ```
 
-树莓派保持已有硬件、主机、用户、摄像头与 ALSA 配置。远程测试台通过 SSH 转发访问本机 `127.0.0.1:18090`；本次文档整理没有向设备部署或改变设备配置。具体区分见部署文档。
+树莓派远程访问使用上面的 SSH 隧道命令；后续部署步骤见[部署与运维](docs/CM5-部署与运维.md)。
 
 ## 目录
 

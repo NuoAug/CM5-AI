@@ -281,6 +281,7 @@ def system_metrics():
     vm = psutil.virtual_memory()
     data = {
         "mem_total_gb": round(vm.total / 1024 ** 3, 2),
+        "mem_used_gb": round(vm.used / 1024 ** 3, 2),
         "mem_available_gb": round(vm.available / 1024 ** 3, 2),
         "mem_percent": round(vm.percent, 1),
         "temperature_c": None,
@@ -344,6 +345,29 @@ def model_cpu_percent():
         percent = (ticks - _cpu_sample["ticks"]) / (now - prev_ts) / (psutil.cpu_count() or 1) * 100
         percent = round(min(max(percent, 0.0), 100.0), 1)
         _cpu_sample.update(ts=now, ticks=ticks, percent=percent)
+        return percent
+
+
+_system_cpu_sample = {"ts": None, "total": 0.0, "idle": 0.0, "percent": None}
+
+
+def system_cpu_percent():
+    """整机 CPU 使用率；用 cpu_times 差值计算，首次采样返回未知。"""
+    now = time.time()
+    times = psutil.cpu_times()
+    total = sum(times)
+    idle = times.idle + getattr(times, "iowait", 0.0)
+    with CPU_LOCK:
+        prev_ts = _system_cpu_sample["ts"]
+        if prev_ts is None or now - prev_ts < 1.0:
+            if prev_ts is None:
+                _system_cpu_sample.update(ts=now, total=total, idle=idle)
+            return _system_cpu_sample["percent"]
+        total_delta = total - _system_cpu_sample["total"]
+        idle_delta = idle - _system_cpu_sample["idle"]
+        percent = 100.0 * (total_delta - idle_delta) / total_delta if total_delta > 0 else 0.0
+        percent = round(min(max(percent, 0.0), 100.0), 1)
+        _system_cpu_sample.update(ts=now, total=total, idle=idle, percent=percent)
         return percent
 
 
@@ -1385,6 +1409,7 @@ def status():
             },
             "cpu": {
                 "model_percent": cpu_percent,
+                "system_percent": system_cpu_percent(),
                 "cores": psutil.cpu_count() or 1,
             },
         }
@@ -1934,6 +1959,132 @@ def api_eyes():
         return jsonify({"error": f"识别失败：{exc}"}), 500
     finally:
         leave()
+
+
+VISION_TASKS = {"scene", "detail", "read_text", "read_date", "find_object", "compare", "followup"}
+
+
+@app.post("/api/ask")
+def api_ask():
+    """文字指令入口：按意图决定是否携带画面，再复用 run_eyes。"""
+    if not budget_guard():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
+    body = request.get_json(force=True, silent=True) or {}
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "指令为空"}), 400
+    image = body.get("image", "")
+    image_vlm = body.get("image_vlm", "")
+    has_image = bool(image or image_vlm)
+    frame_id = canonical_frame_id(
+        str(body.get("frame_id") or "").strip(),
+        image_vlm or image,
+    ) if has_image else ""
+    captured_at = str(body.get("captured_at") or "").strip()
+    session_id = str(body.get("session_id") or "").strip()
+    trace_id = str(body.get("request_id") or "").strip() or OUTPUT.new_utterance_id("ask")
+    TRACES.start(trace_id, "ask", session_id=session_id, has_image=has_image)
+    if isinstance(body.get("request_start_ms"), (int, float)):
+        TRACES.mark(trace_id, "request_start", wall_ms=int(body["request_start_ms"]))
+    finish_trace_after_request(trace_id)
+
+    task = intent.parse(
+        text,
+        has_context=bool(history_text(session_id)),
+        guide_active=bool(GUIDE.status().get("running")),
+        speech_active=recent_speech_active(),
+        session_id=session_id,
+    )
+    intent_name = task.intent
+    TRACES.mark(trace_id, "intent_end", intent=intent_name, confidence=task.confidence)
+
+    if intent_name == "clarify":
+        answer = task.clarify or "请再说一遍。"
+        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="ask", reason="clarify", ttl=3.0)
+        return jsonify({
+            "text": text, "intent": intent_name, "task": task.to_dict(),
+            "source": "rule", "answer": answer, "frame_id": frame_id,
+            "trace_id": trace_id, "latency_ms": 0, "spoken": True,
+        })
+    if intent_name in ("ack", "silent"):
+        intent_name = "chat"
+    elif intent_name == "unknown":
+        intent_name = "followup" if has_image else "chat"
+    elif intent_name in ("speech_stop", "guide_stop", "guide_start", "camera_off", "guide_status"):
+        return jsonify({"error": "文字输入暂不支持该控制指令，请使用语音或对应按钮"}), 400
+
+    if intent_name in VISION_TASKS and not has_image:
+        answer = NO_FRAME_REPLY if intent_name == "followup" else "还没有画面，请先拍一张或打开相机"
+        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="ask", reason="no_image", ttl=3.0)
+        TRACES.mark(trace_id, "answer", chars=len(answer), source="rule")
+        return jsonify({
+            "text": text, "intent": intent_name, "task": task.to_dict(),
+            "source": "rule", "answer": answer, "frame_id": frame_id,
+            "trace_id": trace_id, "latency_ms": 0, "spoken": True,
+        })
+
+    if not try_enter():
+        return jsonify({"error": "设备正忙，请稍后再试"}), 429
+    try:
+        common = dict(
+            image_b64=image, image_vlm_b64=image_vlm, frame_id=frame_id,
+            session_id=session_id, captured_at=captured_at, trace_id=trace_id,
+        )
+        if intent_name == "scene":
+            result = run_eyes("scene", **common)
+        elif intent_name == "detail":
+            result = run_eyes("detail", **common)
+        elif intent_name == "read_text":
+            result = run_eyes("text", **common)
+        elif intent_name == "read_date":
+            result = run_eyes("date", **common)
+        elif intent_name == "find_object":
+            target = task.slots.get("target")
+            if target in ("toilet", "exit"):
+                result = run_eyes(target, **common)
+            else:
+                result = run_eyes("item", item=task.slots.get("item", ""), **common)
+        elif intent_name == "compare":
+            result = run_eyes("compare", item=task.slots.get("item", ""), **common)
+        elif intent_name == "followup":
+            result = run_eyes("followup", question=text, **common)
+        else:
+            result = run_eyes("chat", question=text, frame_id=frame_id,
+                              session_id=session_id, trace_id=trace_id)
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 503
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        log.exception("ask failed")
+        return jsonify({"error": f"识别失败：{exc}"}), 500
+    finally:
+        leave()
+
+    answer = guard_vision_answer(intent_name, result.get("answer", ""))
+    result["answer"] = answer
+    TRACES.mark(trace_id, "answer", chars=len(answer), source=result.get("source"))
+    push_answer_segments(
+        answer, intent_name, "ask",
+        meta={"frame_id": frame_id, "request_id": trace_id},
+        trace_id=trace_id,
+    )
+    log.info(
+        "ask intent=%s frame=%s session=%s image_source=%s latency=%sms answer=%r",
+        intent_name, frame_id, session_id, body.get("image_source") or "-",
+        result.get("latency_ms"), answer[:160],
+    )
+    return jsonify({
+        "text": text,
+        "intent": intent_name,
+        "task": task.to_dict(),
+        "source": result.get("source"),
+        "answer": answer,
+        "frame_id": frame_id,
+        "trace_id": trace_id,
+        "latency_ms": result.get("latency_ms"),
+        "spoken": True,
+    })
 
 
 # 唤醒词规则收敛到 intent 模块，服务端仍保留同名别名给旧测试/脚本使用。
