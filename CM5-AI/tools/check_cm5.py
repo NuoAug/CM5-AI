@@ -334,7 +334,6 @@ def collect(hash_models: bool) -> dict:
         ("asr", MODELS / "asr/sherpa-onnx-paraformer-zh-small-2024-03-09/model.int8.onnx"),
         ("piper", Path(os.environ.get("PIPER_MODEL") or (MODELS / "tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx"))),
         ("piper_json", Path(os.environ.get("PIPER_MODEL") or (MODELS / "tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx")).with_suffix(".onnx.json")),
-        ("guide", Path(os.environ.get("GUIDE_MODEL") or (MODELS / "guide/segformer-b0-ade/model.onnx"))),
     ]
     for name, p in model_paths:
         item = {"path": str(p), "exists": p.exists()}

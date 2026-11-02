@@ -86,7 +86,6 @@ for rel in (
     "ocr/pp-ocrv6-small/ch_ppocr_mobile_v2.0_cls_mobile.onnx",
     "asr/sherpa-onnx-paraformer-zh-small-2024-03-09/model.int8.onnx",
     "tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx",
-    "guide/segformer-b0-ade/model.onnx",
 ):
     path = root / "models" / rel
     models[rel] = {"exists": path.exists(), "bytes": path.stat().st_size if path.exists() else None,
@@ -125,33 +124,33 @@ WEB_HOST=127.0.0.1
 WEB_PORT=8090
 PYTHONUNBUFFERED=1
 
-# 模型（共享目录）
+# 模型（共享目录；只使用本机发布清单中的制品）
 VLM_URL=http://127.0.0.1:8091
-VLM_MODEL=$ROOT/models/vlm/qwen3-vl-2b/Qwen3-VL-2B-Instruct-Q4_K_M.gguf
-VLM_MMPROJ=$ROOT/models/vlm/qwen3-vl-2b/mmproj-F16.gguf
+VLM_MODEL=$ROOT/models/vlm/minicpm-v-4.7-1b/MiniCPM-V-4_7-1B-Q4_K_M.gguf
+VLM_MMPROJ=$ROOT/models/vlm/minicpm-v-4.7-1b/mmproj-model-f16.gguf
 PIPER_BIN=$ROOT/runtime/piper/piper
 PIPER_MODEL=$ROOT/models/tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx
-GUIDE_MODEL=$ROOT/models/guide/segformer-b0-ade/model.onnx
 KWS_MODEL_DIR=$ROOT/models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01
 KWS_KEYWORDS=$ROOT/current/app/config/keywords.txt
 DATA_DIR=$ROOT/data
 
+# 主控接口 interaction.v0.1；正式取图只走 FrameProvider
+IMAGE_SOURCE=main_control
+MAIN_CONTROL_URL=
+MAIN_CONTROL_RPC_PATH=/interaction/rpc
+MAIN_CONTROL_EVENTS_PATH=/interaction/events
+MAIN_CONTROL_ASSET_ROOT=$ROOT/data/main-control
+MAIN_CONTROL_ALLOW_FIXTURE=0
+
 VLM_API_KEY=$KEY
 
-# 4GB 整机预算；引导运行时 VLM 限 3 线程并绑 0-2 核，留 1 核给引导/相机/KWS
+# 4GB 整机预算，必须留系统内存
 MEM_BUDGET_GB=3.6
-# 读取 2.5GB 进程的 smaps_rollup 开销明显；状态/健康轮询用 10 秒缓存
+# 读取大进程的 smaps_rollup 开销明显；状态/健康轮询用 10 秒缓存
 MEM_SAMPLE_TTL=10
 VLM_THREADS=3
 VLM_CTX=1024
-VLM_IMAGE_MAX_SIDE=256
-
-GUIDE_THREADS=2
-GUIDE_INPUT_W=384
-GUIDE_INPUT_H=288
-GUIDE_FPS=4.0
-GUIDE_FRAME_MAX_AGE=0.6
-GUIDE_WATCHDOG_SECONDS=2.5
+VLM_IMAGE_MAX_SIDE=512
 
 ASR_THREADS=1
 ASR_IDLE_SECONDS=180
@@ -170,7 +169,6 @@ KWS_TRAILING_BLANKS=8
 KWS_INT8=0
 
 VOICE_SOURCE=device
-GUIDE_SOURCE=device
 OUTPUT_SINK=alsa
 # 用稳定卡名，不依赖会变化的 card 编号
 ALSA_INPUT=plughw:CARD=Array,DEV=0
@@ -234,7 +232,7 @@ EOF
 
 cat > "$UNIT_DIR/cm5-ai-web.service" <<EOF
 [Unit]
-Description=CM5-AI web, guide loop, KWS and device audio (127.0.0.1:8090)
+Description=CM5-AI interaction web, KWS and device audio (127.0.0.1:8090)
 After=network.target cm5-ai-vlm.service
 Wants=cm5-ai-vlm.service
 StartLimitIntervalSec=300

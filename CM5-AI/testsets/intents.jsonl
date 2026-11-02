@@ -10,7 +10,13 @@
 {"text":"停止引导","guide_active":true,"expect":{"intent":"guide_stop"}}
 {"text":"开始引导","expect":{"intent":"guide_start","actions":["start_guide"]}}
 {"text":"打开导航","expect":{"intent":"guide_start"}}
-{"text":"继续引导","expect":{"intent":"guide_start"}}
+{"text":"继续引导","expect":{"intent":"guide_resume","actions":["resume_guide"]}}
+{"text":"暂停引导","expect":{"intent":"guide_pause","actions":["pause_guide"]}}
+{"text":"暂停一下导航","expect":{"intent":"guide_pause"}}
+{"text":"恢复引导","expect":{"intent":"guide_resume"}}
+{"text":"重复引导","expect":{"intent":"guide_repeat"}}
+{"text":"不要开始引导","expect":{"intent":"ack"}}
+{"text":"不是让你结束引导","expect":{"intent":"ack"}}
 {"text":"停止","guide_active":true,"speech_active":false,"expect":{"intent":"guide_stop"}}
 {"text":"停一下","guide_active":true,"speech_active":false,"expect":{"intent":"guide_stop"}}
 {"text":"停一下","guide_active":false,"speech_active":true,"expect":{"intent":"speech_stop"}}

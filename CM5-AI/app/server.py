@@ -34,12 +34,11 @@ from PIL import Image
 from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
 
-import guide
 import intent
 import kws
 import device_io
 import device_voice
-from guide_service import GUIDE
+import main_control
 from output import OUTPUT, PRIORITY_ANSWER, PRIORITY_CONFIRM, PRIORITY_DANGER, PRIORITY_GUIDE
 from stream_text import TTS_NORM_VERSION, normalize_for_tts, segment_text, SemanticSegmenter
 from tts_worker import PiperWorker, TTSInterrupted
@@ -147,32 +146,27 @@ MEM_MIN_AVAILABLE_MB = float(os.environ.get("MEM_MIN_AVAILABLE_MB", "400"))
 MEM_SAMPLE_TTL = float(os.environ.get("MEM_SAMPLE_TTL", "10"))
 _MEM_CACHE = {"ts": 0.0, "value": None}
 VOICE_SOURCE = os.environ.get("VOICE_SOURCE", "browser").strip().lower()
-GUIDE_SOURCE = os.environ.get("GUIDE_SOURCE", "auto").strip().lower()
 OUTPUT_SINK = os.environ.get("OUTPUT_SINK", "browser").strip().lower()
+# 正式取图只走主控 FrameProvider；standalone-device-test 仅用于独立实机测试。
+IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "main_control").strip().lower()
 
 DEVICE_CAMERA = device_io.DeviceCamera()
 DEVICE_VOICE = None
 DEVICE_SINK = None
+MAIN_CONTROL = main_control.MainControlAdapter()
 
 
-def _on_device_frame(img, frame_id, captured_mono, meta):
-    """Picamera2 连续帧直接送入服务端引导循环，不经过浏览器。"""
-    st = GUIDE.status()
-    if not st.get("running") or st.get("mode") != "device":
-        return
-    GUIDE.submit_frame(
-        img,
-        frame_id=frame_id,
-        source="device",
-        captured_mono=captured_mono,
-        meta=meta or {},
-    )
+def on_playback_status(payload, state, basis=None, reason=""):
+    MAIN_CONTROL.send_playback_status(payload, state, start_basis=basis, reason_code=reason)
+
+
+OUTPUT.set_status_hook(on_playback_status)
 
 
 def device_status():
     return {
         "voice_source": VOICE_SOURCE,
-        "guide_source": GUIDE_SOURCE,
+        "image_source": IMAGE_SOURCE,
         "output_sink": OUTPUT_SINK,
         "camera": DEVICE_CAMERA.status(),
         "voice": DEVICE_VOICE.status() if DEVICE_VOICE is not None else {
@@ -183,23 +177,19 @@ def device_status():
     }
 
 
-def default_guide_source():
-    if GUIDE_SOURCE == "browser":
-        return "browser"
-    if GUIDE_SOURCE == "device" or DEVICE_CAMERA.available():
-        return "device"
-    return "browser"
-
-
 def start_device_services():
     """按环境变量启用 CM5 设备摄像头、ALSA 语音与播报。"""
     global DEVICE_VOICE, DEVICE_SINK
-    if DEVICE_CAMERA.available() and (VOICE_SOURCE == "device" or GUIDE_SOURCE == "device"):
-        DEVICE_CAMERA.start(_on_device_frame)
+    start_camera = IMAGE_SOURCE == "standalone-device-test"
+    if DEVICE_CAMERA.available() and start_camera:
+        DEVICE_CAMERA.start(lambda *args: None)
     if VOICE_SOURCE != "device":
         return
     if DEVICE_VOICE is None:
-        DEVICE_VOICE = device_voice.DeviceVoice(camera=DEVICE_CAMERA)
+        DEVICE_VOICE = device_voice.DeviceVoice(
+            camera=DEVICE_CAMERA if start_camera else None,
+            capture_images=start_camera,
+        )
     if OUTPUT_SINK == "alsa" and device_io.AlsaPlayer().available() and not piper_error():
         player = device_io.AlsaPlayer()
         DEVICE_SINK = device_io.DeviceSink(
@@ -207,6 +197,7 @@ def start_device_services():
             player=player,
             before_speak=DEVICE_VOICE.pause,
             after_speak=DEVICE_VOICE.resume,
+            status_cb=on_playback_status,
         )
         OUTPUT.attach_sink(DEVICE_SINK)
         DEVICE_VOICE.set_sink_present(True)
@@ -219,6 +210,7 @@ def start_device_services():
 
 def stop_device_services():
     global DEVICE_VOICE, DEVICE_SINK
+    MAIN_CONTROL.stop()
     if DEVICE_VOICE is not None:
         DEVICE_VOICE.stop()
     if DEVICE_SINK is not None:
@@ -272,7 +264,7 @@ def over_budget(fresh: bool = False):
 
 
 def release_low_priority_models():
-    """内存超预算时先释放按需加载的 ASR；引导与 VLM 不在这里卸载。"""
+    """内存超预算时先释放按需加载的 ASR；VLM 不在这里卸载。"""
     global asr_engine
     released = False
     with ASR_LOCK:
@@ -831,11 +823,10 @@ def split_sentences(text, max_len=90):
     return out
 
 
-# ---------- 重任务并发上限：引导运行时把 VLM/OCR 并发压到 1 ----------
+# ---------- 重任务并发上限：主控未提供额外负载信息，保持本服务自身限制 ----------
 ACTIVE_LOCK = threading.Lock()
 ACTIVE = {"heavy": 0, "light": 0}
 HEAVY_LIMIT = 3
-GUIDE_HEAVY_LIMIT = 1
 LIGHT_LIMIT = 2
 
 
@@ -846,8 +837,7 @@ def try_enter(kind: str = "heavy"):
                 return False
             ACTIVE["light"] += 1
             return True
-        limit = GUIDE_HEAVY_LIMIT if GUIDE.status().get("running") else HEAVY_LIMIT
-        if ACTIVE["heavy"] >= limit:
+        if ACTIVE["heavy"] >= HEAVY_LIMIT:
             return False
         ACTIVE["heavy"] += 1
         return True
@@ -864,9 +854,9 @@ def active_stats():
         return {
             "heavy": ACTIVE["heavy"],
             "light": ACTIVE["light"],
-            "heavy_limit": GUIDE_HEAVY_LIMIT if GUIDE.status().get("running") else HEAVY_LIMIT,
+            "heavy_limit": HEAVY_LIMIT,
             "light_limit": LIGHT_LIMIT,
-            "guide_running": bool(GUIDE.status().get("running")),
+            "guidance_active": MAIN_CONTROL.guidance_active(),
         }
 
 
@@ -1234,28 +1224,17 @@ OBSTACLE_WORDS = (
 
 
 def guard_vision_answer(task, answer):
-    """引导提示危险时，禁止 VLM 同时说“没有危险/可以走”。"""
+    """VLM/OCR 只描述可见内容，不能生成通行授权、安全结论或主控身份。"""
     if not answer or task in ("read_text", "read_date", "toilet", "exit", "item"):
         return answer
-    # 场景/详细描述自己列了障碍物，却仍说“没看到明显障碍”：以列出的物体为准，改成警告。
+    # 场景/详细描述自己列了障碍物，却仍说“没看到明显障碍”：以列出的物体为准，改成描述。
     if task in ("scene", "detail") and "没看到明显障碍" in answer and any(w in answer for w in OBSTACLE_WORDS):
-        answer = answer.replace("前方没看到明显障碍", "前方有障碍物，请小心")
-        answer = answer.replace("没有明显障碍", "有障碍物，请小心")
-    st = GUIDE.status()
-    if not st.get("running"):
-        return answer
-    decision = st.get("decision") or {}
-    state = decision.get("state")
-    reason = decision.get("reason")
-    if state not in ("stop", "unavailable"):
-        return answer
-    if reason in ("no_frame", "stopped"):
-        return answer
-    if not SAFE_CLAIM.search(answer):
-        return answer
-    if reason in ("stairs", "road", "person", "obstacle", "blocked", "ahead", "narrow", "depth_obstacle"):
-        return "引导已提示前方危险，请先停下；现在不做画面安全判断。"
-    return "引导画面当前不可靠，不能确认安全，请先停下或重拍。"
+        answer = answer.replace("前方没看到明显障碍", "画面里有障碍物，请注意")
+        answer = answer.replace("没看到明显障碍", "画面里有障碍物，请注意")
+        answer = answer.replace("没有明显障碍", "画面里有障碍物，请注意")
+    if SAFE_CLAIM.search(answer):
+        return "画面只能描述看得见的内容，能不能通行要由主控判断；请先停下确认。"
+    return answer
 
 
 def temperature_for(task):
@@ -1439,8 +1418,8 @@ def status():
                 "error": piper_error() or None,
             },
             "kws": kws.status(),
-            "guide": GUIDE.status(),
-            "guide_model": guide.status(),
+            "main_control": MAIN_CONTROL.status(),
+            "image_source": IMAGE_SOURCE,
             "output": OUTPUT.stats(),
             "active": active_stats(),
             "system": system_metrics(),
@@ -1502,14 +1481,14 @@ def api_trace_event():
 @app.get("/api/health")
 def health():
     """给 systemd/健康检查用的轻量接口，不触发模型加载。"""
-    st = GUIDE.status()
-    ok = (not piper_error()) and st.get("model", {}).get("ready", False)
+    mc = MAIN_CONTROL.status()
+    ok = not piper_error()
     return jsonify(
         {
             "ok": ok,
-            "guide_running": bool(st.get("running")),
-            "guide_state": (st.get("decision") or {}).get("state"),
-            "guide_reason": (st.get("decision") or {}).get("reason"),
+            "main_control_connected": bool(mc.get("connected")),
+            "main_control_configured": bool(mc.get("configured")),
+            "main_control_error": mc.get("last_error"),
             "memory_over_budget": over_budget(),
         }
     ), (200 if ok else 503)
@@ -2037,14 +2016,14 @@ KWS_LOCK = threading.Lock()
 
 
 def recent_speech_active(max_age=8.0):
-    """只把最近 8 秒内的回答播报当作“正在播报”；确认语和引导提示不算。"""
+    """只把最近 8 秒内的普通回答播报当作“正在播报”；确认语和主控提示不算。"""
     stats = OUTPUT.stats()
     age = stats.get("last_event_age_s")
     last = stats.get("last_event") or {}
     return bool(
         age is not None and age <= max_age
         and last.get("priority", 99) >= PRIORITY_ANSWER
-        and last.get("source") != "guide"
+        and last.get("source") != "main_control"
     )
 
 
@@ -2057,6 +2036,105 @@ def voice_reply(answer, intent_name, **extra):
     }
     payload.update(extra)
     return jsonify(payload)
+
+
+_STANDALONE_FRAME_SEQ = 0
+
+
+def provider_frame(task, session_id):
+    """按正式 FrameProvider 或显式 standalone-device-test 取图。
+
+    返回值只描述事实；standalone 与主控集成状态分开记录，不冒充真实联调。
+    """
+    global _STANDALONE_FRAME_SEQ
+    purpose = "ocr" if task in ("read_text", "read_date") else "vqa"
+    max_side = 1600 if purpose == "ocr" else VLM_IMAGE_MAX_SIDE
+    if IMAGE_SOURCE == "standalone-device-test":
+        if not DEVICE_CAMERA.available():
+            raise RuntimeError("Picamera2 不可用，独立设备测试不能取图")
+        if not DEVICE_CAMERA.status().get("running") and not DEVICE_CAMERA.start(lambda *args: None):
+            raise RuntimeError(DEVICE_CAMERA.status().get("error") or "摄像头启动失败")
+        img = DEVICE_CAMERA.capture_still()
+        if img is None:
+            raise RuntimeError(DEVICE_CAMERA.status().get("error") or "独立设备取帧失败")
+        _STANDALONE_FRAME_SEQ += 1
+        fid = f"standalone-{_STANDALONE_FRAME_SEQ}-{time.time_ns()}"
+        return {
+            "image": img,
+            "frame_id": fid,
+            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "is_historical": False,
+            "source_kind": "camera",
+            "evidence_mode": "live",
+            "standalone_device_test": True,
+        }
+    if IMAGE_SOURCE != "main_control":
+        raise RuntimeError("当前未启用取图来源")
+    sess = get_session(session_id)
+    fid = sess.get("frame_id") or ""
+    mode = "pinned" if task == "followup" and fid else "latest"
+    try:
+        return MAIN_CONTROL.acquire_frame(
+            mode=mode, purpose=purpose, frame_id=fid if mode == "pinned" else None,
+            max_age_ms=int(FRAME_MAX_AGE * 1000), max_side_px=max_side,
+            session_id=session_id,
+        )
+    except RuntimeError as exc:
+        if task == "followup" and mode == "pinned":
+            raise RuntimeError("原图已不可用，不能拿新画面冒充同一张照片；请重新取图") from exc
+        raise RuntimeError(f"主控暂不能取图：{exc}") from exc
+
+
+def frame_to_payload(frame):
+    img = frame["image"]
+    full = image_to_jpeg_b64(img, max_side=1600)
+    vlm = image_to_jpeg_b64(img, max_side=VLM_IMAGE_MAX_SIDE)
+    return {
+        "image": "data:image/jpeg;base64," + full,
+        "image_vlm": "data:image/jpeg;base64," + vlm,
+        "frame_id": frame["frame_id"],
+        "captured_at": frame.get("captured_at") or "",
+        "image_source": "standalone-device-test" if frame.get("standalone_device_test")
+        else "main_control",
+        "frame_is_historical": bool(frame.get("is_historical")),
+        "frame_evidence_mode": frame.get("evidence_mode"),
+    }
+
+
+def control_answer(action, transcript, session_id, utterance_id):
+    """把控制意图交给主控；completed 且模式匹配才算完成。"""
+    expected = {
+        "start_guidance": ("walking", "guiding", "navigating"),
+        "resume_guidance": ("walking", "guiding", "navigating"),
+        "pause_guidance": ("paused",),
+        "end_guidance": ("idle", "stopped", "ended"),
+        "repeat_guidance": ("walking", "guiding", "navigating", "paused"),
+    }
+    try:
+        result = MAIN_CONTROL.control(
+            action, utterance_id=utterance_id, final_transcript=transcript,
+            session_id=session_id,
+        )
+    except RuntimeError as exc:
+        return f"主控不可用：{exc}", None
+    state = result.get("operation_state")
+    mode = str(result.get("actual_mode") or "unknown")
+    if result.get("accepted") is False or state == "rejected":
+        return f"主控拒绝了这次操作（{result.get('reason_code') or '未说明原因'}）", result
+    if state == "pending":
+        return "请求已发送，主控还在处理，引导状态尚未改变", result
+    if state != "completed":
+        return "主控没有确认完成，不能当作已经执行", result
+    if action == "repeat_guidance":
+        return "已请求主控重复当前引导", result
+    if mode not in expected.get(action, ()):
+        return f"主控已完成请求，但当前模式是 {mode}，不能确认动作已生效", result
+    return {
+        "start_guidance": "已开始引导",
+        "resume_guidance": "已恢复引导",
+        "pause_guidance": "已暂停引导",
+        "end_guidance": "已结束引导",
+    }.get(action, "主控已确认操作"), result
 
 
 def decode_wav(data_b64):
@@ -2171,11 +2249,12 @@ def api_voice():
         return voice_reply("", "ack", text=text, latency_ms=int((time.time() - t0) * 1000), spoken=False, armed=True)
 
     has_context = bool(history_text(session_id))
-    guide_active = bool(GUIDE.status().get("running"))
+    guide_active = MAIN_CONTROL.guidance_active()
     task = intent.parse(
         cmd,
         has_context=has_context,
         guide_active=guide_active,
+        guide_paused=MAIN_CONTROL.guidance_paused(),
         speech_active=recent_speech_active(),
         session_id=session_id,
     )
@@ -2194,41 +2273,36 @@ def api_voice():
     }
 
     if task.intent == "speech_stop":
-        OUTPUT.cancel(min_priority=PRIORITY_GUIDE, source="voice")
-        log.info("voice action=speech_stop session=%s", session_id)
+        event = OUTPUT.cancel(min_priority=PRIORITY_ANSWER, source="voice")
+        log.info("voice action=speech_stop session=%s epoch=%s", session_id, event.get("epoch"))
         return voice_reply("已停止播报", "speech_stop", spoken=False, cancelled=True, **base)
 
-    if task.intent == "guide_stop":
-        if guide_active:
-            GUIDE.stop(announce=True)
-            answer = "已停止引导"
-        else:
-            answer = "引导现在没有开始"
-            OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="guide_stop", ttl=2.0)
-        log.info("voice action=guide_stop session=%s", session_id)
-        return voice_reply(answer, "guide_stop", spoken=True, guide=GUIDE.status(), **base)
-
-    if task.intent == "guide_start":
-        source = default_guide_source()
-        if source == "device":
-            if not DEVICE_CAMERA.available():
-                return jsonify({"error": "Picamera2 不可用，无法使用设备摄像头引导"}), 503
-            if not DEVICE_CAMERA.start(_on_device_frame):
-                return jsonify({"error": DEVICE_CAMERA.status().get("error") or "摄像头启动失败"}), 503
-        try:
-            status = GUIDE.start(source)
-        except RuntimeError as exc:
-            return jsonify({"error": str(exc)}), 503
-        answer = "已开始引导，请保持摄像头画面" if status.get("needs_frames") else "已开始引导"
-        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="guide_start", ttl=3.0)
-        log.info("voice action=guide_start source=%s session=%s needs_frames=%s", source, session_id, status.get("needs_frames"))
-        return voice_reply(answer, "guide_start", spoken=True, guide=status, **base)
+    if task.intent in ("guide_start", "guide_stop", "guide_pause", "guide_resume", "guide_repeat"):
+        action = {
+            "guide_start": "start_guidance",
+            "guide_stop": "end_guidance",
+            "guide_pause": "pause_guidance",
+            "guide_resume": "resume_guidance",
+            "guide_repeat": "repeat_guidance",
+        }[task.intent]
+        answer, control = control_answer(action, text, session_id, trace_id)
+        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice",
+                   reason=task.intent, ttl=3.0, meta={"request_id": trace_id})
+        log.info("voice action=%s result=%s session=%s", task.intent,
+                 (control or {}).get("operation_state"), session_id)
+        return voice_reply(answer, task.intent, spoken=True, main_control=control, **base)
 
     if task.intent == "camera_off":
-        if guide_active:
-            GUIDE.stop(announce=False)
         DEVICE_CAMERA.stop()
-        answer = "已停止引导，请关闭摄像头"
+        answer = "已关闭本地摄像头"
+        if guide_active:
+            text_end, control = control_answer("end_guidance", text, session_id, trace_id)
+            if control is None:
+                answer = "已关闭本地摄像头；主控引导没有改变，因为主控不可用"
+            elif control.get("operation_state") == "completed":
+                answer = "已关闭本地摄像头，并已结束主控引导"
+            else:
+                answer = "已关闭本地摄像头；主控引导状态未确认"
         OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="camera_off", ttl=2.0)
         log.info("voice action=camera_off session=%s", session_id)
         return voice_reply(answer, "camera_off", spoken=True, close_camera=True, **base)
@@ -2249,34 +2323,26 @@ def api_voice():
         return voice_reply("", "ack", spoken=False, **base)
 
     if task.intent == "guide_status":
-        st = GUIDE.status()
-        d = st.get("decision") or {}
-        age_ms = st.get("frame_age_ms")
-        if not st.get("running"):
-            answer = "引导没有运行，不能判断能不能走"
-        elif age_ms is None or age_ms > int(guide.FRAME_MAX_AGE * 1000 * 2):
-            answer = "引导画面已过期，不能判断，请先停下"
-        elif d.get("state") == "stop":
-            answer = guide.REASON_TEXT.get(d.get("reason"), "引导提示前方有危险，请停下")
-        elif d.get("state") == "left":
-            answer = "引导判断当前向左一点，请用盲杖确认"
-        elif d.get("state") == "right":
-            answer = "引导判断当前向右一点，请用盲杖确认"
-        elif d.get("state") == "straight":
-            answer = "引导判断当前直行通道可用，请用盲杖确认"
-        else:
-            answer = "引导画面当前不可用，不能判断，请先停下"
-        TRACES.mark(trace_id, "answer", chars=len(answer), source="guide")
+        try:
+            scene = MAIN_CONTROL.query_scene(session_id=session_id)
+            answer = main_control.format_scene_answer(scene)
+            mc_data = {"state_id": scene.get("state_id"), "sequence": scene.get("sequence"),
+                       "stale": scene.get("_stale"), "evidence_mode": scene.get("_evidence_mode")}
+        except RuntimeError as exc:
+            answer = f"主控不可用：{exc}。现在不能判断能不能走。"
+            mc_data = None
+        TRACES.mark(trace_id, "answer", chars=len(answer), source="main_control")
         push_answer_segments(
-            answer, "guide_status", "guide_status",
-            priority=PRIORITY_CONFIRM, meta={"frame_id": st.get("frame_id", ""), "request_id": trace_id},
-            trace_id=trace_id,
+            answer, "guide_status", "main_control",
+            priority=PRIORITY_CONFIRM,
+            meta={"request_id": trace_id}, trace_id=trace_id,
         )
-        log.info("voice guide_status state=%s reason=%s age=%sms", d.get("state"), d.get("reason"), age_ms)
-        return voice_reply(answer, "guide_status", spoken=True, guide=st, **base)
+        log.info("voice guide_status answer=%r", answer[:120])
+        return voice_reply(answer, "guide_status", spoken=True, main_control=mc_data, **base)
 
     if "stop_guide" in task.actions and guide_active:
-        GUIDE.stop(announce=False)
+        _, end_result = control_answer("end_guidance", text, session_id, trace_id)
+        log.info("voice implicit end_guidance result=%s", (end_result or {}).get("operation_state"))
 
     img = body.get("image", "")
     img_vlm = body.get("image_vlm", "")
@@ -2284,10 +2350,37 @@ def api_voice():
     frame_id = canonical_frame_id(str(body.get("frame_id") or "").strip(), img or img_vlm) if has_image else ""
     captured_at = str(body.get("captured_at") or "").strip()
     context = str(body.get("context") or "").strip()
+    image_source = str(body.get("image_source") or ("browser" if has_image else "-"))
+    frame_historical = False
 
     if task.needs_image and not (img or img_vlm):
-        answer = NO_FRAME_REPLY if task.intent == "followup" else "还没有画面，请先拍一张或打开相机"
-        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="no_image", ttl=3.0)
+        if IMAGE_SOURCE in ("main_control", "standalone-device-test"):
+            try:
+                frame = provider_frame(task.intent, session_id)
+                payload = frame_to_payload(frame)
+                img, img_vlm = payload["image"], payload["image_vlm"]
+                frame_id = payload["frame_id"]
+                captured_at = payload["captured_at"]
+                image_source = payload["image_source"]
+                frame_historical = payload["frame_is_historical"]
+                if frame_historical:
+                    context = (context + "（这是历史照片，不是当前现场）").strip()
+            except RuntimeError as exc:
+                answer = str(exc)
+                OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice",
+                           reason="frame_unavailable", ttl=3.0)
+                log.info("voice frame unavailable intent=%s source=%s error=%s",
+                         task.intent, IMAGE_SOURCE, exc)
+                return voice_reply(answer, task.intent, spoken=True, frame_id="", **base)
+        else:
+            answer = NO_FRAME_REPLY if task.intent == "followup" else "还没有画面，请先拍一张或打开相机"
+            OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="no_image", ttl=3.0)
+            return voice_reply(answer, task.intent, spoken=True, frame_id=frame_id, **base)
+
+    if frame_historical and task.intent not in ("followup", "chat"):
+        answer = "这张是历史照片，不能当作当前现场；请让主控取一张当前画面。"
+        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice",
+                   reason="historical_frame", ttl=3.0)
         return voice_reply(answer, task.intent, spoken=True, frame_id=frame_id, **base)
 
     if not try_enter("heavy"):
@@ -2343,7 +2436,7 @@ def api_voice():
     log.info(
         "voice intent=%s item=%r armed=%s frame=%s captured=%s session=%s image_source=%s full=%s vlm=%s source=%s latency=%sms answer=%r text=%r",
         task.intent, task.slots.get("item", ""), armed, frame_id, captured_at, session_id,
-        body.get("image_source") or "-", b64_md5(img), b64_md5(img_vlm),
+        image_source, b64_md5(img), b64_md5(img_vlm),
         result["source"], int((time.time() - t0) * 1000), answer[:160], text,
     )
     return jsonify(
@@ -2409,33 +2502,172 @@ def api_ocr():
         leave()
 
 
-@app.post("/api/guide/start")
-def api_guide_start():
-    body = request.get_json(force=True, silent=True) or {}
-    source = (body.get("source") or default_guide_source()).strip().lower()
-    if source == "device":
-        if not DEVICE_CAMERA.available():
-            return jsonify({"error": "Picamera2 不可用，无法使用设备摄像头引导"}), 503
-        if not DEVICE_CAMERA.start(_on_device_frame):
-            return jsonify({"error": DEVICE_CAMERA.status().get("error") or "摄像头启动失败"}), 503
+def interaction_envelope(msg_type: str, request_msg: dict, data: dict, status: str = "ok",
+                         error=None) -> dict:
+    return {
+        "schema_version": "interaction.v0.1",
+        "type": msg_type,
+        "message_id": f"msg-{uuid.uuid4().hex[:12]}",
+        "reply_to": (request_msg or {}).get("message_id"),
+        "request_id": (request_msg or {}).get("request_id"),
+        "session_id": (request_msg or {}).get("session_id"),
+        "producer": {"role": "interaction", "instance_id": MAIN_CONTROL.instance_id},
+        "clock_id": MAIN_CONTROL.clock_id,
+        "timestamp_mono_ms": main_control.now_mono_ms(),
+        "evidence_mode": "live",
+        "status": status,
+        "error": error,
+        "data": data,
+    }
+
+
+def interaction_status_data() -> dict:
+    dev = device_status()
+    voice = dev.get("voice") or {}
+    out_stats = OUTPUT.stats()
+    app_rss, vlm_rss, tts_rss = model_memory_bytes()
+    vm = psutil.virtual_memory()
+    heavy = active_stats().get("heavy", 0)
+    speaking = bool(out_stats.get("last_event_age_s") is not None and out_stats.get("last_event_age_s") <= 3.0
+                    and (out_stats.get("last_event") or {}).get("priority", 99) <= PRIORITY_ANSWER)
+    if over_budget() or piper_error():
+        mode = "degraded"
+    elif speaking:
+        mode = "speaking"
+    elif heavy:
+        mode = "processing"
+    elif voice.get("running") and not voice.get("paused"):
+        mode = "listening"
+    else:
+        mode = "idle"
+    return {
+        "mode": mode,
+        "active_request_id": None,
+        "audio_input_state": {
+            "available": bool(voice.get("available")),
+            "state": "paused" if voice.get("paused") else ("capturing" if voice.get("running") else "unavailable"),
+            "error": voice.get("error"),
+        },
+        "audio_output_state": {
+            "available": bool(dev.get("sink")),
+            "state": "device" if dev.get("sink") else "browser",
+            "error": None if dev.get("sink") else "未挂载设备播放 sink",
+        },
+        "services": {
+            "asr": {"version": "paraformer-zh-small-int8", "ready": asr_engine is not None,
+                    "state": "ready" if asr_engine is not None else "lazy", "error": init_error.get("asr")},
+            "vlm": {"version": "minicpm-v-4.7-1b-q4_k_m", "ready": vlm_health(), "state": "ready" if vlm_health() else "unavailable"},
+            "ocr": {"version": "pp-ocrv6-small", "ready": ocr_engine is not None,
+                    "state": "ready" if ocr_engine is not None else "loading", "error": init_error.get("ocr")},
+            "tts": {"version": "piper-1.2.0+zh_CN-huayan-medium", "ready": not piper_error(),
+                    "state": "ready" if not piper_error() else "unavailable", "error": piper_error() or None},
+            "kws": {"version": "kws-zipformer-wenetspeech-3.3M", "ready": bool(kws.status().get("ready")),
+                    "state": "ready" if kws.status().get("ready") else "unavailable", "error": kws.status().get("error")},
+        },
+        "queues": {
+            "output_limit": out_stats.get("queue_limit"),
+            "output_pending": out_stats.get("pending"),
+            "subscribers": out_stats.get("subscribers"),
+            "heavy": heavy,
+            "light": active_stats().get("light"),
+        },
+        "memory": {
+            "metric": "rss",
+            "bytes": int(app_rss + vlm_rss + tts_rss),
+            "processes": ["interaction", "llama-server", "piper"],
+            "sampled_at_mono_ms": main_control.now_mono_ms(),
+            "system": {"total_bytes": int(vm.total), "available_bytes": int(vm.available),
+                       "swap_used_bytes": int(getattr(vm, "swap_used", 0) or 0)},
+            "budget_gb": MEM_BUDGET_GB,
+        },
+        "metrics_window": {"window_s": None, "records_max": 500, "summary": TRACES.summary()},
+        "last_error": MAIN_CONTROL.status().get("last_error") or init_error.get("ocr") or init_error.get("asr"),
+    }
+
+
+@app.get("/api/main-control/status")
+def api_main_control_status():
+    return jsonify({"status": MAIN_CONTROL.status()})
+
+
+@app.get("/api/main-control/scene")
+def api_main_control_scene():
     try:
-        status = GUIDE.start(source)
+        scene = MAIN_CONTROL.query_scene(session_id=str(request.args.get("session_id") or "").strip())
+        return jsonify({"status": "ok", "scene": scene, "answer": main_control.format_scene_answer(scene)})
     except RuntimeError as exc:
-        return jsonify({"error": str(exc)}), 503
-    log.info("guide start source=%s needs_frames=%s", source, status.get("needs_frames"))
-    return jsonify(status)
+        return jsonify({"status": "unavailable", "error": str(exc),
+                        "answer": f"主控不可用：{exc}"}), 503
 
 
-@app.post("/api/guide/stop")
-def api_guide_stop():
+@app.post("/api/main-control/control")
+def api_main_control_control():
+    """调试入口：只接受调试页显式动作；正式控制来自最终语音话语。"""
     body = request.get_json(force=True, silent=True) or {}
-    reason = (body.get("reason") or "manual").strip()
-    status = GUIDE.stop(reason=reason, announce=True)
-    # 设备语音仍需要摄像头抓当前画面；只有摄像头仅因引导而启动时才随引导关闭。
-    if status.get("mode") == "device" and VOICE_SOURCE != "device":
-        DEVICE_CAMERA.stop()
-    log.info("guide stop reason=%s", reason)
-    return jsonify(status)
+    action = str(body.get("action") or "").strip()
+    transcript = str(body.get("transcript") or "").strip()
+    session_id = str(body.get("session_id") or "debug").strip()
+    if action not in main_control.ALLOWED_ACTIONS or not transcript:
+        return jsonify({"error": "需要允许的动作和明确的最终话语"}), 400
+    answer, result = control_answer(action, transcript, session_id, f"debug-{uuid.uuid4().hex[:8]}")
+    return jsonify({"answer": answer, "result": result})
+
+
+@app.get("/api/interaction/status")
+def api_interaction_status():
+    return jsonify(interaction_envelope("interaction.status", {}, interaction_status_data()))
+
+
+@app.post("/api/interaction/cancel")
+def api_interaction_cancel():
+    body = request.get_json(force=True, silent=True) or {}
+    if body.get("schema_version") != "interaction.v0.1":
+        return jsonify(interaction_envelope(
+            "output.cancel.result", body, {}, status="rejected",
+            error={"code": "UNSUPPORTED_VERSION", "message": "schema_version 不支持", "retryable": False},
+        )), 400
+    producer = body.get("producer") or {}
+    role = producer.get("role")
+    allowed_roles = {"main_control"} | ({"test_fixture"} if MAIN_CONTROL.allow_fixture else set())
+    if role not in allowed_roles:
+        return jsonify(interaction_envelope(
+            "output.cancel.result", body, {}, status="rejected",
+            error={"code": "INVALID_PAYLOAD", "message": "取消来源不是主控", "retryable": False},
+        )), 403
+    data = body.get("data") or {}
+    scope = data.get("scope")
+    if scope not in ("ordinary_turn", "ordinary_session", "guidance_event"):
+        return jsonify(interaction_envelope(
+            "output.cancel.result", body, {}, status="rejected",
+            error={"code": "INVALID_PAYLOAD", "message": "scope 非法", "retryable": False},
+        )), 400
+    target_event = data.get("target_event_id")
+    if scope == "guidance_event":
+        if not target_event:
+            return jsonify(interaction_envelope(
+                "output.cancel.result", body, {}, status="rejected",
+                error={"code": "INVALID_PAYLOAD", "message": "guidance_event 取消缺少 target_event_id", "retryable": False},
+            )), 400
+        result = OUTPUT.drop_guidance(target_event)
+        payload = {
+            "stopped": bool(result["stopped_current"]),
+            "queue_cleared": result["removed"] > 0,
+            "generation_cancelled": None,
+            "computation_ended": None,
+            "detail": "只撤销指定主控引导事件；普通回答与紧急事件保留",
+        }
+    else:
+        event = OUTPUT.cancel(min_priority=PRIORITY_ANSWER, source="main_control")
+        payload = {
+            "stopped": True,
+            "queue_cleared": True,
+            "generation_cancelled": False,
+            "computation_ended": None,
+            "detail": "已停止普通播放并清空待播；模型请求未强制中断，后台计算结束时间需另行记录",
+            "epoch": event.get("epoch"),
+        }
+    log.info("interaction cancel scope=%s event=%s", scope, target_event)
+    return jsonify(interaction_envelope("output.cancel.result", body, payload))
 
 
 @app.get("/api/device/status")
@@ -2445,7 +2677,9 @@ def api_device_status():
 
 @app.get("/api/camera/still")
 def api_camera_still():
-    """设备端高清抓图，供调试、OCR 验收和回放取样；不重新打开摄像头。"""
+    """独立设备测试的高清抓图；正式取图必须走主控 FrameProvider。"""
+    if IMAGE_SOURCE != "standalone-device-test":
+        return jsonify({"error": "正式模式不使用本机相机，请通过主控 FrameProvider 取图"}), 409
     st = DEVICE_CAMERA.status()
     if not st.get("running"):
         return jsonify({"error": "设备摄像头未运行"}), 409
@@ -2459,63 +2693,9 @@ def api_camera_still():
     return Response(
         buf.getvalue(),
         mimetype="image/jpeg",
-        headers={"X-Frame-Id": fid, "X-Captured-At": captured, "Cache-Control": "no-store"},
+        headers={"X-Frame-Id": fid, "X-Captured-At": captured, "X-Cache-Control": "no-store",
+                 "X-Evidence-Mode": "standalone-device-test"},
     )
-
-
-@app.post("/api/guide/frame")
-def api_guide_frame():
-    if not GUIDE.status().get("running"):
-        return jsonify({"error": "引导未开始"}), 409
-    body = request.get_json(force=True, silent=True) or {}
-    image = body.get("image", "")
-    try:
-        img = decode_image(image)
-    except Exception as exc:  # noqa: BLE001
-        return jsonify({"error": f"图片解析失败：{exc}"}), 400
-    fid = canonical_frame_id(str(body.get("frame_id") or "").strip(), image)
-    result = GUIDE.submit_frame(
-        img,
-        frame_id=fid,
-        captured_at=str(body.get("captured_at") or "").strip(),
-        source=str(body.get("source") or "browser"),
-    )
-    return jsonify(result)
-
-
-@app.get("/api/guide/status")
-def api_guide_status():
-    return jsonify(GUIDE.status())
-
-
-@app.post("/api/guide")
-def api_guide():
-    """单帧调试/离线回放入口；不进入实时状态机。"""
-    if not try_enter("heavy"):
-        return jsonify({"error": "设备正忙，请稍后再试"}), 429
-    try:
-        body = request.get_json(force=True, silent=True) or {}
-        image = body.get("image", "")
-        img = decode_image(image)
-        frame_id = canonical_frame_id(str(body.get("frame_id") or "").strip(), image)
-        result = guide.analyze_image(img, frame={"frame_id": frame_id})
-        m = result.get("metrics") or {}
-        log.info(
-            "guide raw state=%s reason=%s frame=%s image=%s quality=%s infer=%sms",
-            result.get("raw_direction"), result.get("raw_reason"), frame_id, b64_md5(image),
-            (result.get("quality") or {}).get("reasons"), (result.get("timing") or {}).get("inference_ms"),
-        )
-        result["frame_id"] = frame_id
-        return jsonify(result)
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except RuntimeError as exc:
-        return jsonify({"error": str(exc)}), 503
-    except Exception as exc:  # noqa: BLE001
-        log.exception("guide failed")
-        return jsonify({"error": f"引导识别失败：{exc}"}), 500
-    finally:
-        leave("heavy")
 
 
 @app.post("/api/output/cancel")
@@ -2615,12 +2795,63 @@ def sample(name: str):
     return send_from_directory(SAMPLES_DIR, name)
 
 
+def on_guidance_event(event: dict):
+    """主控引导事件唯一入口：来源已由适配器校验，模型/OCR/用户文本不能进入这里。"""
+    data = event.get("data") or {}
+    text = (data.get("text") or "").strip()
+    priority = PRIORITY_DANGER if data.get("priority") == "emergency" else PRIORITY_GUIDE
+    valid_until = data.get("valid_until_mono_ms")
+    ttl = max(1.0, (int(valid_until) - main_control.now_mono_ms()) / 1000.0) if valid_until else 3.0
+    payload = OUTPUT.push_segment(
+        text,
+        priority=priority,
+        source="main_control",
+        reason=str(data.get("priority") or "navigation"),
+        ttl=min(ttl, 12.0),
+        preempt=True,
+        meta={
+            "event_id": data.get("event_id"),
+            "sequence": data.get("sequence"),
+            "state_id": data.get("state_id"),
+            "priority": data.get("priority"),
+            "evidence_mode": event.get("evidence_mode"),
+            "producer": (event.get("producer") or {}).get("role"),
+            "valid_until_mono_ms": valid_until,
+        },
+    )
+    if payload is None:
+        log.info("guidance event dropped stale/duplicate event=%s", data.get("event_id"))
+    else:
+        log.info("guidance event queued event=%s priority=%s chars=%d",
+                 data.get("event_id"), data.get("priority"), len(text))
+
+
+def on_output_cancel(event: dict):
+    data = event.get("data") or {}
+    scope = data.get("scope")
+    target = data.get("target_event_id")
+    if scope == "guidance_event" and target:
+        result = OUTPUT.drop_guidance(target)
+        log.info("main control cancel guidance event=%s removed=%s stopped=%s",
+                 target, result["removed"], result["stopped_current"])
+    elif scope in ("ordinary_turn", "ordinary_session"):
+        OUTPUT.cancel(min_priority=PRIORITY_ANSWER, source="main_control")
+        log.info("main control cancel ordinary scope=%s", scope)
+
+
+def on_main_control_state(state: str, detail: str):
+    if state in ("invalidated", "disconnected"):
+        dropped = OUTPUT.drop_guidance()
+        log.warning("main control state=%s detail=%s dropped_guidance=%s",
+                    state, detail, dropped["removed"])
+
+
 if __name__ == "__main__":
     log.info(
-        "start vlm=%s auth=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s voice=%s guide=%s sink=%s data=%s log=%s",
+        "start vlm=%s auth=%s budget=%.1fGB frame_max_age=%.0fs snapshot=%s voice=%s image=%s sink=%s data=%s log=%s",
         VLM_URL, "key" if VLM_API_KEY else "none",
         MEM_BUDGET_GB, FRAME_MAX_AGE, DEBUG_SNAPSHOT,
-        VOICE_SOURCE, GUIDE_SOURCE, OUTPUT_SINK, DATA_DIR, LOG_FILE,
+        VOICE_SOURCE, IMAGE_SOURCE, OUTPUT_SINK, DATA_DIR, LOG_FILE,
     )
     atexit.register(lambda: log.info("web exit"))
     atexit.register(stop_device_services)
@@ -2631,6 +2862,10 @@ if __name__ == "__main__":
     if not piper_error():
         threading.Thread(target=prewarm_tts, daemon=True).start()
     start_device_services()
+    if MAIN_CONTROL.start_events(on_guidance_event, on_output_cancel, on_main_control_state):
+        log.info("main control events enabled url=%s", MAIN_CONTROL.url)
+    else:
+        log.info("main control not configured; chat-only mode")
     time.sleep(1)
     host = os.environ.get("WEB_HOST", "127.0.0.1")
     port = int(os.environ.get("WEB_PORT", "8090"))

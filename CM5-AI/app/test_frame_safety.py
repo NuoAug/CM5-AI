@@ -46,42 +46,27 @@ class FrameIdentityTests(unittest.TestCase):
 
 
 class SafetyGuardTests(unittest.TestCase):
-    def status(self, state, reason):
-        return {
-            "running": True,
-            "decision": {"state": state, "reason": reason},
-        }
-
-    def test_stairs_blocks_safe_claim(self):
-        with mock.patch.object(server.GUIDE, "status", return_value=self.status("stop", "stairs")):
-            got = server.guard_vision_answer("scene", "正前方没有明显危险或异常。")
-        self.assertIn("引导已提示前方危险", got)
+    def test_safe_claim_always_blocked(self):
+        got = server.guard_vision_answer("scene", "正前方没有明显危险或异常。")
+        self.assertIn("要由主控判断", got)
         self.assertNotIn("没有明显危险", got)
 
-    def test_road_blocks_can_pass_claim(self):
-        with mock.patch.object(server.GUIDE, "status", return_value=self.status("stop", "road")):
-            got = server.guard_vision_answer("detail", "前方可以通行，没有障碍。")
-        self.assertIn("引导已提示前方危险", got)
+    def test_can_pass_claim_blocked(self):
+        got = server.guard_vision_answer("detail", "前方可以通行，没有障碍。")
+        self.assertIn("要由主控判断", got)
 
     def test_non_safety_answer_kept(self):
-        with mock.patch.object(server.GUIDE, "status", return_value=self.status("stop", "stairs")):
-            got = server.guard_vision_answer("scene", "前方近处是台阶。")
+        got = server.guard_vision_answer("scene", "前方近处是台阶。")
         self.assertEqual(got, "前方近处是台阶。")
 
     def test_read_text_not_affected(self):
-        with mock.patch.object(server.GUIDE, "status", return_value=self.status("stop", "stairs")):
-            got = server.guard_vision_answer("read_text", "安全出口 EXIT")
+        got = server.guard_vision_answer("read_text", "安全出口 EXIT")
         self.assertEqual(got, "安全出口 EXIT")
 
-    def test_guide_not_running_kept(self):
-        with mock.patch.object(server.GUIDE, "status", return_value={"running": False, "decision": {}}):
-            got = server.guard_vision_answer("scene", "没有明显障碍。")
-        self.assertEqual(got, "没有明显障碍。")
-
-    def test_stale_blocks_safe_claim(self):
-        with mock.patch.object(server.GUIDE, "status", return_value=self.status("unavailable", "stale")):
-            got = server.guard_vision_answer("scene", "画面很安全，可以走。")
-        self.assertIn("不能确认安全", got)
+    def test_listed_obstacle_overrides_no_obstacle_claim(self):
+        got = server.guard_vision_answer("scene", "画面里有一把椅子，没看到明显障碍。")
+        self.assertIn("画面里有障碍物", got)
+        self.assertNotIn("没看到明显障碍", got)
 
 
 class VlmTimingTests(unittest.TestCase):

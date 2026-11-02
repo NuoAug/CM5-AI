@@ -98,7 +98,7 @@ def write_manifest(out: Path, run_id: str, data: dict, samples: Path) -> None:
         "manual_confirmations": {
             "speaker_audible_human": False,
             "human_wake_word_accuracy": False,
-            "guide_obstacle_scenarios": False,
+            "main_control_joint_test": False,
             "note": "需要现场人工确认；自动结果不能替代听辨与真人唤醒测试",
         },
         "notes": [
@@ -389,8 +389,7 @@ def api_checks(samples_dir: Path) -> dict:
     img_b64 = "data:image/jpeg;base64," + base64.b64encode(still.read_bytes()).decode("ascii") if still.exists() else ""
     if img_b64:
         out["ocr"] = http_json("POST", "/api/ocr", {"image": img_b64}, timeout=60)
-        out["tts"] = http_json("POST", "/api/tts", {"text": "前方畅通，可以直行。", "engine": "piper"}, timeout=60)
-        out["guide_single"] = http_json("POST", "/api/guide", {"image": img_b64, "frame_id": "accept-guide"}, timeout=60)
+        out["tts"] = http_json("POST", "/api/tts", {"text": "主控接口测试播报。", "engine": "piper"}, timeout=60)
         out["talk"] = http_json("POST", "/api/talk", {
             "task": "scene", "image": img_b64, "frame_id": "accept-talk", "request_id": "accept-talk",
         }, timeout=180)
@@ -406,37 +405,21 @@ def api_checks(samples_dir: Path) -> dict:
     return out
 
 
-def guide_device_check() -> dict:
-    start = http_json("POST", "/api/guide/start", {"source": "device"}, timeout=30)
-    if start["status"] != 200:
-        return {"ok": False, "start": start}
-    snaps = []
-    t0 = time.time()
-    while time.time() - t0 < 8:
-        st = http_json("GET", "/api/guide/status", timeout=15)
-        body = st.get("body") or {}
-        snaps.append({
-            "t": round(time.time() - t0, 2),
-            "frame_age_ms": body.get("frame_age_ms"),
-            "frame_id": body.get("frame_id"),
-            "frame_source": body.get("frame_source"),
-            "state": (body.get("decision") or {}).get("state"),
-            "reason": (body.get("decision") or {}).get("reason"),
-            "inference_ms": (body.get("decision") or {}).get("inference_ms"),
-            "processed": (body.get("stats") or {}).get("processed"),
-            "dropped": (body.get("stats") or {}).get("dropped"),
-        })
-        time.sleep(1.0)
-    stop = http_json("POST", "/api/guide/stop", {"reason": "accept"}, timeout=20)
-    ages = [s["frame_age_ms"] for s in snaps if isinstance(s["frame_age_ms"], int)]
-    infers = [s["inference_ms"] for s in snaps if isinstance(s["inference_ms"], int)]
+def main_control_check() -> dict:
+    """只验证适配器连通与场景查询；替身/未配置不算真实主控联调通过。"""
+    status = http_json("GET", "/api/main-control/status", timeout=10)
+    body = status.get("body") or {}
+    info = body.get("status") or {}
+    scene = http_json("GET", "/api/main-control/scene", timeout=10)
     return {
-        "ok": bool(snaps) and all(s.get("frame_source") == "device" for s in snaps if s.get("frame_id")),
-        "start": start,
-        "snapshots": snaps,
-        "frame_age_p95_ms": pct(ages, 0.95),
-        "inference_p50_ms": pct(infers, 0.5),
-        "stop": stop,
+        "ok": bool(info.get("connected")) and not info.get("fixture_allowed"),
+        "configured": bool(info.get("configured")),
+        "connected": bool(info.get("connected")),
+        "master_instance_id": info.get("master_instance_id"),
+        "clock_id": info.get("clock_id"),
+        "evidence_mode": info.get("evidence_mode"),
+        "scene": scene,
+        "note": "未配置或仅替身连接时不得当作真实主控联调通过",
     }
 
 
@@ -485,7 +468,7 @@ def main() -> int:
 
     if args.section in ("api", "all"):
         data["sections"]["api"] = api_checks(samples)
-        data["sections"]["guide_device"] = guide_device_check()
+        data["sections"]["main_control"] = main_control_check()
 
     data["elapsed_ms"] = int((time.perf_counter() - t_all) * 1000)
     data["finished_at"] = now_iso()
@@ -514,7 +497,7 @@ def main() -> int:
         "kws_synth_hits": data["sections"].get("kws", {}).get("hits"),
         "asr_synth_text": data["sections"].get("asr", {}).get("text"),
         "api_status": (data["sections"].get("api", {}).get("health") or {}).get("status"),
-        "guide_device": data["sections"].get("guide_device", {}).get("ok"),
+        "main_control": data["sections"].get("main_control", {}).get("ok"),
         "out": str(out),
     }, ensure_ascii=False, indent=2))
     return 0

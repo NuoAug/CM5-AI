@@ -2,6 +2,8 @@
 """设备端常开语音：arecord → KWS → VAD 切句 → 本地 /api/voice。
 
 浏览器仍保留为调试界面；真机语音不经过浏览器麦克风。
+正式模式取图由服务端通过主控 FrameProvider 完成；只有显式
+IMAGE_SOURCE=standalone-device-test 时本机相机才随语音抓图。
 半双工：播报期间暂停采集，因此不支持播报中可靠打断。
 """
 
@@ -39,8 +41,10 @@ class DeviceVoice:
         capture: Optional[AlsaCapture] = None,
         url: str = VOICE_URL,
         session_id: str = "device",
+        capture_images: bool = True,
     ):
         self.camera = camera
+        self.capture_images = capture_images
         self.capture = capture or AlsaCapture()
         self.url = url
         self.session_id = session_id
@@ -116,7 +120,7 @@ class DeviceVoice:
         self._last_command_at = time.monotonic()
         body = {"audio": "data:audio/wav;base64," + base64.b64encode(encode_wav(samples)).decode("ascii"),
                 "session_id": self.session_id, "wake_detected": True}
-        if self.camera is not None and self.camera.status().get("running"):
+        if self.capture_images and self.camera is not None and self.camera.status().get("running"):
             still = self.camera.capture_still()
             if still is not None:
                 self._seq += 1

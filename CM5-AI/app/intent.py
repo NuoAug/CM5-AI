@@ -66,9 +66,12 @@ GUIDE_STOP = re.compile(
     r"停止带路|别带路"
 )
 GUIDE_START = re.compile(
-    r"开始引导|开始导航|打开引导|开启引导|打开导航|继续引导|继续导航|帮我导航|给我导航|"
+    r"开始引导|开始导航|打开引导|开启引导|打开导航|帮我导航|给我导航|"
     r"带我走|开始带路|开始引路|开始走路引导"
 )
+GUIDE_PAUSE = re.compile(r"暂停(?:一下)?(?:引导|导航|带路)")
+GUIDE_RESUME = re.compile(r"(?:恢复|继续)(?:引导|导航|带路)")
+GUIDE_REPEAT = re.compile(r"(?:重复|再说)(?:一下)?(?:刚才|上一句|上一条)?(?:的)?(?:引导|导航|提示)")
 CAMERA_OFF = re.compile(
     r"(?:不要|别|不用)(?:再)?(?:打开|开启|用)?(?:摄像头|相机|镜头)"
     r"|(?:关闭|关掉|停用)(?:摄像头|相机|镜头)|(?:摄像头|相机)(?:关掉|关闭|停用)"
@@ -207,6 +210,7 @@ def parse(
     *,
     has_context: bool = False,
     guide_active: bool = False,
+    guide_paused: bool = False,
     speech_active: bool = False,
     session_id: str = "",
 ) -> Task:
@@ -221,7 +225,7 @@ def parse(
     if not WAKE_PATTERN.search(normalized):
         pass  # 调用方已处理唤醒；这里保留原文用于日志
 
-    # 否定“停止”优先：不要停止引导 = 不执行停止
+    # 否定“停止/暂停/恢复”优先：不要暂停引导 = 不执行暂停
     if NEGATED_STOP.search(cmd) and not re.search(r"不要(引导|导航)", cmd):
         return _task(
             "ack",
@@ -229,6 +233,8 @@ def parse(
             session_id=session_id,
             note="否定停止",
         )
+    if re.search(r"(?:不要|别|不用)(?:暂停|恢复)", cmd):
+        return _task("ack", confidence=0.9, session_id=session_id, note="否定暂停/恢复")
 
     # 明确停止播报
     if SPEECH_STOP.search(cmd):
@@ -240,6 +246,12 @@ def parse(
             actions=["cancel_speech"],
             deadline_s=5.0,
         )
+
+    # 否定开始/结束：临时 ASR 出现“开始”，最终是“不要开始”时不得提交控制
+    if re.search(r"(?:不要|别|不用)(?:开始|打开|开启)(?:引导|导航|带路)", cmd):
+        return _task("ack", confidence=0.95, session_id=session_id, note="否定开始引导")
+    if re.search(r"(?:不是|没)(?:让|要)?你?(?:结束|停止|关闭)(?:引导|导航)", cmd):
+        return _task("ack", confidence=0.95, session_id=session_id, note="否定结束引导")
 
     # 明确关闭引导/导航
     if GUIDE_STOP.search(cmd):
@@ -261,6 +273,24 @@ def parse(
             session_id=session_id,
             actions=["start_guide"],
             deadline_s=5.0,
+        )
+
+    if GUIDE_PAUSE.search(cmd):
+        return _task(
+            "guide_pause", priority=2, confidence=0.97, session_id=session_id,
+            actions=["pause_guide"], deadline_s=5.0,
+        )
+
+    if GUIDE_RESUME.search(cmd):
+        return _task(
+            "guide_resume", priority=2, confidence=0.97, session_id=session_id,
+            actions=["resume_guide"], deadline_s=5.0,
+        )
+
+    if GUIDE_REPEAT.search(cmd):
+        return _task(
+            "guide_repeat", priority=2, confidence=0.95, session_id=session_id,
+            actions=["repeat_guide"], deadline_s=5.0,
         )
 
     # 换话题/只聊天优先于“不看东西”这类关闭摄像头词
@@ -297,6 +327,12 @@ def parse(
                 "speech_stop", priority=2, confidence=0.75, session_id=session_id,
                 actions=["cancel_speech"], deadline_s=5.0,
                 note="按当前状态解释为停止播报",
+            )
+        if guide_paused and not speech_active:
+            return _task(
+                "clarify", priority=2, confidence=0.4, session_id=session_id,
+                clarify="引导已经暂停，你是要结束引导，还是恢复引导？",
+                note="暂停状态不能把“停一下”再解释成暂停",
             )
         if guide_active and speech_active:
             return _task(

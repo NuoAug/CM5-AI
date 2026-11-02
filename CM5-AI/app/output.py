@@ -88,7 +88,9 @@ class OutputBus:
         self._sink_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=32)
         self._sink_thread: Optional[threading.Thread] = None
         self._sink_stop = threading.Event()
+        self._sink_current: Optional[dict] = None
         self._history: deque = deque(maxlen=128)
+        self._status_hook = None
 
     def new_utterance_id(self, prefix: str = "u") -> str:
         return f"{prefix}-{uuid.uuid4().hex[:12]}"
@@ -110,6 +112,20 @@ class OutputBus:
         with self._lock:
             self._subs.discard(q)
             self._stats["subscribers"] = len(self._subs)
+
+    def set_status_hook(self, hook) -> None:
+        """播放状态回调；只报告真实观察到的阶段，不把浏览器排队说成已出声。"""
+        self._status_hook = hook
+
+    def _emit_status(self, payload: Optional[dict], state: str,
+                     basis: Optional[str] = None, reason: str = "") -> None:
+        hook = self._status_hook
+        if hook is None or not payload:
+            return
+        try:
+            hook(payload, state, basis, reason)
+        except Exception:  # noqa: BLE001
+            pass
 
     def attach_sink(self, sink) -> None:
         """设备端 ALSA sink；浏览器调试时不挂载。"""
@@ -144,6 +160,8 @@ class OutputBus:
             if sink is None:
                 continue
             cancel = threading.Event()
+            with self._lock:
+                self._sink_current = payload
             try:
                 sink.speak(payload, cancel)
                 with self._lock:
@@ -151,7 +169,10 @@ class OutputBus:
             except Exception:  # noqa: BLE001
                 with self._lock:
                     self._stats["sink_failed"] = self._stats.get("sink_failed", 0) + 1
-                continue
+                self._emit_status(payload, "failed", reason="sink_error")
+            finally:
+                with self._lock:
+                    self._sink_current = None
 
     def _drain_sink_queue(self, min_priority: int) -> None:
         kept = []
@@ -293,6 +314,7 @@ class OutputBus:
                     self._sink_queue.put_nowait((int(priority), event.id, payload))
                 except queue.Full:
                     self._stats["dropped"] += 1
+        self._emit_status(payload, "queued")
         return payload
 
     def push(
@@ -358,10 +380,69 @@ class OutputBus:
             self._drain_sink_queue(min_priority)
         return payload
 
+    def drop_guidance(self, event_id: Optional[str] = None) -> dict:
+        """只撤销主控引导事件，保留危险事件与普通回答；主控重启/撤销时使用。"""
+        removed = 0
+        current_hit = False
+
+        def match(item: dict) -> bool:
+            if item.get("priority") != PRIORITY_GUIDE:
+                return False
+            if event_id is None:
+                return True
+            return (item.get("meta") or {}).get("event_id") == event_id
+
+        with self._lock:
+            for q in list(self._subs):
+                kept = []
+                while True:
+                    try:
+                        item = q.get_nowait()
+                    except queue.Empty:
+                        break
+                    if match(item):
+                        removed += 1
+                    else:
+                        kept.append(item)
+                for item in kept:
+                    try:
+                        q.put_nowait(item)
+                    except queue.Full:
+                        self._stats["dropped"] += 1
+            kept = []
+            while True:
+                try:
+                    item = self._sink_queue.get_nowait()
+                except queue.Empty:
+                    break
+                payload = item[2]
+                if match(payload):
+                    removed += 1
+                else:
+                    kept.append(item)
+            for item in kept:
+                try:
+                    self._sink_queue.put_nowait(item)
+                except queue.Full:
+                    self._stats["dropped"] += 1
+            self._history = deque(
+                (item for item in self._history if not match(item)), maxlen=128
+            )
+            current = self._sink_current
+            current_hit = bool(current and match(current))
+            sink = self._sink
+        if current_hit and sink is not None:
+            try:
+                sink.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        return {"removed": removed, "stopped_current": current_hit, "event_id": event_id}
+
     def stats(self) -> dict:
         with self._lock:
             data = dict(self._stats)
             data["queue_limit"] = MAX_QUEUE
+            data["pending"] = self._sink_queue.qsize()
             data["epoch"] = self._epoch
             last = data.get("last_event")
             if last:

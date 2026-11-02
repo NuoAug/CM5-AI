@@ -28,6 +28,7 @@ class GoldenIntentTests(unittest.TestCase):
                 case["text"],
                 has_context=case.get("has_context", False),
                 guide_active=case.get("guide_active", False),
+                guide_paused=case.get("guide_paused", False),
                 speech_active=case.get("speech_active", False),
             )
             expect = case["expect"]
@@ -64,6 +65,25 @@ class ControlIntentTests(unittest.TestCase):
         self.assertEqual(task.intent, "guide_stop")
         self.assertEqual(task.actions, ["stop_guide"])
         self.assertNotIn("cancel_speech", task.actions)
+
+    def test_pause_resume_are_distinct(self):
+        pause = intent.parse("暂停引导", guide_active=True)
+        resume = intent.parse("恢复引导", guide_paused=True)
+        repeat = intent.parse("重复引导", guide_active=True)
+        self.assertEqual(pause.intent, "guide_pause")
+        self.assertEqual(resume.intent, "guide_resume")
+        self.assertEqual(repeat.intent, "guide_repeat")
+
+    def test_negated_start_and_end_are_ack(self):
+        for text in ("不要开始引导", "别开始导航", "不是让你结束引导", "没让你关闭导航"):
+            task = intent.parse(text, guide_active=True)
+            self.assertEqual(task.intent, "ack", text)
+
+    def test_paused_stop_is_clarify(self):
+        task = intent.parse("停一下", guide_paused=True)
+        self.assertEqual(task.intent, "clarify")
+        self.assertIn("已经暂停", task.clarify)
+        self.assertNotIn("暂停", task.actions)
 
     def test_ambiguous_stop_with_guide_only(self):
         task = intent.parse("停一下", guide_active=True, speech_active=False)

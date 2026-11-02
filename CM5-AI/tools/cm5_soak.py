@@ -79,7 +79,7 @@ def main() -> int:
     parser.add_argument("--out-dir", default="")
     parser.add_argument("--duration", type=int, default=600, help="秒；8 小时用 28800")
     parser.add_argument("--interval", type=float, default=5.0)
-    parser.add_argument("--scenario", choices=["idle", "guide", "mixed"], default="idle")
+    parser.add_argument("--scenario", choices=["idle", "mixed"], default="idle")
     args = parser.parse_args()
 
     run_id = args.run_id or time.strftime("%Y%m%dT%H%M%S%z") + "_soak"
@@ -95,15 +95,13 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
 
-    if args.scenario in ("guide", "mixed"):
-        api("/api/guide/start", "POST", {"source": "device"}, timeout=30)
-
     fields = [
         "iso_time", "mono_ms", "mem_total_mb", "mem_avail_mb", "swap_used_mb",
         "llama_rss_kb", "llama_pss_kb", "app_rss_kb", "app_pss_kb",
         "temp_c", "throttled", "arm_mhz", "load1",
-        "app_cpu_pct", "llama_cpu_pct", "guide_processed", "guide_dropped",
-        "guide_last_infer_ms", "health_ok", "status_ms",
+        "app_cpu_pct", "llama_cpu_pct", "mc_connected", "mc_scene_seq",
+        "mc_scene_stale", "output_pushed", "output_cancelled", "output_pending",
+        "health_ok", "status_ms",
     ]
     csv_path = out / "resource.csv"
     t_start = time.monotonic()
@@ -138,8 +136,10 @@ def main() -> int:
             status_ms = int((time.monotonic() - t_status) * 1000)
             if code_h not in (200, 503):
                 errors += 1
-            _, gst = api("/api/guide/status", timeout=8)
-            stats = gst.get("stats") or {}
+            _, status = api("/api/status", timeout=10)
+            mc = (status or {}).get("main_control") or {}
+            mc_scene = mc.get("scene") or {}
+            out_stats = (status or {}).get("output") or {}
             row = {
                 "iso_time": iso,
                 "mono_ms": int((time.monotonic() - t_start) * 1000),
@@ -156,9 +156,12 @@ def main() -> int:
                 "load1": round(os.getloadavg()[0], 2) if hasattr(os, "getloadavg") else None,
                 "app_cpu_pct": round(app_p.cpu_percent(interval=None), 1) if app_p else 0,
                 "llama_cpu_pct": round(llama_p.cpu_percent(interval=None), 1) if llama_p else 0,
-                "guide_processed": stats.get("processed"),
-                "guide_dropped": stats.get("dropped"),
-                "guide_last_infer_ms": stats.get("last_inference_ms"),
+                "mc_connected": bool(mc.get("connected")),
+                "mc_scene_seq": mc_scene.get("sequence"),
+                "mc_scene_stale": bool(mc_scene.get("stale")),
+                "output_pushed": out_stats.get("pushed"),
+                "output_cancelled": out_stats.get("cancelled"),
+                "output_pending": out_stats.get("pending"),
                 "health_ok": health.get("ok") if isinstance(health, dict) else None,
                 "status_ms": status_ms,
             }
@@ -167,23 +170,19 @@ def main() -> int:
             samples.append(row)
 
             if args.scenario == "mixed":
-                action = random.choice(["tts", "guide_start", "guide_stop", "status"])
+                action = random.choice(["tts", "scene", "status"])
                 if action == "tts":
-                    api("/api/tts", "POST", {"text": "前方畅通，可以直行。"}, timeout=30)
-                elif action == "guide_start":
-                    api("/api/guide/start", "POST", {"source": "device"}, timeout=30)
-                elif action == "guide_stop":
-                    api("/api/guide/stop", "POST", {"reason": "soak"}, timeout=20)
+                    api("/api/tts", "POST", {"text": "这是测试播报。"}, timeout=30)
+                elif action == "scene":
+                    api("/api/main-control/scene", "GET", timeout=10)
 
             with (out / "metrics.jsonl").open("a", encoding="utf-8") as mf:
                 mf.write(json.dumps({
                     "t": row["mono_ms"], "iso": iso, "status": row,
-                    "health": health, "guide": {
-                        "running": gst.get("running"), "mode": gst.get("mode"),
-                        "frame_age_ms": gst.get("frame_age_ms"),
-                        "state": (gst.get("decision") or {}).get("state"),
-                        "reason": (gst.get("decision") or {}).get("reason"),
-                        "stats": stats,
+                    "health": health, "main_control": {
+                        "connected": mc.get("connected"),
+                        "scene": mc_scene,
+                        "last_error": mc.get("last_error"),
                     },
                 }, ensure_ascii=False) + "\n")
 
@@ -192,9 +191,6 @@ def main() -> int:
             sleep_s = next_tick - time.monotonic()
             if sleep_s > 0:
                 time.sleep(sleep_s)
-
-    if args.scenario in ("guide", "mixed"):
-        api("/api/guide/stop", "POST", {"reason": "soak_done"}, timeout=20)
 
     def _vals(key):
         return [s[key] for s in samples if isinstance(s.get(key), (int, float))]
@@ -224,12 +220,10 @@ def main() -> int:
         "health_ok_pct": round(100 * sum(1 for s in samples if s.get("health_ok")) / len(samples), 1) if samples else None,
         "status_ms_p50": _pct(_vals("status_ms"), 0.5),
         "status_ms_p95": _pct(_vals("status_ms"), 0.95),
-        "guide_infer_p50_ms": _pct(_vals("guide_last_infer_ms"), 0.5),
-        "guide_infer_p95_ms": _pct(_vals("guide_last_infer_ms"), 0.95),
-        "guide_infer_max_ms": max(_vals("guide_last_infer_ms")) if samples else None,
-        "guide_processed_delta": (max(_vals("guide_processed")) - min(_vals("guide_processed"))) if samples else None,
-        "guide_dropped_delta": (max(_vals("guide_dropped")) - min(_vals("guide_dropped"))) if samples else None,
-        "measuring_overhead_note": "采样本身每轮约 10–60 ms（含 /api/health 与 /api/guide/status），已记录 status_ms",
+        "main_control_connected_pct": round(100 * sum(1 for s in samples if s.get("mc_connected")) / len(samples), 1) if samples else None,
+        "output_pushed_delta": (max(_vals("output_pushed")) - min(_vals("output_pushed"))) if samples else None,
+        "output_cancelled_delta": (max(_vals("output_cancelled")) - min(_vals("output_cancelled"))) if samples else None,
+        "measuring_overhead_note": "采样本身每轮读取 /api/health 与 /api/status，已记录 status_ms",
     }
     (out / "results" / "soak.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

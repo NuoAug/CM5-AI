@@ -2,7 +2,7 @@
 
 面向视障辅助场景的离线多模态服务，模型全部本地推理，不联网。Windows 本机用于开发与调优，CM5 实机用于部署与验收。
 
-当前代码版本：v1.3.1（CM5 实机部署与稳定性修复：Qwen3-VL 替代 MiniCPM、3 线程绑核、取消立即断流、追问 256、复读/截断/障碍守卫、ASR 同音别名、引导模型关闭卸载）。第一阶段改造说明见 [第一阶段改造说明](docs/第一阶段-视障辅助系统改造说明.md)，第二阶段实测与候选对比见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)，CM5 安装与运维见 [CM5 部署与运维](docs/CM5-部署与运维.md)，CM5 实机数据见 [CM5 实机测试报告](docs/CM5-实机测试报告-2026-11-02.md)，性能报告模板见 [CM5 性能实测报告模板](docs/CM5-性能实测报告模板.md)。
+当前代码版本：v1.4.0（M0：移除独立 SegFormer 引导与本地通行判断，新增 interaction.v0.1 主控适配器与明确标记的主控替身）。本机模型与工具清单见 [模型与工具发布清单](docs/模型与工具发布清单.md)，M0 改动与验证见 [M0 职责清理与主控适配](docs/M0-职责清理与主控适配-2026-11-02.md)。早期阶段说明、CM5 实机报告与性能模板保留为历史证据，不再代表当前默认路径。
 
 ## 目标硬件
 
@@ -37,13 +37,11 @@
 
 关键结论（均为 CM5 实测，不是 Windows）：
 
-- **模型**：MiniCPM-V 4.7 视觉编码固定约 118 s/帧，256/320/384/512 都一样，不可实时；CM5 默认改为 Qwen3-VL-2B Q4_K_M，prefill 3.8 s（256）～9.0 s（512）。
-- **输入**：`VLM_IMAGE_MAX_SIDE=256`；512 比 256 慢约 2.4 倍。
-- **CPU**：VLM `-t4` 会抢满四核，引导出现 `model_stuck`；改为 `-t3` + `taskset -c 0-2`，引导 P95 449 ms、无看门狗；代价是 VLM 慢约 20–30%。
-- **首声**：引导状态/控制快路径 0.1–2.0 s；OCR 约 1.8 s；VLM 场景/找物 8–20 s，未达到 1.5 s 目标，瓶颈与阶段耗时已写入报告。
-- **内存**：PSS 口径，VLM 2.37–2.94 GB + Web 0.20–0.55 GB + TTS 0.09 GB；预算 3.6 GB；引导关闭后卸载 ONNX 会话，Web 392→238 MB。
-- **稳定性**：30 分钟连续引导已完成（数据在 `CM5-AI/test-runs/20261102T1550+0800_soak30/`）；8 小时未完成，命令见部署文档。
-- **待人工确认**：扬声器实际出声、真人唤醒、真实台阶/标签、AEC 开关。
+以上 v1.3.x 实机结论保留为历史记录。按主控 v1.1 任务，本轮已从当前交付移除设备上的 Qwen3-VL-2B 与 SegFormer 引导；本机唯一 VLM 基线为 MiniCPM-V 4.7 1B。
+- **VLM 现状**：MiniCPM-V 4.7 视觉编码约 118 s/帧（256/320/384/512 相同），不能实时；M3 前只作质量/兼容基线，不以它宣称实时视觉能力。
+- **行走判断**：全部改为主控 `scene.query` 与 `control.intent`，交互侧不再维护第二套通行算法。
+- **取图**：正式模式只走主控 FrameProvider；独立设备测试必须显式 `IMAGE_SOURCE=standalone-device-test`，并单独记录，不算主控联调通过。
+- **待人工确认**：扬声器实际出声、真人唤醒、真实标签、AEC 开关。
 
 ## 目录结构
 
@@ -66,9 +64,8 @@ AI-Deployment/
    │  ├─ stream_text.py    朗读规范化 + 流式语义分段
    │  ├─ tts_worker.py     常驻 Piper worker
    │  ├─ trace.py          请求时间线与 P50/P95/P99
-   │  ├─ guide.py          分割 + 质量 + 连通通道 + 状态机
-   │  ├─ guide_service.py  服务端持续引导循环与看门狗
-   │  ├─ output.py         统一输出仲裁（危险抢占/去重/取消）
+   │  ├─ main_control.py   interaction.v0.1 适配器（握手/取图/场景/控制/事件/播放反馈）
+   │  ├─ output.py         统一输出仲裁（危险抢占/去重/取消/引导事件撤销）
    │  ├─ intent.py         规则意图与结构化任务
    │  ├─ kws.py            sherpa-onnx KWS + 环形缓冲
    │  ├─ device_io.py      Picamera2 / ALSA 适配
@@ -81,9 +78,9 @@ AI-Deployment/
    │  ├─ test_*.py         单元/接口测试
    │  └─ requirements.txt
    ├─ tools/              CM5 环境快照、外设验收、并发/稳定性、VLM/SSE 探测、回放与校验
-   ├─ testsets/           意图金标准与引导回归案例
+   ├─ testsets/           意图金标准与合同回归样例
    ├─ deploy/             用户级/ARM64 安装脚本、systemd、健康检查、固定依赖
-   ├─ models/             模型文件（VLM / OCR / ASR / TTS / 引导 / KWS）
+   ├─ models/             模型文件（VLM / OCR / ASR / TTS / KWS）
    ├─ runtime/            llama.cpp、Piper、Python、MinGW
    ├─ samples/            测试图（猫、中文标牌、场景与盲道示例）
    ├─ test-runs/          CM5 实机原始数据（不入库）
@@ -97,13 +94,13 @@ AI-Deployment/
 
 | 用途 | 模型 | 格式 | 说明 |
 |---|---|---|---|
-| 场景 / 空间 / VQA（Windows 开发） | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091 |
-| 场景 / 空间 / VQA（CM5 默认） | Qwen3-VL-2B-Instruct | Q4_K_M + mmproj-F16 | CM5 实测 MiniCPM 视觉编码 118 s/帧，改用 Qwen；见实机报告 |
+| 场景 / VQA / 聊天（唯一 VLM 基线） | MiniCPM-V 4.7 1B | Q4_K_M + mmproj f16 | llama.cpp 运行，端口 8091；CM5 视觉编码约 118 s/帧，不能实时 |
 | 中文 OCR | RapidOCR + PP-OCRv6_small | ONNX | det / rec / cls 三个模型 |
-| 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎；常驻 worker 一次加载，约 63 MB |
-| 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置 60 秒释放 |
+| 中文 TTS | Piper 中文 zh_CN-huayan-medium | ONNX VITS | 默认播报引擎；常驻 worker 一次加载，约 63 MB；音色许可未闭合 |
+| 语音识别 | Paraformer-zh-small | int8 | 按需加载，闲置释放；不是原生流式 |
 | 语音唤醒 | sherpa-onnx-kws-zipformer-wenetspeech-3.3M | ONNX | 中文拼音 KWS，Apache-2.0，关键词见 `app/config/keywords.txt` |
-| 无盲道引导 | SegFormer-B0 ADE20K | ONNX | 384×288 输入，输出动态类别图；NVIDIA 非商业许可 |
+
+行走判断、测距、空间检查和引导不再由本仓库提供。独立 SegFormer 引导、Qwen3-VL 设备残留与相关工具已从当前交付移除，历史代码由 `archive/pre-interaction-v11-20261102` 分支保留。SmolVLM-256M 仅作 M3 对照，不进入发布清单。
 
 模型文件不随仓库分发，需自行下载到 `models/` 对应目录。Piper 中文音色的 MODEL_CARD 标注 `License: Unknown`，商用或再分发前需自行确认授权；Piper 二进制本身的许可证也需复核。
 
@@ -125,33 +122,31 @@ x iǎo b īng @小冰
 
 `sherpa-onnx-kws` 阈值 `KWS_SCORE=2.0`、`KWS_THRESHOLD=0.10` 只在官方真人测试音频上验证过；「小冰小冰」必须用真人录音重新标定，不能用 TTS 合成音频冒充唤醒样本。
 
-## 两条处理链（v1.3.0）
+## 处理链（v1.4.0）
 
 ```text
-持续引导：CSI 摄像头 / 浏览器调试帧
-  → 最新帧槽 → 质量检查 → 分割置信度/熵
-  → 近处种子 + 连通通道 + 分层瓶颈 + 前方物体
-  → 状态机 → 输出仲裁 → 短语音 / SSE / ALSA
+主控事件：主控 guidance.event / output.cancel
+  → MainControlAdapter 校验版本、来源、时钟、event_id 与有效期
+  → 输出仲裁（紧急 priority 0，导航 priority 1）→ 唯一播放器
+  → playback.status 回报 queued/started/completed/cancelled/failed
 
 语音交互：麦克风 → KWS「小冰小冰」→ VAD → ASR
   → 规则意图（控制动作 / 视觉任务 / 聊天 / 未知）
-  → 引导快路径 / OCR 快路径 / VLM 慢路径
-  → 增量文本 → 语义片段 → 安全守卫
+  → control.intent / scene.query / FrameProvider 取图
+  → OCR 快路径 / VLM 慢路径 → 语义片段 → 事实守卫
   → SSE 分段 → 常驻 Piper → 连续音频播放
 ```
 
-- 引导感知在服务端独立运行，不依赖浏览器页面持续轮询；浏览器只送帧和显示。
-- 普通问答不能阻塞引导；引导运行时 heavy 并发上限降到 1。
-- 危险停止与感知失效 priority 0，可抢占普通播报。
-- 同一结构化结果生成文字与语音，避免两者冲突。
-- 所有帧/结果队列有界；过期帧、晚到结果、取消的旧音频会被丢弃。
-- 同一回答的多个片段追加播放，不重新启动整段；新回答/危险才抢占。
+- 行走控制只提交 `start/pause/resume/end/repeat_guidance`，是否执行由主控决定；“收到请求”不等于“已完成”。
+- 主控未配置或不可用时，行走查询与正式取图明确返回不可用，不启动本地旧引导补位。
+- 同一结构化结果生成文字与语音，避免两者冲突；VLM/OCR 不能生成通行授权或虚构距离。
+- 所有队列有界；过期帧、晚到结果、取消的旧音频、主控重启前的旧引导会被丢弃。
+- 同一回答的多个片段追加播放，不重新启动整段；新回答/紧急事件才抢占。
 - `done` 不再重播全文；SSE 重连按 `Last-Event-ID` 回放并用 `utterance_id|segment_id` 去重。
-- 引导状态查询与 OCR 文本不经过 VLM；视觉问答仍是 prefill 主导的慢路径。
 
-## 第二阶段实测摘要
+## 第二阶段实测摘要（历史）
 
-以下为 Windows AMD64 开发机数据，不是 CM5 实测；详细方法与原始文件见 [第二阶段说明](docs/第二阶段-语音与视觉优化说明.md)。
+以下为 Windows AMD64 开发机在 v1.3.x 的数据，不是 CM5 实测；含已移除的引导模块，只作为历史证据保留。
 
 | 项目 | 结果 | CM5 状态 |
 |---|---|---|
@@ -207,12 +202,12 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 「免唤醒窗口」由服务端按 `session_id` 计时；只说「嗯」「对对对」这类确认词不会播报、不会延长窗口，只有真正的指令才消耗窗口。
 播报期间暂停采集，播放结束后再静默 0.5 秒；VAD 状态在播报前后清空，ASR 结果与最近一次播报文本相似度超过 0.7 时按回声丢弃并提示「已忽略播报回声」。
 输入不足 0.6 秒、平均音量过低或 ASR 返回空文本时直接判为无效语音；同一句指令 2 秒内重复出现只按确认处理。
-「停止播报」只取消当前输出队列，不会关闭引导；危险提示仍可在之后抢占播报。「停一下」会结合当前状态解释：只在引导时停引导，只在播报时停播报，两者同时进行时要求澄清。
+「停止播报」只取消普通输出队列，不会关闭主控引导，也不会永久关闭紧急入口；危险提示仍可抢占。「停一下」会结合当前状态解释：只在引导时提交结束意图，只在播报时停播报，两者同时进行时要求澄清。
 旁边的「语音试听」按钮只播一句测试语，用来确认服务端 Piper 是否真的发声。
 
 **调试工具**（二级页签）：场景识别、空间关系、图像问答、中文 OCR、语音播报，用于单独调试各模块。
 
-**无盲道引导**（试验）：打开摄像头后连续判断近处可走区域，只播报直行 / 向左一点 / 向右一点 / 停下；载入静态图时只跑一帧。详见下文「无盲道引导」。
+**主控接口**（调试页签）：显示主控连接、实例、时钟与场景状态，可发起 `scene.query` 和五种控制意图。主控未配置时明确显示“未配置”，不会启用本地旧引导；替身连接单独标记 `fixture_allowed`。
 
 「选择图片」内置 14 个示例：猫、中文标牌、楼梯、走廊、斑马线、桌面物品、电梯、超市货架，以及直行、圆点转向、过街、被占用、站内、破损 6 种盲道场景；示例图均为 AI 生成，仅用于界面与模型测试。下拉选择即载入，「清除图片」清空预览与已载入画面；摄像头按钮为开/关切换，载入示例或上传图片会自动关闭摄像头，避免取帧时仍用摄像头画面。
 
@@ -220,7 +215,7 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 
 | 接口 | 方法 | 入参 |
 |---|---|---|
-| `/api/status` | GET | 无；返回 VLM / OCR / ASR / TTS / KWS / 引导 / 输出 / 设备 / 内存 / CPU / 温度状态 |
+| `/api/status` | GET | 无；返回 VLM / OCR / ASR / TTS / KWS / 主控 / 输出 / 设备 / 内存 / CPU / 温度状态 |
 | `/api/health` | GET | 无；systemd 健康检查，不做模型加载 |
 | `/api/eyes` | POST | `task`、`image`、`item`、`context`、`question`、`frame_id`、`captured_at`、`request_id` |
 | `/api/talk` | POST | 同上；SSE 逐段返回 `segment`，最后 `done`；视觉任务流式输出 |
@@ -229,82 +224,40 @@ powershell -ExecutionPolicy Bypass -File "CM5-AI\app\start.ps1"
 | `/api/ocr` | POST | `image` |
 | `/api/tts` | POST | `text`、`engine`、`speed`、`trace_id` |
 | `/api/vlm` | POST | `mode`、`prompt`、`image`、`max_tokens` |
-| `/api/guide` | POST | 单帧调试/回放；`image`、`frame_id`；返回 raw 方向、质量、通道与计时 |
-| `/api/guide/start` | POST | `source`（`browser` / `device`）；启动服务端引导循环 |
-| `/api/guide/frame` | POST | `image`、`frame_id`、`captured_at`；只保留最新一帧 |
-| `/api/guide/status` | GET | 服务端引导状态、稳定/原始方向、指标、帧龄、P50/P95、丢弃数 |
-| `/api/guide/stop` | POST | `reason`；停止引导并撤销方向 |
+| `/api/main-control/status` | GET | 主控连接、实例、时钟、场景与最后一次错误 |
+| `/api/main-control/scene` | GET | 调用 `scene.query`；只复述主控事实与有效期 |
+| `/api/main-control/control` | POST | 调试用控制意图；正式控制只来自最终语音话语 |
+| `/api/interaction/status` | GET | interaction.v0.1 `interaction.status`；不触发模型加载 |
+| `/api/interaction/cancel` | POST | 主控 `output.cancel` 入口；返回停止/清队列/计算退出状态 |
 | `/api/metrics` | GET | 最近 trace 的原始记录、P50/P95/P99、失败数、TTS worker 状态 |
 | `/api/trace/event` | POST | 客户端补记 `play_start` / `underrun` / `tts_segment_failed` |
 | `/api/output/stream` | GET | SSE；推送 `speech` / `cancel`；支持 `Last-Event-ID` 回放 |
-| `/api/output/cancel` | POST | `min_priority`；停止普通播报，不关引导 |
-| `/api/device/status` | GET | 摄像头、ALSA、设备语音与 sink 状态 |
+| `/api/output/cancel` | POST | 浏览器调试用；停止普通播报，保留紧急输出 |
+| `/api/device/status` | GET | 摄像头、ALSA、设备语音、取图来源与 sink 状态 |
 
 `task` 取值：`scene`、`toilet`、`exit`、`item`、`text`、`date`、`detail`、`compare`、`followup`、`chat`。
 图片统一用 `data:image/jpeg;base64,` 形式。
 
-## 无盲道引导
+## 主控接口 interaction.v0.1
 
-没有盲道时，用 SegFormer-B0 判断脚下到前方这一段有没有连续可走通道，只输出：直行、向左一点、向右一点、停下、不可用。不做目的地导航，不支持过马路、上下楼梯或扶梯。
+交互侧只实现接口合同与表达，不计算通行、距离或空间结论。
 
-**服务端循环**
-- 引导感知在服务端线程运行，浏览器只送帧/显示；CM5 上由 Picamera2 直接送帧。
-- 只有 1 个最新帧槽，处理不过来时覆盖旧帧并计数，不排队积压。
-- 目标 4 fps；帧龄超过 0.6 s 返回 `unavailable/stale`，推理 2.5 s 无心跳触发 `model_stuck` 看门狗。
-- 超时立即撤销旧直行指令，不沿用最后一次成功结果。
+- 适配器：`app/main_control.py`，唯一接入口；HTTP 请求/响应 + 常驻 SSE 事件通道。
+- 配置：`MAIN_CONTROL_URL` 为空时明确显示未配置；`MAIN_CONTROL_ALLOW_FIXTURE=1` 才接受 `test_fixture` 来源，生产必须为 0。
+- 消息：`capabilities.get`、`frame.acquire`、`scene.query`、`control.intent`、`target.observation`、`guidance.event`、`output.cancel`、`playback.status`、`interaction.status`。
+- 时效：`valid_until_mono_ms` 过期即撤销；主控实例或 `clock_id` 变化时丢弃旧场景和待播引导。
+- 取图：正式模式只走 `frame.acquire`，校验 frame_id 稳定性与 asset sha256；`standalone-device-test` 只用于本轮独立实机测试，并单独记录。
+- 播放：紧急事件 priority 0，导航提示 priority 1；`playback.status` 区分 queued/started/completed/cancelled/failed，设备写入基准为 `device_write`，浏览器不能报成已出声。
+- 取消：`output.cancel` 分 `ordinary_turn` / `ordinary_session` / `guidance_event`；普通取消保留紧急入口，后台模型计算是否真正退出单独记录。
 
-**通道分析**
-- 输入 384×288；用 softmax 置信度与熵，低置信区域标记为未知，不当作可走。
-- 从画面底部 12% 的连续可走地面取种子，做 4 邻域连通；种子不可用返回 `no_seed`，不强行选左右。
-- 分近/中/远三层，在左/中/右通道计算连通占比与逐行最大连续宽度；先减边界余量，再检查瓶颈，不用平均面积。
-- 前方物体证据：在 y 0.40–0.85 统计自行车、垃圾桶、桌椅、货架、门、标牌等类别占比；中间 ≥18% 或两侧 ≥10% 时该通道不允许通过。
-- 危险优先：台阶/扶梯 ≥2%、人 ≥8%、道路 ≥15% 立即停。
-- 只有近、中通道都合格且远层仍有一定连通才直行；左右都不合格就停，不选“相对最好但仍不合格”的方向。
-- 像素宽度未标定，输出 `width_unit=pixel`、`calibrated=false`，不换算厘米。
-- 可选 RGB+ToF/双目+IMU 接口已定义；没有硬件时 `available=false`，不伪造距离或倾角。
+**主控替身**（仅协议验证）
 
-**状态机**
-- `stop`：危险、无法通行、感知失效。
-- `straight` / `left` / `right`：需要候选帧防抖。
-- `unavailable`：无画面、过期、模型卡住、质量不足、种子不可用。
-- 危险停止立即生效；保持 1.5 s，恢复需连续 4 帧且至少 0.8 s。
-- 左右切换需要 3 帧和 0.6 s 最小间隔；两侧证据接近时停下。
-- 危险提示 priority 0，绕过普通播报冷却；`speech_stop` 不会关闭引导。
+```powershell
+cd CM5-AI
+app\.venv\Scripts\python.exe tools\main_control_fixture.py --port 18091 --emit-guidance
+```
 
-**使用**
-1. 打开摄像头，或载入一张示例图。
-2. 切到「无盲道引导」，点「开始引导」。
-3. 摄像头模式由服务端持续判断；静态图只跑一帧用于验证阈值。
-4. 切走页签/关闭浏览器摄像头时，浏览器送帧模式会停止；设备摄像头模式不受浏览器页签影响。
-
-**模型文件**（不入库）
-- 下载：`https://hf-mirror.com/lquint/segformer-b0-finetuned-ade-512-512-onnx/resolve/main/onnx/model.onnx`
-- 放到 `CM5-AI/models/guide/segformer-b0-ade/model.onnx`，约 15.3 MB
-- SHA256：`9DEED8464DCA9F1A1F36B23D4F67FF1AB7D59CCFF4DB96EA247F6AB2B3C240F9`
-- 许可：导出仓库未单独声明；原模型为 NVIDIA SegFormer，采用 NVIDIA Source Code License，仅限非商业研究/评估，商用前需替换
-
-**回放与基准**
-- 回归案例：`testsets/guide_cases.json`（12 条 AI 生成样本）
-- 回放：`app\.venv\Scripts\python.exe tools\replay_guide.py --out data\guide-replay-baseline.jsonl`
-- 基准：`app\.venv\Scripts\python.exe tools\bench_guide.py --frames 20`
-
-**已实测（Windows 开发机，384×288，2 线程）**
-
-| 项目 | 结果 |
-|---|---|
-| AI 示例图回放 | 12/12 通过；危险案例 2，漏检 0，误停 0 |
-| 单帧推理 | P50 123–129 ms，P95 130–138 ms，最大 151 ms |
-| 模型加载 | 约 457 ms |
-| 进程内存 | 531.6 → 820.1 MB，增量 288.5 MB |
-
-CM5 的延迟、内存、温度和 8 小时压力尚未实测。
-
-**已知限制**
-- 站内灰色地面近处被判成道路，当前会保守停车。
-- 「盲道被占用」AI 样本现在输出 `stop/obstacle`，但真实细柱、椅腿、低矮障碍仍可能被分割漏掉。
-- 只用单目 2D 语义分割，测不到路缘高度、玻璃和悬空物；不支持过马路、楼梯、扶梯。
-- 多模型同时跑会抢四核 CPU；真机导航时 VLM 应空闲。
-- Picamera2 双流与少主码流未在真机验证。
+替身固定返回 `producer.role=test_fixture`、`evidence_mode=synthetic`，不计算真实通路或距离。启动服务时设置 `MAIN_CONTROL_URL=http://127.0.0.1:18091` 与 `MAIN_CONTROL_ALLOW_FIXTURE=1` 才能联调；它不能作为真实主控验收证据。
 
 ## 内存预算
 
@@ -323,11 +276,11 @@ $env:MEM_BUDGET_GB = "3.2"
 | 空闲（ASR 未加载） | 2.75–2.92 GB |
 | 语音识别时（ASR 已加载） | 3.03 GB |
 | 优化前（ASR 常驻 + 上下文 2048） | 3.58 GB |
-| 引导模型加载并推理（Windows，v1.2.0） | 进程内增量 288.5 MB（531.6 → 820.1 MB） |
+| 历史：引导模型加载并推理（Windows，v1.2.0，已移除） | 进程内增量 288.5 MB（531.6 → 820.1 MB） |
 
-前几行为 v1.0.12 及以前的实测值，当时服务端 TTS 不加载；v1.2.0 的引导模型增量来自 Windows 基准工具，CM5 上的 ORT 内存与峰值仍需实测。v1.3.0 起 TTS 默认使用常驻 Piper worker（状态页显示 `worker.alive` 与 `load_ms`）；内存紧张时可设 `TTS_IDLE_SECONDS=60~120` 空闲释放，或 `TTS_BACKEND=subprocess` 回到逐次启动。常驻 Piper 的 RSS 增量在 Windows 上约 90 MB，需在 CM5 复测。
+前几行为 v1.0.12 及以前的实测值，当时服务端 TTS 不加载；v1.2.0 的引导模型增量只作历史记录，该模块已从当前交付移除。v1.3.0 起 TTS 默认使用常驻 Piper worker（状态页显示 `worker.alive` 与 `load_ms`）；内存紧张时可设 `TTS_IDLE_SECONDS=60~120` 空闲释放，或 `TTS_BACKEND=subprocess` 回到逐次启动。常驻 Piper 的 RSS 增量在 Windows 上约 90 MB，需在 CM5 复测。
 
-页面右上角实时显示「模型内存 当前 / 预算」，超预算变红；旁边的「模型 CPU」显示模型侧进程占整机 CPU 的百分比，只统计 llama-server 与本服务进程（内含 OCR / ASR / 引导），按整机逻辑核心归一化，不含系统其它进程。Piper/aplay 只计入内存，不计入 CPU 读数。首次采样显示 `--`，第二次轮询起才有读数。
+页面右上角实时显示「模型内存 当前 / 预算」，超预算变红；旁边的「模型 CPU」显示模型侧进程占整机 CPU 的百分比，只统计 llama-server 与本服务进程（内含 OCR / ASR），按整机逻辑核心归一化，不含系统其它进程。Piper/aplay 只计入内存，不计入 CPU 读数。首次采样显示 `--`，第二次轮询起才有读数。
 
 ## 内存优化原则
 
@@ -355,12 +308,12 @@ $env:MEM_BUDGET_GB = "3.2"
 完整步骤见 [CM5 部署与运维](docs/CM5-部署与运维.md)，实测见 [CM5 实机测试报告](docs/CM5-实机测试报告-2026-11-02.md)。要点：
 
 1. **用户级部署优先**：`deploy/install_cm5_user.sh` 不需要 sudo，发布到 `~/cm5-ai/releases/<id>`，`current` 符号链接回滚；`models/`、`runtime/`、`data/`、`logs/` 共享，不随发布复制。有 sudo 时才用 `deploy/install_cm5.sh` 的 `/opt` 路径，两条路径不要同时启用。
-2. **CM5 默认 VLM 是 Qwen3-VL-2B**，不是 MiniCPM。MiniCPM-V 4.7 在 CM5 上视觉编码约 118 s/帧（256/320/384/512 都一样），不可实时；Qwen 256 px prefill 3.8 s、512 px 9.0 s。
-3. **线程与绑核**：VLM `-t3` + `taskset -c 0-2`，Web 不绑核；4 线程会抢满四核导致引导 `model_stuck`，把 Web 绑到第 4 核也会让引导和 VLM HTTP/ORT 抢同一核。
-4. **输入尺寸**：`VLM_IMAGE_MAX_SIDE=256`；OCR 另走高清图，不跟着降。
-5. 摄像头由 Picamera2 在 Pi 端直接取帧；浏览器在局域网 IP 下会被安全策略禁用摄像头/麦克风。`VOICE_SOURCE=device` 时关闭引导不关摄像头。
+2. **VLM 只部署本机发布清单中的 MiniCPM-V 4.7 1B**；设备上旧的 Qwen3-VL-2B 已移除。MiniCPM 视觉编码约 118 s/帧，不能实时，M3 前只作质量/兼容基线。
+3. **取图来源必须显式配置**：正式 `IMAGE_SOURCE=main_control`，主控未接入时视觉任务明确失败；只有独立实机测试才用 `standalone-device-test`，并单独记录证据。
+4. **输入尺寸**：开发默认 `VLM_IMAGE_MAX_SIDE=512`，按 CM5 实测调整；OCR 另走高清图，不跟着降。
+5. 主控事件通道使用 `MAIN_CONTROL_URL` + SSE；`MAIN_CONTROL_ALLOW_FIXTURE=0` 为生产默认，替身只能在显式测试模式启用。
 6. 麦克风与喇叭使用 ALSA：先运行 `arecord -l`、`aplay -l`；CM5 实测用 `plughw:CARD=Array,DEV=0`（reSpeaker XVF3800），不要依赖 card 数字。
-7. 4GB 内存下模型侧余量有限：预算 3.6 GB，引导运行时 Web PSS 约 0.4 GB、VLM 约 2.5 GB；引导关闭后卸载 ONNX 会话可释放约 150 MB。
+7. 4GB 内存下模型侧余量有限：预算 3.6 GB，VLM 常驻后 Web 与 TTS 仍需单独核算；内存统计口径见 `interaction.status.memory`。
 8. Piper 需要 Pi 端 aarch64 可执行文件，不能直接复制 Windows 的 `piper.exe`；用 `PIPER_BIN` 指向 Pi 上的 piper，`PIPER_MODEL` 指向中文音色 onnx。
 9. 真机语音默认半双工：播报期间暂停采集；全双工需要 AEC，当前没有实现，XVF3800 的 AEC 开关也未确认。
 10. 服务只监听 `127.0.0.1`；跨机调试用 SSH 隧道 `ssh -L 8090:127.0.0.1:8090`。
@@ -396,7 +349,7 @@ $env:MEM_BUDGET_GB = "3.2"
 | `ARMED_SECONDS` | 15 | 唤醒后免唤醒窗口秒数 |
 | `VLM_THREADS` | 4（≤4 核）/ 8 | 传给 llama-server 的 `-t`，start.ps1 按逻辑核数选择；CM5 实测用 3 + 绑 0–2 核 |
 | `VLM_CTX` | 1024 | 传给 llama-server 的 `-c` |
-| `VLM_IMAGE_MAX_SIDE` | 512 | 服务端 VLM 输入长边；CM5 实测用 256 |
+| `VLM_IMAGE_MAX_SIDE` | 512 | 服务端 VLM 输入长边；按 CM5 实测调整 |
 | `VLM_API_KEY` | 每次启动随机生成 | llama-server 与本服务共用的 API key；不设置时由 start.ps1 生成并写入 `logs/vlm.key` |
 | `OCR_INTRA_THREADS` / `OCR_INTER_THREADS` | 4 / 1 | RapidOCR 的 ORT 线程，注意 `OMP_NUM_THREADS` 不控制 ORT 线程池 |
 | `FRAME_MAX_AGE` | 20 | 画面过期秒数 |
@@ -404,24 +357,18 @@ $env:MEM_BUDGET_GB = "3.2"
 | `MEM_SAMPLE_TTL` | 10 | PSS 采样缓存秒数；读 2.5 GB 进程的 smaps_rollup 开销明显，轮询接口不应每次触发 |
 | `PIPER_BIN` | `runtime/piper/piper/piper.exe` | Piper 可执行文件路径，Pi 端指向 aarch64 版 |
 | `PIPER_MODEL` | `models/tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx` | Piper 中文音色模型路径 |
-| `GUIDE_MODEL` | `models/guide/segformer-b0-ade/model.onnx` | 无盲道引导分割模型路径 |
-| `GUIDE_THREADS` | 2 | 引导分割的 ONNX Runtime 线程数 |
-| `GUIDE_INPUT_W` / `GUIDE_INPUT_H` | 384 / 288 | 引导输入尺寸；改大不一定提升细物体，需回放验证 |
-| `GUIDE_FPS` | 4.0 | 服务端引导目标帧率 |
-| `GUIDE_FRAME_MAX_AGE` | 0.6 | 引导帧过期秒数；超时撤销方向 |
-| `GUIDE_WATCHDOG_SECONDS` | 2.5 | 推理心跳看门狗秒数 |
-| `GUIDE_NEAR_RATIO` / `GUIDE_MID_RATIO` / `GUIDE_FAR_RATIO` | 0.50 / 0.35 / 0.10 | 近/中/远通道连通占比阈值 |
-| `GUIDE_MIN_RUN_FRACTION` / `GUIDE_EDGE_MARGIN_FRACTION` | 0.10 / 0.035 | 像素瓶颈宽度与边界余量，未标定 |
-| `GUIDE_OBSTACLE_CENTER` / `GUIDE_OBSTACLE_SIDE` | 0.18 / 0.10 | 中间/两侧前方物体占比阈值 |
-| `GUIDE_ROAD_STOP` / `GUIDE_PERSON_STOP` / `GUIDE_STAIR_STOP` | 15 / 8 / 2 | 危险类别占 ROI 百分比阈值 |
-| `GUIDE_HOLD_SECONDS` / `GUIDE_RECOVER_FRAMES` / `GUIDE_RECOVER_SECONDS` | 1.5 / 4 / 0.8 | 危险保持与恢复证据 |
+| `IMAGE_SOURCE` | `main_control` | `main_control` 正式 / `standalone-device-test` 独立实机测试 / `browser` 调试 |
+| `MAIN_CONTROL_URL` | 空 | 主控服务基地址；为空时行走查询与正式取图明确不可用 |
+| `MAIN_CONTROL_RPC_PATH` / `MAIN_CONTROL_EVENTS_PATH` | `/interaction/rpc` / `/interaction/events` | 主控请求与事件通道路径 |
+| `MAIN_CONTROL_ASSET_ROOT` | 空 | 帧资产相对路径根目录；只读文件传输 |
+| `MAIN_CONTROL_ALLOW_FIXTURE` | `0` | 生产必须为 0；仅显式测试替身联调时设 1 |
+| `MAIN_CONTROL_TOKEN` | 空 | 主控鉴权 token；不写入仓库 |
 | `KWS_MODEL_DIR` | `models/kws/sherpa-onnx-kws-...` | sherpa-onnx KWS 模型目录 |
 | `KWS_KEYWORDS` | `app/config/keywords.txt` | 拼音 token 关键词文件 |
 | `KWS_THREADS` | 1 | KWS ORT 线程数 |
 | `KWS_SCORE` / `KWS_THRESHOLD` | 2.0 / 0.10 | KWS 提升分数/触发阈值；仅官方测试音频实验值，需真人标定 |
 | `KWS_TRAILING_BLANKS` / `KWS_INT8` | 8 / 0 | 重叠关键词尾随 blank 数；是否用 int8 模型 |
 | `VOICE_SOURCE` | `browser` | `browser` 调试 / `device` 真机常开语音 |
-| `GUIDE_SOURCE` | `auto` | `auto` / `browser` / `device`；真机建议 `device` |
 | `OUTPUT_SINK` | `browser` | `browser` SSE / `alsa` 设备端 Piper+aplay |
 | `ALSA_INPUT` / `ALSA_OUTPUT` | `plughw:0,0` | 先用 `arecord -l` / `aplay -l` 确认 |
 | `WEB_HOST` / `WEB_PORT` | `127.0.0.1` / `8090` | 默认只回环，跨机用 SSH 隧道 |
@@ -430,7 +377,7 @@ $env:MEM_BUDGET_GB = "3.2"
 
 所有播报统一走服务端 Piper（`/api/tts`，`engine=piper`）。每次合成启动一次 `piper.exe` 子进程，输出 22.05 kHz WAV 后进程退出，不在服务进程常驻模型。Piper 可执行或音色文件缺失时接口返回 503，页面仍显示文字但没有声音。语音播报期间仍然暂停麦克风采集。
 
-合成结果写入 `data/tts-cache/`（上限 50 MB，超出按时间删最旧），固定短语和重复播报第二次为 0 ms；启动时后台预生成常用引导/确认短语，避免第一次危险提示还要等 Piper 启动。前端把整段回答按 180 字分块合成，当前块播放时提前合成下一块，聊天也等回答生成完再整段播报，避免逐句请求造成的句间停顿。Piper 输出里超过 0.28 s 的停顿会压到 0.15 s，句间静音默认 0.12 s。首句仍有约 0.6–1.2 s 合成等待。
+合成结果写入 `data/tts-cache/`（上限 50 MB，超出按时间删最旧），固定短语和重复播报第二次为 0 ms；启动时后台预生成常用确认短语，避免第一次提示还要等 Piper 启动。前端把整段回答按 180 字分块合成，当前块播放时提前合成下一块，聊天也等回答生成完再整段播报，避免逐句请求造成的句间停顿。Piper 输出里超过 0.28 s 的停顿会压到 0.15 s，句间静音默认 0.12 s。首句仍有约 0.6–1.2 s 合成等待。
 超过 60 字的回答在前端自动提到 1.15 倍速（用户手动设置的语速更高时以手动值优先）；「详细描述」提示词限三到五句，避免一次生成过长内容。
 
 **真机 A/B 候选（均未执行，待 CM5 实测）**
@@ -443,7 +390,7 @@ tmpfs 放 `data/`（占用 RAM）、zram（CPU 换内存）、swap、限制 jour
 CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 ```
 
-只读检查 Python 版本、依赖、VLM/OCR/ASR/TTS/引导模型、KWS 模型、llama-server、Piper、Picamera2、arecord/aplay、8090/8091 端口和数据目录可写，不启动服务、不加载模型、不开相机麦克风。有任何失败返回非零退出码；systemd 启动时用 `--allow-busy` 跳过端口占用检查。
+只读检查 Python 版本、依赖、VLM/OCR/ASR/TTS 模型、KWS 模型、llama-server、Piper、Picamera2、arecord/aplay、主控配置、8090/8091 端口和数据目录可写，不启动服务、不加载模型、不开相机麦克风。有任何失败返回非零退出码；systemd 启动时用 `--allow-busy` 跳过端口占用检查。
 
 **意图否定与改口（v1.0.9）**
 
@@ -456,15 +403,16 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 - 未在 CM5 上验证硬件音频延迟、采样率、回声消除、Picamera2 双流与麦克风边界。
 - 日期标签只用构造的 OCR 行与样例图验证，未用真实药品/食品标签拍照验证。
 - 播报已完全依赖服务端 Piper：可执行文件或音色缺失时没有语音，只能看页面文字。
-- 引导分割对细柱、椅腿、低矮障碍、玻璃、悬空物仍不可靠；像素宽度未标定，不能报厘米。
-- SegFormer-B0 权重为 NVIDIA 非商业许可；Piper 引擎 GPL-3.0、中文音色许可未知；商用前必须复核或替换。
+- 行走判断依赖主控真实服务；当前只有替身协议验证，真实主控联调尚未进行。
+- MiniCPM-V 在 CM5 上视觉编码约 118 s/帧，视觉问答未达到实时目标；M3 需按主控确认的来源与许可比较候选。
+- Piper 中文音色训练数据许可 Unknown；商用或再分发前必须替换或取得授权。
 - Flask 仍是开发服务器；SSE 在 waitress/gunicorn 下的缓冲行为未验证。
 
 ## 日志与排查
 
 | 文件 | 内容 |
 |---|---|
-| `logs/app.log` | 应用事件：启动配置、eyes / voice / talk / OCR / TTS / VLM 请求的任务、意图、画面 md5、来源、延迟与回答、token 用量；引导状态变化/每 10 帧一次；KWS 命中和设备状态；按 2 MB × 3 轮转 |
+| `logs/app.log` | 应用事件：启动配置、eyes / voice / talk / OCR / TTS / VLM 请求的任务、意图、画面 md5、来源、延迟与回答、token 用量；主控握手/事件/取消与播放状态；KWS 命中和设备状态；按 2 MB × 3 轮转 |
 | `logs/session-YYYYMMDD-HHMMSS/` | 每次启动单独一份：`web.log`、`web.err.log`、`vlm.log`、`vlm.err.log`、`stopped.txt` |
 | `logs/sessions.log` | 启停事件：时间、PID、session 目录、停止原因（manual / window_closed / component_exit）与退出码 |
 | `logs/vlm.key` | 本次启动生成的 llama-server API key，不入库 |
@@ -472,7 +420,7 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 
 只保留最近 10 次会话目录。Werkzeug 访问日志已过滤 `/api/status`、`/static/*`、`/favicon.ico`、`/@vite/client`，避免轮询刷满错误输出；业务日志仍写 `app.log`。
 
-每行请求日志都带 `frame`、`session`、`full` / `vlm` 图片 md5、`image_source`（camera / upload）、延迟和回答预览。排查「图不对」时先比对日志里的 md5 与浏览器实际发送的图片；需要保留原图时设 `DEBUG_SNAPSHOT=1`，请求图会写到 `data/`，文件名带时间戳和线程号，默认关闭。
+每行请求日志都带 `frame`、`session`、`full` / `vlm` 图片 md5、`image_source`（main_control / standalone-device-test / browser）、延迟和回答预览。排查「图不对」时先比对日志里的 md5 与浏览器实际发送的图片；需要保留原图时设 `DEBUG_SNAPSHOT=1`，请求图会写到 `data/`，文件名带时间戳和线程号，默认关闭。
 
 ## 版本记录
 
@@ -514,4 +462,5 @@ CM5-AI\app\.venv\Scripts\python.exe CM5-AI\app\precheck.py
 | v1.1.1 | 语音闭环与稳定性修复：回声过滤、服务端免唤醒窗口、无画面追问、意图归一化、VAD/ASR 门限、上下文收紧、llama API key/CORS、会话日志 |
 | v1.2.0 | 第一阶段改造：服务端持续引导循环 + 连通通道/瓶颈/前方物体 + 状态机/看门狗；KWS 唤醒；结构化意图与控制动作；统一输出仲裁与危险抢占；帧标识冲突检测；VLM 计时字段修正；设备摄像头/ALSA 适配；ARM64 部署脚本、回放/基准工具与 153 项测试 |
 | v1.3.0 | 第二阶段优化：流式语义分段（首段 12–25/后续 25–50 字）+ 常驻 Piper + 浏览器 `AudioContext` 连续调度 + 设备 ALSA 连续 PCM；分片段安全守卫与输出仲裁；引导状态/OCR 快路径；`trace_id` 分阶段延迟与 `/api/metrics`；TTS/VLM 候选实测与回滚开关；176 项测试 |
-| v1.3.1 | CM5 实机部署与修复：Qwen3-VL-2B 替代 MiniCPM（MiniCPM 视觉编码 118 s/帧）、256 px、VLM 3 线程绑 0–2 核、取消播报立即断流、追问统一 256、复读/截断/障碍矛盾守卫、ASR 同音别名、关闭引导不关摄像头、引导模型关闭卸载、PSS 统计；新增用户级部署、实机验收、并发/稳定性/回放工具与 CM5 实测报告 |
+| v1.3.1 | CM5 实机部署与修复：Qwen3-VL-2B 替代 MiniCPM（MiniCPM 视觉编码 118 s/帧）、256 px、VLM 3 线程绑 0–2 核、取消播报立即断流、追问统一 256、复读/截断/障碍矛盾守卫、ASR 同音别名、关闭引导不关摄像头、引导模型关闭卸载、PSS 统计；新增用户级部署、实机验收、并发/稳定性/回放工具与 CM5 实测报告（历史） |
+| v1.4.0 | M0：移除独立 SegFormer 引导、二维连通通道与本地导航决策及专属路由/UI/配置/工具；新增 interaction.v0.1 MainControlAdapter、主控替身、握手/取图/场景/控制/事件/取消/播放反馈；行走语音改为控制意图，取图改 FrameProvider；新增合同回归测试与唯一发布清单 |

@@ -98,19 +98,16 @@ def check_piper():
     record("piper 可执行", exe.exists(), detail)
 
 
-def check_guide():
-    model = Path(
-        os.environ.get("GUIDE_MODEL")
-        or (MODELS / "guide" / "segformer-b0-ade" / "model.onnx")
-    )
-    if model.exists():
-        try:
-            detail = str(model.relative_to(ROOT))
-        except ValueError:
-            detail = str(model)
-        print("PASS 引导模型  " + detail)
+def check_main_control():
+    url = os.environ.get("MAIN_CONTROL_URL", "").strip()
+    source = os.environ.get("IMAGE_SOURCE", "main_control").strip().lower()
+    if source not in ("main_control", "standalone-device-test", "browser"):
+        record("取图来源配置", False, f"IMAGE_SOURCE={source}")
+        return
+    if source == "main_control" and not url:
+        print("WARN 主控未配置（MAIN_CONTROL_URL 为空）：行走查询与正式取图不可用，纯聊天仍可用")
     else:
-        print("WARN 引导模型未下载，无盲道引导不可用（不影响其它功能）")
+        print(f"PASS 取图来源 {source}  MAIN_CONTROL_URL={url or '(未配置)'}")
 
 
 def check_ports():
@@ -155,10 +152,9 @@ def check_devices():
 
 def check_env():
     keys = (
-        "VLM_THREADS", "VLM_CTX", "GUIDE_THREADS", "GUIDE_INPUT_W", "GUIDE_INPUT_H",
-        "GUIDE_FPS", "GUIDE_FRAME_MAX_AGE", "GUIDE_WATCHDOG_SECONDS",
-        "KWS_THREADS", "KWS_SCORE", "KWS_THRESHOLD", "KWS_MODEL_DIR",
+        "VLM_THREADS", "VLM_CTX", "KWS_THREADS", "KWS_SCORE", "KWS_THRESHOLD", "KWS_MODEL_DIR",
         "ASR_THREADS", "OCR_INTRA_THREADS", "MEM_BUDGET_GB", "VOICE_SOURCE", "OUTPUT_SINK",
+        "IMAGE_SOURCE", "MAIN_CONTROL_URL", "MAIN_CONTROL_ALLOW_FIXTURE",
     )
     print("环境变量：")
     for key in keys:
@@ -172,7 +168,7 @@ def main():
     check_models()
     check_llama()
     check_piper()
-    check_guide()
+    check_main_control()
     check_devices()
     check_env()
     check_ports()

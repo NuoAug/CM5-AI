@@ -398,15 +398,26 @@ class DeviceSink:
         player: AlsaPlayer,
         before_speak: Optional[Callable] = None,
         after_speak: Optional[Callable] = None,
+        status_cb: Optional[Callable] = None,
     ):
         self.synth = synth
         self.player = player
         self.before_speak = before_speak
         self.after_speak = after_speak
+        self.status_cb = status_cb
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._utterance = ""
         self._speaking = False
+        self._payload = None
+
+    def _status(self, payload, state, basis=None, reason=""):
+        if self.status_cb is None or not payload:
+            return
+        try:
+            self.status_cb(payload, state, basis, reason)
+        except Exception:  # noqa: BLE001
+            pass
 
     def speak(self, payload, cancel_event: threading.Event) -> None:
         if isinstance(payload, dict):
@@ -417,6 +428,7 @@ class DeviceSink:
             text, utterance, is_final = str(payload or ""), "", True
         if not text:
             return
+        self._payload = payload if isinstance(payload, dict) else {"text": text}
         with self._lock:
             self._cancel = cancel_event
             new_utterance = utterance and utterance != self._utterance
@@ -429,25 +441,38 @@ class DeviceSink:
                 if self.before_speak:
                     self.before_speak()
         ok = False
+        outcome = ""
         try:
             if cancel_event.is_set():
+                outcome = "cancelled"
                 return
             wav = self.synth(text)
             if cancel_event.is_set():
+                outcome = "cancelled"
                 return
             if not self.player.feed(wav, cancel_event) and not cancel_event.is_set():
                 raise RuntimeError("ALSA 连续播放写入失败")
             ok = True
+            self._status(self._payload, "started", "device_write")
+            if is_final:
+                outcome = "completed"
+        except Exception:  # noqa: BLE001
+            outcome = "cancelled" if cancel_event.is_set() else "failed"
+            raise
         finally:
             if is_final or cancel_event.is_set() or not ok:
                 with self._lock:
                     if self._speaking:
-                        self._finish_utterance()
+                        self._finish_utterance(outcome or "failed")
 
-    def _finish_utterance(self) -> None:
+    def _finish_utterance(self, outcome: str = "") -> None:
         self.player.end_stream()
+        payload = self._payload
         self._utterance = ""
         self._speaking = False
+        if outcome:
+            self._status(payload, outcome, "device_write" if outcome == "completed" else None,
+                         "sink_error" if outcome == "failed" else "")
         if self.after_speak:
             self.after_speak()
 
@@ -457,7 +482,7 @@ class DeviceSink:
         self.player.stop()
         with self._lock:
             if self._speaking:
-                self._finish_utterance()
+                self._finish_utterance("cancelled")
 
 
 def encode_wav(samples: np.ndarray, sample_rate: int = 16000) -> bytes:

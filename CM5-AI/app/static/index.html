@@ -189,7 +189,7 @@
     <div class="tabs">
       <button type="button" class="tab active" data-tab="eyes" id="tab-eyes">语音交互</button>
       <button type="button" class="tab" data-tab="debug" id="tab-debug">调试工具</button>
-      <button type="button" class="tab" data-tab="guide" id="tab-guide">无盲道引导</button>
+      <button type="button" class="tab" data-tab="main-control" id="tab-main-control">主控接口</button>
     </div>
 
     <div class="card">
@@ -224,16 +224,23 @@
         </div>
       </div>
 
-      <div class="panel" id="panel-guide">
-        <h2>无盲道引导（试验）</h2>
-        <p class="hint">用轻量分割模型判断近处可走地面，只给直行 / 偏左 / 偏右 / 停下。不能替代盲杖，不支持过马路、楼梯、扶梯；请在有陪同的平坦场地测试。</p>
+      <div class="panel" id="panel-main-control">
+        <h2>主控接口 interaction.v0.1</h2>
+        <p class="hint">仅调试与协议验证。正式行走判断、距离和通行结论由主控提供；测试替身只回放固定样例，不代表真实联调。</p>
         <div class="row">
-          <button class="primary" id="btn-guide-start">开始引导</button>
-          <button id="btn-guide-stop" disabled>停止引导</button>
-          <label class="auto"><input type="checkbox" id="guide-voice" checked /> 语音提示</label>
+          <button id="btn-mc-refresh">刷新状态</button>
+          <button class="primary" id="btn-mc-scene">查询场景</button>
+          <span id="mc-state" class="voice-state">未查询</span>
         </div>
-        <div class="result empty" id="out-guide">未开始</div>
-        <div class="meta" id="meta-guide"></div>
+        <div class="row">
+          <button id="btn-mc-start">开始</button>
+          <button id="btn-mc-pause">暂停</button>
+          <button id="btn-mc-resume">恢复</button>
+          <button id="btn-mc-end">结束</button>
+          <button id="btn-mc-repeat">重复</button>
+        </div>
+        <div class="result empty" id="out-mc">等待查询…</div>
+        <div class="meta" id="meta-mc"></div>
       </div>
 
       <div class="panel" id="panel-debug">
@@ -415,7 +422,6 @@ $('sample-image').onchange = async () => {
   }
 };
 $('btn-clear').onclick = () => {
-  if (guideState.running && guideState.needsFrames) stopGuide();
   state.image = null; state.imageVlm = null; state.imageFull = null;
   const canvas = $('preview');
   canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
@@ -428,7 +434,6 @@ $('btn-clear').onclick = () => {
 
 let stream = null;
 function closeCamera() {
-  if (guideState.running && guideState.needsFrames) stopGuide();
   if (stream) {
     stream.getTracks().forEach(t => t.stop());
     stream = null;
@@ -464,174 +469,55 @@ $('btn-shot').onclick = async () => {
   toast('拍照完成');
 };
 
-// ---------- 无盲道引导（服务端持续循环） ----------
-const GUIDE_LABEL = { straight: '直行', left: '向左一点', right: '向右一点', stop: '停下', unavailable: '不可用' };
-const GUIDE_REASON = {
-  clear: '可走', obstacle: '需要绕行', narrow: '通道偏窄', road: '道路', stairs: '台阶',
-  person: '有人', ahead: '前方不连续', blocked: '无法通行', no_seed: '脚下没有可靠地面',
-  low_quality: '画面质量不足', uncertain: '判断不确定', stale: '画面过期', model_stuck: '模型无响应',
-  model_missing: '模型缺失', tilted: '相机倾斜', error: '引导异常', no_frame: '等待画面',
-  stopped: '已停止', recovering: '恢复判断中', depth_obstacle: '深度障碍',
-};
-const guideState = {
-  running: false, needsFrames: true, pushTimer: null, pollTimer: null,
-  lastSeq: -1, lastRaw: '', lastStatus: null,
-};
-
-function newFrameId(prefix = 'f') {
-  const rand = (crypto && crypto.randomUUID) ? crypto.randomUUID().slice(0, 8) : Math.random().toString(16).slice(2, 10);
-  return `${prefix}-${Date.now().toString(36)}-${rand}`;
-}
-
-async function captureGuideFrame() {
-  const v = $('video');
-  let canvas = null;
-  if (v.style.display === 'block' && v.videoWidth) {
-    canvas = document.createElement('canvas');
-    canvas.width = v.videoWidth; canvas.height = v.videoHeight;
-    canvas.getContext('2d').drawImage(v, 0, 0);
-  } else if (state.imageFull || state.image) {
-    const img = new Image();
-    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = state.imageFull || state.image; });
-    canvas = document.createElement('canvas');
-    canvas.width = img.width; canvas.height = img.height;
-    canvas.getContext('2d').drawImage(img, 0, 0);
-  }
-  return canvas ? canvasDataUrl(canvas, 512, 0.8) : null;
-}
-
-function guideMetricsText(st) {
-  const m = (st && st.metrics) || {};
-  const lanes = m.lanes || {};
-  const c = lanes.center || {};
-  const l = lanes.left || {};
-  const r = lanes.right || {};
-  const pct = (v) => (v == null ? '--' : (v * 100).toFixed(0) + '%');
-  const q = (st && st.quality) || {};
-  const d = (st && st.decision) || {};
-  const parts = [
-    `状态 ${GUIDE_LABEL[d.state] || d.state || '--'}（${GUIDE_REASON[d.reason] || d.reason || '--'}）`,
-    `原始 ${GUIDE_LABEL[d.raw_direction] || d.raw_direction || '--'}/${GUIDE_REASON[d.raw_reason] || d.raw_reason || '--'}`,
-    `中列 近${pct(c.near && c.near.ratio)} 中${pct(c.mid && c.mid.ratio)}`,
-    `左${pct(l.near && l.near.ratio)} 右${pct(r.near && r.near.ratio)}`,
-    `前方物体 中${m.object_center == null ? '--' : m.object_center + '%'}`,
-    `质量 ${q.ok === false ? (q.reasons || []).join('/') : 'OK'}`,
-  ];
-  const stats = (st && st.stats) || {};
-  parts.push(`帧龄 ${st.frame_age_ms == null ? '--' : st.frame_age_ms + 'ms'}`);
-  parts.push(`推理 ${d.inference_ms == null ? '--' : d.inference_ms + 'ms'}`);
-  parts.push(`P50/P95 ${stats.inference_p50_ms || '--'}/${stats.inference_p95_ms || '--'}ms`);
-  parts.push(`丢弃 ${stats.dropped ?? 0}`);
-  return parts.join(' · ');
-}
-
-function renderGuide(st) {
-  const d = (st && st.decision) || {};
-  if (!st || !st.running) {
-    $('out-guide').textContent = '已停止';
-    $('meta-guide').textContent = '';
-    $('btn-guide-start').disabled = false;
-    $('btn-guide-stop').disabled = true;
-    guideState.running = false;
-    return;
-  }
-  $('out-guide').classList.remove('empty');
-  $('out-guide').textContent = `${GUIDE_LABEL[d.state] || d.state || '--'}（${GUIDE_REASON[d.reason] || d.reason || '--'}）`;
-  $('meta-guide').textContent = guideMetricsText(st);
-  $('btn-guide-start').disabled = true;
-  $('btn-guide-stop').disabled = false;
-  guideState.lastSeq = st.seq;
-  guideState.lastStatus = st;
-}
-
-async function pushGuideFrame() {
-  if (!guideState.running || !guideState.needsFrames) return;
+// ---------- 主控接口调试（只查询与提交意图，不做本地通行判断） ----------
+async function refreshMainControl() {
   try {
-    const image = await captureGuideFrame();
-    if (!image) throw new Error('没有可用画面');
-    await postJSON('/api/guide/frame', {
-      image,
-      frame_id: newFrameId('guide'),
-      captured_at: new Date().toISOString(),
-      source: 'browser',
-    });
+    const r = await fetch('/api/main-control/status');
+    const j = await r.json();
+    const s = j.status || {};
+    $('mc-state').textContent = s.connected
+      ? `已连接 · ${s.master_instance_id || '未知实例'} · ${s.evidence_mode || '未知来源'}`
+      : (s.configured ? '未连接 · ' + (s.last_error || '等待握手') : '未配置主控');
+    $('meta-mc').textContent = `instance ${s.instance_id || '--'} · clock ${s.clock_id || '--'} · 替身 ${s.fixture_allowed ? '允许' : '禁止'}`;
   } catch (e) {
-    if (guideState.running) toast('引导送帧失败：' + e.message);
+    $('mc-state').textContent = '状态查询失败：' + e.message;
   }
-  if (guideState.running) guideState.pushTimer = setTimeout(pushGuideFrame, 200);
 }
 
-async function pollGuide() {
-  if (!guideState.running) return;
+async function queryScene() {
   try {
-    const r = await fetch('/api/guide/status');
-    if (r.ok) renderGuide(await r.json());
-    else if (r.status === 409) stopGuideLocal();
-  } catch (e) { /* 网络抖动时继续轮询 */ }
-  if (guideState.running) guideState.pollTimer = setTimeout(pollGuide, 250);
-}
-
-function stopGuideLocal(keepText) {
-  guideState.running = false;
-  if (guideState.pushTimer) { clearTimeout(guideState.pushTimer); guideState.pushTimer = null; }
-  if (guideState.pollTimer) { clearTimeout(guideState.pollTimer); guideState.pollTimer = null; }
-  $('btn-guide-start').disabled = false;
-  $('btn-guide-stop').disabled = true;
-  if (!keepText) {
-    $('out-guide').textContent = '已停止';
-    $('meta-guide').textContent = '';
-  }
-}
-
-function stopGuide(keepText) {
-  if (!guideState.running) { stopGuideLocal(keepText); return; }
-  stopGuideLocal(keepText);
-  postJSON('/api/guide/stop', { reason: 'browser_ui' }).catch(() => {});
-}
-
-function adoptGuideFromServer(st) {
-  if (!st || !st.running) return;
-  if (guideState.running) { renderGuide(st); return; }
-  guideState.running = true;
-  guideState.needsFrames = st.needs_frames !== false;
-  renderGuide(st);
-  if (guideState.needsFrames) pushGuideFrame();
-  pollGuide();
-}
-
-async function startGuide() {
-  if (guideState.running) return;
-  const live = $('video').style.display === 'block' && $('video').videoWidth;
-  if (!live && !(state.imageFull || state.image)) {
-    toast('请先打开摄像头或载入图片');
-    return;
-  }
-  if (!live) {
-    try {
-      const image = await captureGuideFrame();
-      const j = await postJSON('/api/guide', { image, frame_id: newFrameId('guide') });
-      $('out-guide').classList.remove('empty');
-      $('out-guide').textContent = `${GUIDE_LABEL[j.raw_direction] || j.raw_direction}（${GUIDE_REASON[j.raw_reason] || j.raw_reason}）`;
-      $('meta-guide').textContent = guideMetricsText({ metrics: j.metrics, quality: j.quality, decision: { state: j.raw_direction, reason: j.raw_reason, raw_direction: j.raw_direction, raw_reason: j.raw_reason, inference_ms: j.timing && j.timing.inference_ms }, stats: {} });
-      toast('静态图只做单帧判断');
-    } catch (e) { $('out-guide').textContent = '引导失败：' + e.message; }
-    return;
-  }
-  try {
-    const st = await postJSON('/api/guide/start', { source: 'browser' });
-    guideState.running = true;
-    guideState.needsFrames = st.needs_frames !== false;
-    renderGuide(st);
-    if (guideState.needsFrames) pushGuideFrame();
-    pollGuide();
-    toast('引导已开始');
+    const r = await fetch('/api/main-control/scene');
+    const j = await r.json();
+    $('out-mc').classList.remove('empty');
+    $('out-mc').textContent = j.answer || j.error || '（无结果）';
+    if (j.scene) {
+      const nav = j.scene.navigation || {};
+      $('meta-mc').textContent = `state ${j.scene.state_id || '--'} · seq ${j.scene.sequence ?? '--'} · mode ${nav.mode || '--'} · reason ${nav.reason_code || '--'} · stale ${j.scene._stale ? '是' : '否'}`;
+    }
   } catch (e) {
-    $('out-guide').textContent = '引导启动失败：' + e.message;
+    $('out-mc').textContent = '场景查询失败：' + e.message;
   }
 }
 
-$('btn-guide-start').onclick = startGuide;
-$('btn-guide-stop').onclick = () => stopGuide();
+async function controlMain(action) {
+  const transcript = { start_guidance: '开始引导', pause_guidance: '暂停引导', resume_guidance: '恢复引导', end_guidance: '结束引导', repeat_guidance: '重复引导' }[action];
+  try {
+    const j = await postJSON('/api/main-control/control', { action, transcript, session_id: 'debug' });
+    $('out-mc').classList.remove('empty');
+    $('out-mc').textContent = j.answer || '（无结果）';
+    $('meta-mc').textContent = j.result ? `operation ${j.result.operation_state} · actual_mode ${j.result.actual_mode} · reason ${j.result.reason_code}` : '无控制结果';
+  } catch (e) {
+    $('out-mc').textContent = '控制请求失败：' + e.message;
+  }
+}
+
+$('btn-mc-refresh').onclick = refreshMainControl;
+$('btn-mc-scene').onclick = queryScene;
+$('btn-mc-start').onclick = () => controlMain('start_guidance');
+$('btn-mc-pause').onclick = () => controlMain('pause_guidance');
+$('btn-mc-resume').onclick = () => controlMain('resume_guidance');
+$('btn-mc-end').onclick = () => controlMain('end_guidance');
+$('btn-mc-repeat').onclick = () => controlMain('repeat_guidance');
 
 async function postJSON(url, body, signal) {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal });
@@ -839,7 +725,7 @@ function handleOutputEvent(ev) {
     streamPlayer.enqueue(job);
     return;
   }
-  if (j.source === 'guide' && j.priority <= 1 && !$('guide-voice').checked) return;
+  // 主控紧急提示始终播放；普通回答按用户设置。
   if (j.priority >= 3 && !$('eyes-auto-tts').checked) return;
 
   const sameUtterance = streamPlayer.activeUtterance && j.utterance_id === streamPlayer.activeUtterance;
@@ -1182,11 +1068,8 @@ async function sendUtterance(chunks) {
       voiceState('已停止播报', false);
       return;
     }
-    if (j.guide) adoptGuideFromServer(j.guide);
-    if (j.intent === 'guide_stop') stopGuideLocal(true);
     if (j.close_camera) {
       closeCamera();
-      stopGuideLocal(true);
     }
     $('out-eyes').classList.remove('empty');
     $('out-eyes').textContent = j.answer || '（空回答）';
@@ -1306,10 +1189,10 @@ $('btn-voice-test').onclick = async () => {
 
 document.querySelectorAll('.tab').forEach(tab => {
   tab.onclick = () => {
-    if (tab.dataset.tab !== 'guide' && guideState.running && guideState.needsFrames) stopGuide();
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     tab.classList.add('active'); $('panel-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'main-control') refreshMainControl();
   };
 });
 

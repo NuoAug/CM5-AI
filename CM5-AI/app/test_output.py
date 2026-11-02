@@ -19,7 +19,7 @@ class OutputBusTests(unittest.TestCase):
 
     def test_danger_preempts_normal(self):
         self.bus.push("普通回答", priority=PRIORITY_ANSWER, source="chat")
-        self.bus.push("前方有台阶，请停下", priority=PRIORITY_DANGER, source="guide", reason="stairs")
+        self.bus.push("前方有台阶，请停下", priority=PRIORITY_DANGER, source="main_control", reason="emergency")
         items = []
         while not self.q.empty():
             items.append(self.q.get_nowait())
@@ -29,8 +29,8 @@ class OutputBusTests(unittest.TestCase):
         self.assertTrue(items[0]["preempt"])
 
     def test_dedupe_same_key(self):
-        first = self.bus.push("继续直行", priority=PRIORITY_GUIDE, source="guide", dedupe_key="g")
-        second = self.bus.push("继续直行", priority=PRIORITY_GUIDE, source="guide", dedupe_key="g")
+        first = self.bus.push("继续直行", priority=PRIORITY_GUIDE, source="main_control", dedupe_key="g")
+        second = self.bus.push("继续直行", priority=PRIORITY_GUIDE, source="main_control", dedupe_key="g")
         self.assertIsNotNone(first)
         self.assertIsNone(second)
         self.assertEqual(self.bus.stats()["deduped"], 1)
@@ -46,7 +46,7 @@ class OutputBusTests(unittest.TestCase):
         self.assertEqual([i["type"] for i in items], ["cancel"])
 
     def test_cancel_keeps_pending_danger(self):
-        self.bus.push("前方有台阶，请停下", priority=PRIORITY_DANGER, source="guide")
+        self.bus.push("前方有台阶，请停下", priority=PRIORITY_DANGER, source="main_control")
         self.bus.cancel(min_priority=PRIORITY_GUIDE, source="voice")
         items = []
         while not self.q.empty():
@@ -64,7 +64,7 @@ class OutputBusTests(unittest.TestCase):
         self.assertIsNone(self.bus.push("   ", priority=PRIORITY_ANSWER))
 
     def test_priority_guide_preempt_flag(self):
-        event = self.bus.push("向左一点", priority=PRIORITY_GUIDE, source="guide")
+        event = self.bus.push("向左一点", priority=PRIORITY_GUIDE, source="main_control")
         self.assertTrue(event["preempt"])
         event = self.bus.push("确认", priority=PRIORITY_CONFIRM, source="voice")
         self.assertFalse(event["preempt"])
@@ -103,13 +103,34 @@ class SegmentOutputTests(unittest.TestCase):
 
     def test_danger_clears_history(self):
         self.bus.push_segment("普通回答。", utterance_id="u", segment_id="s1", sequence=1)
-        self.bus.push_segment("危险", priority=PRIORITY_DANGER, source="guide", reason="stairs")
+        self.bus.push_segment("危险", priority=PRIORITY_DANGER, source="main_control", reason="emergency")
         self.assertEqual(len(self.bus.history_since(0)), 1)
         self.assertEqual(self.bus.history_since(0)[0]["priority"], PRIORITY_DANGER)
 
     def test_playback_browser_by_default(self):
         event = self.bus.push_segment("测试。", utterance_id="u", segment_id="s1", sequence=1)
         self.assertEqual(event["playback"], "browser")
+
+    def test_queued_status_hook_reports_browser_queued_only(self):
+        seen = []
+        self.bus.set_status_hook(lambda payload, state, basis, reason: seen.append((state, basis)))
+        self.bus.push_segment("测试。", utterance_id="u", segment_id="s1", sequence=1)
+        self.assertEqual(seen, [("queued", None)])
+
+    def test_drop_guidance_keeps_ordinary_and_danger(self):
+        self.bus.push_segment("普通回答。", utterance_id="u", segment_id="s1", sequence=1,
+                              priority=PRIORITY_ANSWER)
+        self.bus.push_segment("导航提示", priority=PRIORITY_GUIDE, source="main_control",
+                              meta={"event_id": "nav-1"})
+        result = self.bus.drop_guidance("nav-1")
+        self.assertEqual(result["removed"], 1)
+        self.assertEqual([item["text"] for item in self.bus.history_since(0)], ["普通回答。"])
+
+        self.bus.push_segment("危险提示", priority=PRIORITY_DANGER, source="main_control",
+                              meta={"event_id": "danger-1"})
+        result = self.bus.drop_guidance()
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual([item["text"] for item in self.bus.history_since(0)], ["危险提示"])
 
 
 if __name__ == "__main__":
