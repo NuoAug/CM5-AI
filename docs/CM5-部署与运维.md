@@ -2,14 +2,14 @@
 
 目标：Raspberry Pi Compute Module 5，四核 Cortex-A76，4 GB 内存，32 GB eMMC，纯 CPU 推理。实机为 Debian 13（trixie）+ Python 3.13.5。
 
-本版对应 `v1.4.0`（M0 清理 + interaction.v0.1 适配）。历史实测报告见 [CM5 实机测试报告](CM5-实机测试报告-2026-11-02.md)，其中引导与 Qwen 数据只作历史证据，不再代表当前默认路径。
+本版对应 `v1.4.1`（M0 清理 + interaction.v0.1 适配 + ALSA 掉线检查）。历史实测报告见 [CM5 实机测试报告](CM5-实机测试报告-2026-11-02.md)，其中引导与 Qwen 数据只作历史证据，不再代表当前默认路径。
 
 ## 1. 目录与权限
 
 ```text
 /home/mylin/cm5-ai/
-├─ releases/v1.4.0-cm5/     发布：app、venv、deploy、tools、testsets、samples、manifest
-├─ current -> releases/v1.4.0-cm5
+├─ releases/v1.4.1-cm5/     发布：app、venv、deploy、tools、testsets、samples、manifest
+├─ current -> releases/v1.4.1-cm5
 ├─ models/                  共享模型（只放本机发布清单中的制品）
 ├─ runtime/
 │  ├─ llama.cpp -> llama.cpp-8ca4060/build
@@ -69,7 +69,7 @@ Piper 使用 Pi 端 aarch64 可执行文件；不能复制 Windows 的 `piper.ex
 
 ```bash
 cd ~/cm5-ai/staging
-GIT_COMMIT=<commit> GIT_DIRTY=<entries> RELEASE_ID=v1.4.0-cm5 bash deploy/install_cm5_user.sh
+GIT_COMMIT=<commit> GIT_DIRTY=<entries> RELEASE_ID=v1.4.1-cm5 bash deploy/install_cm5_user.sh
 ```
 
 脚本只做：复制代码到 `releases/<id>`、建共享目录链接、创建 venv、生成 env（已存在则保留）、写 user systemd 单元、`current` 指向新发布、只读预检。不下载模型、不升级系统包、不启动服务。

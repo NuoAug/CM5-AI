@@ -10,6 +10,7 @@ import base64
 import importlib.util
 import io
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -34,6 +35,24 @@ def audio_tools() -> dict:
         "arecord": shutil.which("arecord"),
         "aplay": shutil.which("aplay"),
     }
+
+
+def alsa_card_present(device: str, tool: str) -> bool:
+    """检查配置的 ALSA 卡是否真实存在；USB 音频掉线时不要假装可采集。"""
+    exe = shutil.which(tool)
+    if not exe:
+        return False
+    try:
+        out = subprocess.run([exe, "-l"], capture_output=True, text=True, timeout=3).stdout or ""
+    except Exception:  # noqa: BLE001
+        return False
+    m = re.search(r"CARD=([^,]+)", device)
+    if m:
+        return m.group(1).strip().lower() in out.lower()
+    m = re.search(r"plughw:(\d+),", device)
+    if m:
+        return f"card {m.group(1)}:" in out
+    return bool(out.strip())
 
 
 class DeviceCamera:
@@ -176,11 +195,14 @@ class AlsaCapture:
         self._lock = threading.RLock()
 
     def available(self) -> bool:
-        return bool(audio_tools()["arecord"])
+        return alsa_card_present(self.device, "arecord")
 
     def start(self) -> bool:
-        if not self.available() or self._proc is not None:
-            return self._proc is not None
+        if not self.available():
+            return False
+        if self._proc is not None and self._proc.poll() is None:
+            return True
+        self._proc = None
         exe = audio_tools()["arecord"]
         try:
             self._proc = subprocess.Popen(
@@ -189,6 +211,10 @@ class AlsaCapture:
                 stderr=subprocess.DEVNULL,
                 bufsize=0,
             )
+            time.sleep(0.25)
+            if self._proc.poll() is not None:
+                self._proc = None
+                return False
             return True
         except Exception:  # noqa: BLE001
             self._proc = None
@@ -197,6 +223,9 @@ class AlsaCapture:
     def read(self) -> Optional[np.ndarray]:
         proc = self._proc
         if proc is None or proc.stdout is None:
+            return None
+        if proc.poll() is not None:
+            self._proc = None
             return None
         nbytes = self.chunk_frames * 2
         try:
@@ -223,7 +252,11 @@ class AlsaCapture:
 
     @property
     def running(self) -> bool:
-        return self._proc is not None
+        proc = self._proc
+        if proc is not None and proc.poll() is not None:
+            self._proc = None
+            return False
+        return proc is not None
 
 
 class AlsaPlayer:
@@ -242,7 +275,7 @@ class AlsaPlayer:
         self._lock = threading.RLock()
 
     def available(self) -> bool:
-        return bool(audio_tools()["aplay"])
+        return alsa_card_present(self.device, "aplay")
 
     def _open_stream(self, rate: int, channels: int) -> bool:
         exe = audio_tools()["aplay"]
