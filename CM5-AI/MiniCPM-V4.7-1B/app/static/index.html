@@ -748,20 +748,38 @@ let outputPriority = 99;
 let outputLastText = '';
 let outputLastAt = 0;
 let outputPlaying = null;
+let outputTurn = null;
+const outputGenerations = new Map();
 
 function handleOutputEvent(ev) {
   let j = null;
   try { j = JSON.parse(ev.data || '{}'); } catch (e) { return; }
+  if (j.type === 'turn_started' && j.turn) {
+    const previous = outputGenerations.get(j.turn.session_id) || 0;
+    if (j.turn.generation > previous) {
+      outputGenerations.set(j.turn.session_id, j.turn.generation);
+      if (outputTurn && outputTurn.session_id === j.turn.session_id && outputTurn.generation < j.turn.generation && outputPriority > 0) {
+        stopPlayer(); streamPlayer.stop(); outputPriority = 99;
+      }
+    }
+    return;
+  }
   if (j.type === 'cancel') {
     if (j.epoch != null && j.epoch < outputEpoch) return;
     outputEpoch = j.epoch != null ? j.epoch : outputEpoch;
-    stopPlayer();
-    streamPlayer.stop();
-    outputPriority = 99;
+    if (outputPriority >= (j.min_priority == null ? 1 : j.min_priority)) {
+      stopPlayer(); streamPlayer.stop(); outputPriority = 99;
+    }
     voiceState('播报已停止', false);
     return;
   }
   if (j.type !== 'speech' || !j.text) return;
+  if (j.turn) {
+    const known = outputGenerations.get(j.turn.session_id) || 0;
+    if (j.turn.generation < known) return;
+    outputGenerations.set(j.turn.session_id, j.turn.generation);
+    outputTurn = j.turn;
+  }
   if (window.CM5DeviceUI && window.CM5DeviceUI.remote) {
     window.CM5DeviceUI.showSpeech(j);
     return;

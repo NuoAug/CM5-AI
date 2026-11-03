@@ -164,8 +164,20 @@ class PiperWorker:
             self._last_used = time.monotonic()
             return data, gen_ms
 
+    def interrupt(self) -> bool:
+        # synth 持有锁等待输出；取消不能等该锁。保留进程引用供 synth 检测退出并清理。
+        proc = self._proc
+        if proc is None:
+            return False
+        try:
+            proc.kill()
+            return True
+        except OSError:
+            return False
+
     def stop(self) -> None:
         self._stop.set()
+        self.interrupt()
         with self._lock:
             proc = self._proc
             self._proc = None

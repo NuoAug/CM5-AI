@@ -275,12 +275,7 @@ class AlsaCapture:
 
 
 class AlsaPlayer:
-    """aplay 连续 PCM 播放通道；可被危险提示打断。
-
-    逐段合成时把 PCM 写入同一个 aplay 进程，避免每句重新启动进程产生空隙。
-    如果无法建立流式通道，仍可通过 play() 逐文件播放作为兜底。
-    """
-
+    """唯一 aplay 输出端；进程启动、写入和排空都检查取消代次。"""
     def __init__(self, device: str = ""):
         self.device = device or os.environ.get("ALSA_OUTPUT", "plughw:0,0")
         self._proc: Optional[subprocess.Popen] = None
@@ -288,149 +283,195 @@ class AlsaPlayer:
         self._stream_rate = 0
         self._stream_channels = 0
         self._lock = threading.RLock()
+        self._stop_generation = 0
+        self._draining = set()
 
     def available(self) -> bool:
         return alsa_card_present(self.device, "aplay")
 
-    def _open_stream(self, rate: int, channels: int) -> bool:
+    @staticmethod
+    def _terminate(proc):
+        # 终止优先于关管道，使阻塞写入/排空退出；不拿播放器锁等待进程。
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except Exception:
+            pass
+
+    def _discard_stream(self, proc):
+        with self._lock:
+            if self._stream_proc is proc:
+                self._stream_proc = None
+                self._stream_rate = self._stream_channels = 0
+            self._draining.add(proc)
+        try:
+            self._terminate(proc)
+        finally:
+            with self._lock:
+                self._draining.discard(proc)
+
+    def _open_stream(self, rate: int, channels: int, *, generation=None, cancel_event=None) -> bool:
+        with self._lock:
+            generation = self._stop_generation if generation is None else generation
+            if generation != self._stop_generation or (cancel_event and cancel_event.is_set()):
+                return False
         exe = audio_tools()["aplay"]
         try:
             proc = subprocess.Popen(
                 [exe, "-q", "-D", self.device, "-t", "raw", "-f", "S16_LE",
                  "-r", str(int(rate)), "-c", str(int(channels))],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-            )
-        except Exception:  # noqa: BLE001
+                stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, bufsize=0)
+        except Exception:
             return False
         with self._lock:
-            self._stream_proc = proc
-            self._stream_rate = int(rate)
-            self._stream_channels = int(channels)
-        return True
+            stale = generation != self._stop_generation or (cancel_event and cancel_event.is_set())
+            if not stale and self._stream_proc is None:
+                self._stream_proc = proc
+                self._stream_rate = int(rate)
+                self._stream_channels = int(channels)
+                return True
+            reusable = (not stale and self._stream_proc is not None and self._stream_proc.poll() is None
+                        and self._stream_rate == rate and self._stream_channels == channels)
+        # stop可能发生在Popen尚未返回时；只结束本次迟到进程，不碰新代次的进程。
+        self._terminate(proc)
+        return reusable
+
+    def _stream_live(self, proc, generation, cancel_event):
+        with self._lock:
+            return (not cancel_event.is_set() and generation == self._stop_generation
+                    and self._stream_proc is proc)
 
     def feed(self, wav_bytes: bytes, cancel_event: threading.Event) -> bool:
-        """把一段 WAV 的 PCM 追加到连续播放通道。"""
+        """把一段 WAV 的 PCM 分块追加到连续通道；失败不重放已写出的片段。"""
+        with self._lock:
+            generation = self._stop_generation
         if cancel_event.is_set() or not self.available():
             return False
         with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
-            rate = wf.getframerate()
-            channels = wf.getnchannels()
-            width = wf.getsampwidth()
+            rate, channels, width = wf.getframerate(), wf.getnchannels(), wf.getsampwidth()
             pcm = wf.readframes(wf.getnframes())
         if width != 2:
             return False
         with self._lock:
             proc = self._stream_proc
-            stale = proc is None or proc.poll() is not None or rate != self._stream_rate \
-                or channels != self._stream_channels
+            stale = proc is None or proc.poll() is not None or rate != self._stream_rate or channels != self._stream_channels
         if stale:
-            self.end_stream()
-            if not self._open_stream(rate, channels):
+            if proc is not None:
+                self._end_stream(proc)
+            if not self._open_stream(rate, channels, generation=generation, cancel_event=cancel_event):
                 return False
             with self._lock:
+                if generation != self._stop_generation:
+                    return False
                 proc = self._stream_proc
+        if proc is None:
+            return False
         try:
-            proc.stdin.write(pcm)
+            offset = 0
+            while offset < len(pcm):
+                if not self._stream_live(proc, generation, cancel_event):
+                    self._discard_stream(proc)
+                    return False
+                # 原始管道写入不持播放器锁，stop可随时杀进程解除阻塞。
+                written = proc.stdin.write(pcm[offset:offset + 4096])
+                if not isinstance(written, int) or written <= 0:
+                    raise OSError("PCM写入没有进展")
+                offset += written
+            if not self._stream_live(proc, generation, cancel_event):
+                self._discard_stream(proc)
+                return False
             proc.stdin.flush()
+            if not self._stream_live(proc, generation, cancel_event):
+                self._discard_stream(proc)
+                return False
             return True
-        except (BrokenPipeError, OSError, AttributeError):
-            self.end_stream()
-            # 播放进程可能被设备重置；重建一次，避免整句丢失。
-            if cancel_event.is_set() or not self._open_stream(rate, channels):
-                return False
-            with self._lock:
-                proc = self._stream_proc
+        except (BrokenPipeError, OSError, AttributeError, ValueError):
+            self._discard_stream(proc)
+            return False
+
+    def _end_stream(self, proc):
+        with self._lock:
+            if self._stream_proc is proc:
+                self._stream_proc = None
+                self._stream_rate = self._stream_channels = 0
+            # 保留可被stop找到的引用，直到声卡排空/进程退出。
+            self._draining.add(proc)
+        try:
             try:
-                proc.stdin.write(pcm)
-                proc.stdin.flush()
-                return True
-            except (BrokenPipeError, OSError, AttributeError):
-                self.end_stream()
-                return False
+                if proc.stdin:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=60)
+            except Exception:
+                self._terminate(proc)
+        finally:
+            with self._lock:
+                self._draining.discard(proc)
 
     def end_stream(self) -> None:
         with self._lock:
             proc = self._stream_proc
-            self._stream_proc = None
-            self._stream_rate = 0
-            self._stream_channels = 0
-        if proc is None:
-            return
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            proc.wait(timeout=60)
-        except Exception:  # noqa: BLE001
-            try:
-                proc.kill()
-            except Exception:  # noqa: BLE001
-                pass
+        if proc is not None:
+            self._end_stream(proc)
 
     def play(self, wav_bytes: bytes, cancel_event: threading.Event) -> bool:
-        if not self.available():
+        with self._lock:
+            generation = self._stop_generation
+        if cancel_event.is_set() or not self.available():
             return False
-        exe = audio_tools()["aplay"]
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
-        Path(path).write_bytes(wav_bytes)
+        proc = None
         try:
-            proc = subprocess.Popen(
-                [exe, "-q", "-D", self.device, path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:  # noqa: BLE001
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
-            return False
-        with self._lock:
-            self._proc = proc
-        try:
+            Path(path).write_bytes(wav_bytes)
+            if cancel_event.is_set():
+                return False
+            proc = subprocess.Popen([audio_tools()["aplay"], "-q", "-D", self.device, path],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with self._lock:
+                stale = generation != self._stop_generation or cancel_event.is_set()
+                if not stale:
+                    self._proc = proc
+            if stale:
+                self._terminate(proc)
+                return False
             while proc.poll() is None:
-                if cancel_event.is_set():
-                    proc.kill()
+                if cancel_event.is_set() or generation != self._stop_generation:
+                    self._terminate(proc)
                     break
                 time.sleep(0.05)
-        except Exception:  # noqa: BLE001
-            pass
+            return proc.returncode == 0 and not cancel_event.is_set() and generation == self._stop_generation
+        except Exception:
+            if proc is not None:
+                self._terminate(proc)
+            return False
         finally:
             with self._lock:
-                self._proc = None
+                if self._proc is proc:
+                    self._proc = None
             try:
                 os.unlink(path)
             except OSError:
                 pass
-        return proc.returncode == 0
 
     def stop(self) -> None:
-        """取消/抢占：立即断开播放进程，不等缓冲区排空。"""
+        """只捕获并终止调用时已有的进程，包括正在排空的旧通道。"""
         with self._lock:
-            proc = self._proc
-            self._proc = None
-            stream = self._stream_proc
-            self._stream_proc = None
-            self._stream_rate = 0
-            self._stream_channels = 0
-        for item in (proc, stream):
-            if item is None:
-                continue
-            try:
-                if item.stdin:
-                    item.stdin.close()
-            except Exception:  # noqa: BLE001
-                pass
-            try:
-                item.kill()
-            except Exception:  # noqa: BLE001
-                pass
+            self._stop_generation += 1
+            processes = set(self._draining)
+            processes.update(p for p in (self._proc, self._stream_proc) if p is not None)
+            self._proc = self._stream_proc = None
+            self._stream_rate = self._stream_channels = 0
+            self._draining.clear()
+        for proc in processes:
+            self._terminate(proc)
 
 
 class DeviceSink:
@@ -447,8 +488,12 @@ class DeviceSink:
         before_speak: Optional[Callable] = None,
         after_speak: Optional[Callable] = None,
         status_cb: Optional[Callable] = None,
+        emergency_synth: Optional[Callable] = None,
+        cancel_synth: Optional[Callable] = None,
     ):
         self.synth = synth
+        self.emergency_synth = emergency_synth or synth
+        self.cancel_synth = cancel_synth
         self.player = player
         self.before_speak = before_speak
         self.after_speak = after_speak
@@ -467,6 +512,12 @@ class DeviceSink:
         except Exception:  # noqa: BLE001
             pass
 
+    def prepare(self, payload, cancel_event):
+        if cancel_event.is_set():
+            return b''
+        synth = self.emergency_synth if payload.get('priority', 3) == 0 else self.synth
+        return synth(str(payload.get('text') or ''))
+
     def speak(self, payload, cancel_event: threading.Event) -> None:
         if isinstance(payload, dict):
             text = str(payload.get("text") or "")
@@ -475,6 +526,10 @@ class DeviceSink:
         else:
             text, utterance, is_final = str(payload or ""), "", True
         if not text:
+            if isinstance(payload, dict) and payload.get('type') == 'speech_end':
+                with self._lock:
+                    if self._speaking and utterance == self._utterance:
+                        self._finish_utterance('completed')
             return
         self._payload = payload if isinstance(payload, dict) else {"text": text}
         with self._lock:
@@ -494,7 +549,9 @@ class DeviceSink:
             if cancel_event.is_set():
                 outcome = "cancelled"
                 return
-            wav = self.synth(text)
+            wav = payload.get("_prepared_wav") if isinstance(payload, dict) else None
+            if wav is None:
+                wav = self.synth(text)
             if cancel_event.is_set():
                 outcome = "cancelled"
                 return
@@ -524,9 +581,14 @@ class DeviceSink:
         if self.after_speak:
             self.after_speak()
 
+    def cancel_synthesis(self):
+        if self.cancel_synth:
+            self.cancel_synth()
+
     def stop(self) -> None:
         # 先置取消并立即杀掉播放进程，再拿锁；否则 sink 线程正在 end_stream 排空时会阻塞取消。
         self._cancel.set()
+        self.cancel_synthesis()
         self.player.stop()
         with self._lock:
             if self._speaking:

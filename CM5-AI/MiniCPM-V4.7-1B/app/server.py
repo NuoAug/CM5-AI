@@ -29,13 +29,14 @@ from pathlib import Path
 import numpy as np
 import psutil
 import requests
-from flask import Flask, Response, after_this_request, jsonify, request, send_file, send_from_directory, stream_with_context
+from flask import g, has_request_context, Flask, Response, after_this_request, jsonify, request, send_file, send_from_directory, stream_with_context
 from PIL import Image
 from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
 
 import intent
 from main_control import MainControlAdapter
+from turns import TurnCancelled
 import kws
 import device_io
 import device_voice
@@ -186,6 +187,8 @@ def start_device_services():
         DEVICE_SINK = device_io.DeviceSink(
             synth=lambda text: piper_wav(text)[0],
             player=player,
+            emergency_synth=lambda text: piper_subprocess_synth(text, 1.0)[0],
+            cancel_synth=lambda: _PIPER_WORKER.interrupt() if _PIPER_WORKER is not None else False,
             before_speak=DEVICE_VOICE.pause,
             after_speak=DEVICE_VOICE.resume,
         )
@@ -358,7 +361,7 @@ EYES_RULE = (
 )
 
 CHAT_RULE = (
-    "你是陪伴视障人士的中文语音助手。先说结论，再用两到三句口语中文回答，不分点、不加括号、不用 Markdown。"
+    "你是陪伴视障人士的中文语音助手。先回答核心问题，按语境简短接话或详细解释；可适时追问。你没有用户的个人经历，不把用户处境说成自己的经历。使用适合朗读的口语中文。"
     "不要描述画面，也不要提眼睛或视力；不要重复开场白。"
     "不编造事实，不假装能查询实时信息。"
     "如果对方问新闻、天气或实时数据，直接说明没有联网查询能力，请他看手机或问身边的人。"
@@ -538,9 +541,9 @@ SESSION_LOCK = threading.Lock()
 SESSIONS = {}
 MAX_SESSIONS = 8
 SESSION_TTL = 600
-MAX_HISTORY_TURNS = 3
-MAX_HISTORY_CHARS = 360
-MAX_CONTEXT_CHARS = 320
+MAX_HISTORY_TURNS = 6
+MAX_HISTORY_CHARS = 2400
+MAX_CONTEXT_CHARS = 1600
 ARMED_SECONDS = float(os.environ.get("ARMED_SECONDS", "15"))
 MIN_VOICE_SECONDS = float(os.environ.get("MIN_VOICE_SECONDS", "0.6"))
 MIN_VOICE_RMS = float(os.environ.get("MIN_VOICE_RMS", "0.008"))
@@ -581,13 +584,14 @@ def session_begin(session_id, frame_id):
 def session_remember(session_id, question, answer, visual=False, frame_id=None):
     if not question:
         return
+    check_turn()
     sess = get_session(session_id)
     with SESSION_LOCK:
         stale = bool(frame_id) and frame_id != sess["frame_id"]
         sess["history"].append(
             {
-                "q": question[:60],
-                "a": (answer or "")[:90],
+                "q": question[:240],
+                "a": (answer or "")[:800],
                 "visual": visual,
                 "frame": frame_id or "",
                 "stale": stale,
@@ -1183,6 +1187,49 @@ def vlm_health() -> bool:
         return False
 
 
+def active_turn():
+    return getattr(g, 'interaction_turn', None) if has_request_context() else None
+
+
+def begin_turn(session_id='', request_id=''):
+    token = active_turn()
+    if token is None:
+        token = OUTPUT.begin_turn(session_id, request_id)
+        if has_request_context():
+            g.interaction_turn = token
+    token.check()
+    return token
+
+
+@app.after_request
+def finish_turn_compute(response):
+    token = active_turn()
+    if token and not response.is_streamed:
+        token.finish_compute()
+    return response
+
+
+def check_turn():
+    token = active_turn()
+    if token:
+        token.check()
+    return token
+
+
+def vlm_messages(prompt, content):
+    if has_request_context() and getattr(g, 'model_task', None) == 'chat':
+        token = active_turn()
+        history = get_session(token.session_id)['history'] if token else []
+        messages = [{'role': 'system', 'content': CHAT_RULE}]
+        for h in history[-MAX_HISTORY_TURNS:]:
+            if h.get('visual') or h.get('stale'):
+                continue
+            messages.extend([{'role': 'user', 'content': h['q']}, {'role': 'assistant', 'content': h['a']}])
+        messages.append({'role': 'user', 'content': getattr(g, 'model_question', '') or prompt})
+        return messages
+    return [{'role': 'user', 'content': content}]
+
+
 def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
     content = []
     if img_b64:
@@ -1192,7 +1239,7 @@ def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
     content.append({"type": "text", "text": prompt})
     payload = {
         "model": "minicpm-v",
-        "messages": [{"role": "user", "content": content}],
+        "messages": vlm_messages(prompt, content),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": 0.9,
@@ -1201,10 +1248,22 @@ def call_vlm(img_b64, prompt, max_tokens=256, temperature=0.3):
         "presence_penalty": 0.1,
         "stream": False,
     }
+    token = check_turn()
     t0 = time.time()
     r = requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), timeout=300)
-    r.raise_for_status()
-    data = r.json()
+    close = getattr(r, "close", lambda: None)
+    if token:
+        token.register_close(close)
+    try:
+        r.raise_for_status()
+        data = r.json()
+        if token and (data.get("choices") or [{}])[0].get("finish_reason"):
+            token.backend_exit_confirmed = True
+        check_turn()
+    finally:
+        if token:
+            token.unregister_close(close)
+        close()
     msg = data["choices"][0]["message"]
     answer = (msg.get("content") or "").strip()
     for tag in ("<think>", "</think>"):
@@ -1240,16 +1299,20 @@ def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
     content.append({"type": "text", "text": prompt})
     payload = {
         "model": "minicpm-v",
-        "messages": [{"role": "user", "content": content}],
+        "messages": vlm_messages(prompt, content),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "top_p": 0.9,
         "top_k": 40,
         "stream": True,
     }
-    with requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), stream=True, timeout=300) as resp:
+    token = check_turn()
+    with requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), stream=True, timeout=(5, 30)) as resp:
+        if token:
+            token.register_close(resp.close)
         resp.raise_for_status()
-        for raw in resp.iter_lines():
+        for raw in resp.iter_lines(chunk_size=1):
+            check_turn()
             if not raw:
                 continue
             line = raw.decode("utf-8", "ignore").strip()
@@ -1262,7 +1325,12 @@ def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
                 data = json.loads(chunk)
             except json.JSONDecodeError:
                 continue
-            delta = data.get("choices", [{}])[0].get("delta", {}).get("content") or ""
+            choices = data.get('choices') or [{}]
+            if has_request_context() and choices[0].get('finish_reason'):
+                g.vlm_finish_reason = choices[0]['finish_reason']
+                if token:
+                    token.backend_exit_confirmed = True
+            delta = choices[0].get("delta", {}).get("content") or ""
             for tag in ("<think>", "</think>"):
                 delta = delta.replace(tag, "")
             if delta:
@@ -1556,6 +1624,10 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
     if task == "followup" and not question:
         raise ValueError("缺少问题")
 
+    token = begin_turn(session_id, trace_id)
+    if has_request_context():
+        g.model_task = task
+        g.model_question = question
     t0 = time.time()
     session_begin(session_id, frame_id)
 
@@ -1576,12 +1648,28 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
         TRACES.mark(trace_id, "vlm_start", task="chat")
         with VLM_LOCK:
-            out = call_vlm(
-                None,
-                prompt_for("chat", context=history_text(session_id), question=question),
-                spec["max_tokens"],
-                temperature=temperature_for(task),
-            )
+            if has_request_context() and getattr(g, 'stream_speech', False):
+                uid = OUTPUT.new_utterance_id('voice-stream')
+                segmenter = SemanticSegmenter()
+                full, sequence = '', 0
+                limit = 512 if any(w in question for w in ('详细', '具体解释', '展开')) else 256
+                for delta in stream_vlm(question, None, limit, temperature=temperature_for(task)):
+                    token.check()
+                    full += delta
+                    for piece in segmenter.feed(delta):
+                        sequence += 1
+                        OUTPUT.push_segment(piece, utterance_id=uid, sequence=sequence, is_final=False,
+                                            preempt=sequence == 1, source='voice', ttl=15, turn=token)
+                for piece in segmenter.flush():
+                    sequence += 1
+                    OUTPUT.push_segment(piece, utterance_id=uid, sequence=sequence, is_final=False,
+                                        preempt=sequence == 1, source='voice', ttl=15, turn=token)
+                OUTPUT.finish_utterance(uid, token)
+                g.streaming_utterance = uid
+                out = {'answer': full, 'finish_reason': getattr(g, 'vlm_finish_reason', None)}
+            else:
+                out = call_vlm(None, question, 512 if '详细' in question else 256,
+                               temperature=temperature_for(task))
         if out.get("prefill_ms") is not None:
             TRACES.mark(trace_id, "prefill_ms", value_ms=out["prefill_ms"], image=False, task="chat")
         if out.get("decode_ms") is not None:
@@ -1725,6 +1813,9 @@ def finish_trace_after_request(trace_id: str) -> None:
 
 def push_answer_segments(answer, task, source, utterance_id=None, priority=PRIORITY_ANSWER, meta=None, trace_id=""):
     """把完整答案按语义片段推入输出总线；每段独立 TTS，不重播全文。"""
+    if has_request_context() and getattr(g, "streaming_utterance", None):
+        return g.streaming_utterance
+    check_turn()
     answer = (answer or "").strip()
     if not answer:
         return None
@@ -1747,6 +1838,7 @@ def push_answer_segments(answer, task, source, utterance_id=None, priority=PRIOR
             preempt=(idx == 1),
             deadline_s=3.0 if idx == 1 else 8.0,
             meta={**(meta or {}), "task": task, "segments": total, "answer": answer[:260], "request_id": trace_id},
+            turn=active_turn(),
         )
     return uid
 
@@ -1796,6 +1888,9 @@ def api_talk():
         str(body.get("frame_id") or "").strip(),
         body.get("image_vlm") or body.get("image") or "",
     ) if has_image else ""
+    token = begin_turn(session_id, trace_id)
+    g.model_task = task
+    g.model_question = question
     session_begin(session_id, frame_id)
     context = session_context(session_id, body.get("context"))
 
@@ -1832,7 +1927,7 @@ def api_talk():
                         piece, utterance_id=uid, segment_id=f"{uid}-{idx}", sequence=idx,
                         is_final=(idx == total), priority=PRIORITY_ANSWER, source="chat",
                         reason="realtime", ttl=8.0, preempt=(idx == 1), deadline_s=3.0,
-                        meta={"request_id": trace_id},
+                        meta={"request_id": trace_id}, turn=token,
                     )
                     if idx == 1:
                         TRACES.mark(trace_id, "first_segment", chars=len(piece), segments=total)
@@ -1847,6 +1942,7 @@ def api_talk():
                 TRACES.mark(trace_id, "answer", chars=len(CHAT_REALTIME_REPLY), source="rule")
                 yield f"data: {json.dumps({'done': True, 'answer': CHAT_REALTIME_REPLY, 'trace_id': trace_id}, ensure_ascii=False)}\n\n"
             finally:
+                token.finish_compute()
                 leave()
 
         return Response(
@@ -1856,7 +1952,7 @@ def api_talk():
         )
 
     prompt = prompt_for(task, item, context, question)
-    max_tokens = spec["max_tokens"]
+    max_tokens = 512 if any(w in question for w in ("详细", "具体解释", "展开")) else max(spec["max_tokens"], 160)
     t0 = time.time()
     utterance_id = OUTPUT.new_utterance_id("talk")
 
@@ -1873,6 +1969,7 @@ def api_talk():
 
         def emit(piece, final):
             nonlocal sequence, emitted
+            token.check()
             piece = (piece or "").strip()
             if not piece:
                 return None
@@ -1883,7 +1980,7 @@ def api_talk():
                 piece, utterance_id=utterance_id, segment_id=f"{utterance_id}-{sequence}",
                 sequence=sequence, is_final=final, priority=PRIORITY_ANSWER, source="chat",
                 reason=task, ttl=8.0, preempt=(sequence == 1), deadline_s=3.0 if sequence == 1 else 8.0,
-                meta={"task": task, "segment": sequence, "request_id": trace_id},
+                meta={"task": task, "segment": sequence, "request_id": trace_id}, turn=token,
             )
             emitted += piece
             return {
@@ -1900,6 +1997,7 @@ def api_talk():
             inner = stream_vlm(prompt, img_b64, max_tokens, temperature=temperature_for(task))
             first_token = False
             for delta in inner:
+                token.check()
                 if not first_token and delta:
                     TRACES.mark(trace_id, "first_token", chars=len(delta))
                     first_token = True
@@ -1914,6 +2012,7 @@ def api_talk():
                 payload = emit(piece, idx == len(tail))
                 if payload:
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+            OUTPUT.finish_utterance(utterance_id, token)
             answer = settle_eyes_answer(task, full, spec["fallback"].format(item=item), item)
             session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
             TRACES.mark(trace_id, "answer", chars=len(answer), source="vlm")
@@ -1924,12 +2023,15 @@ def api_talk():
                     if payload:
                         yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'done': True, 'answer': answer, 'utterance_id': utterance_id, 'trace_id': trace_id}, ensure_ascii=False)}\n\n"
+        except TurnCancelled:
+            yield f"data: {json.dumps({'cancelled': True, 'done': True, 'trace_id': trace_id}, ensure_ascii=False)}\n\n"
         except Exception as exc:  # noqa: BLE001
             log.warning("talk stream failed: %s", exc)
             yield f"data: {json.dumps({'error': str(exc), 'utterance_id': utterance_id}, ensure_ascii=False)}\n\n"
         finally:
             if inner is not None:
                 inner.close()
+            token.finish_compute()
             VLM_LOCK.release()
             leave()
             log.info(
@@ -2010,6 +2112,8 @@ def api_eyes():
         return jsonify(result)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except TurnCancelled:
+        return jsonify(error="请求已取消", code="CANCELLED"), 499
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
@@ -2117,6 +2221,8 @@ def api_ask():
         else:
             result = run_eyes("chat", question=text, frame_id=frame_id,
                               session_id=session_id, trace_id=trace_id)
+    except TurnCancelled:
+        return jsonify(error="请求已取消", code="CANCELLED"), 499
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except ValueError as exc:
@@ -2257,12 +2363,35 @@ def api_voice():
 
     try:
         text = asr_transcribe(samples)
+    except TurnCancelled:
+        return jsonify(error="请求已取消", code="CANCELLED"), 499
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": f"语音识别失败：{exc}"}), 500
-    log.info("voice asr sr=%s dur=%.1fs rms=%.4f text=%r", src_sr, duration, rms, text)
-    TRACES.mark(trace_id, "asr_end", text=text, duration_s=round(duration, 2), rms=round(rms, 4))
+    return process_voice_final(body, text, trace_id, t0, duration, rms, src_sr)
+
+
+@app.post('/api/voice/final')
+def api_voice_final():
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict) or body.get('is_final') is not True or not isinstance(body.get('final_transcript'), str):
+        return jsonify(error='必须提供最终有效话语', code='INVALID_PAYLOAD'), 400
+    text = body['final_transcript'].strip()
+    if not text or len(text) > 4096:
+        return jsonify(error='最终话语为空或超限', code='INVALID_PAYLOAD'), 400
+    trace_id = str(body.get('request_id') or OUTPUT.new_utterance_id('voice-final'))
+    TRACES.start(trace_id, 'voice-final', session_id=str(body.get('session_id') or ''), evidence_mode='local_asr_final')
+    finish_trace_after_request(trace_id)
+    g.stream_speech = body.get('stream_speech') is True
+    return process_voice_final(body, text, trace_id, time.time(), None, None, 16000)
+
+
+def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_sr=16000):
+    session_id = str(body.get('session_id') or '').strip()
+    sess = get_session(session_id)
+    log.info("voice asr sr=%s dur=%s rms=%s text=%r", src_sr, duration, rms, text)
+    TRACES.mark(trace_id, "asr_end", text=text, duration_s=round(duration, 2) if duration is not None else None, rms=round(rms, 4) if rms is not None else None)
     if not text:
         log.info("voice empty dur=%.1fs rms=%.4f", duration, rms)
         return voice_reply("", "silent", latency_ms=int((time.time() - t0) * 1000), spoken=False)
@@ -2409,6 +2538,8 @@ def api_voice():
             result = run_eyes("chat", question=cmd, frame_id=frame_id, session_id=session_id, trace_id=trace_id)
         else:
             raise ValueError(f"任务未实现：{task.intent}")
+    except TurnCancelled:
+        return jsonify(error="请求已取消", code="CANCELLED"), 499
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
     except ValueError as exc:
@@ -2576,6 +2707,8 @@ def api_device_volume():
         return jsonify(result)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
+    except TurnCancelled:
+        return jsonify(error="请求已取消", code="CANCELLED"), 499
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
 
@@ -2625,6 +2758,8 @@ def api_output_cancel():
     """停止普通播报，保留更高优先级提示。"""
     body = request.get_json(force=True, silent=True) or {}
     min_priority = int(body.get("min_priority", PRIORITY_INTERRUPT))
+    if min_priority < PRIORITY_INTERRUPT:
+        return jsonify(error='普通停止不能撤销主控危险提醒', code='INVALID_PAYLOAD'), 400
     event = OUTPUT.cancel(min_priority=min_priority, source="browser")
     log.info("output cancel min_priority=%s", min_priority)
     return jsonify(event)
@@ -2654,6 +2789,8 @@ def api_output_stream():
                     item = q.get(timeout=15)
                 except queue.Empty:
                     yield ": ping\n\n"
+                    continue
+                if item.get("type") in ("speech", "speech_end") and not OUTPUT._payload_live(item):
                     continue
                 yield sse(item)
         except GeneratorExit:

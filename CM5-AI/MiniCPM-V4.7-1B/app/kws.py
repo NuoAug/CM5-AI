@@ -220,8 +220,10 @@ class WakeGate:
     只负责唤醒与切出一句指令；意图解析由 intent 模块完成。
     """
 
-    def __init__(self, engine_obj: Optional[KwsEngine] = None, armed_seconds: float = 15.0):
+    def __init__(self, engine_obj: Optional[KwsEngine] = None, armed_seconds: float = 15.0,
+                 buffer_commands: bool = True):
         self.kws = engine_obj or engine()
+        self.buffer_commands = bool(buffer_commands)
         self.stream = None
         self.ring = AudioRingBuffer(seconds=3.0)
         self.sample_rate = SAMPLE_RATE
@@ -261,6 +263,11 @@ class WakeGate:
 
         rms = float(np.sqrt(np.mean(np.square(x)))) if x.size else 0.0
         command = None
+        if not self.buffer_commands:
+            # 流式ASR自行处理端点；这里只保留唤醒与有界前滚，不再重复拼整段命令。
+            return {"wake": wake, "keyword": keyword, "command": None,
+                    "armed": now < self.armed_until, "rms": round(rms, 4),
+                    "preroll": self.ring.snapshot(0.8) if wake else None}
         if now < self.armed_until:
             if rms >= self.threshold:
                 self.speaking = True
