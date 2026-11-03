@@ -1,0 +1,52 @@
+{
+  "status": "candidate_not_product_default",
+  "base_model": {
+    "repository": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "license_declared": "Apache-2.0",
+    "source": "https://huggingface.co/Qwen/Qwen3.5-0.8B"
+  },
+  "converted_artifacts": {
+    "repository": "unsloth/Qwen3.5-0.8B-GGUF",
+    "revision": "6ab461498e2023f6e3c1baea90a8f0fe38ab64d0",
+    "license_declared": "Apache-2.0",
+    "source": "https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF",
+    "files": [
+      "Qwen3.5-0.8B-Q4_K_M.gguf",
+      "mmproj-F16.gguf"
+    ]
+  },
+  "runner": {
+    "repository": "ggml-org/llama.cpp",
+    "tag": "b12066",
+    "license_declared": "MIT",
+    "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12066",
+    "observed_version": "0.8.0-dev build12066 commit713319e28"
+  },
+  "component_license_status": {
+    "vlm_original_weights": "fixed_revision_apache_license_text_obtained",
+    "gguf_conversion": "upstream_declares_apache_2_0_exact_revision_recorded",
+    "runner": "fixed_tag_mit_license_text_obtained;LLVM_OpenMP_notice_in_archive",
+    "asr": "not_installed_not_cleared",
+    "ocr": "not_installed_not_cleared",
+    "kws": "not_installed_not_cleared",
+    "tts_piper_huayan": "not_installed_voice_license_unresolved",
+    "repository_samples": "existing_public_repo_samples_reused;not_newly_license_cleared"
+  },
+  "local_assets_receipt": "models/assets-installed.json (ignored; not a RAM report)",
+  "note": "This manifest does not certify all components for final redistribution. No MiniCPM fallback.",
+  "quality_failures_observed": [
+    "chat verbosity and repeated length truncation",
+    "single-image response omitted requested colors",
+    "two-image details require independent accuracy review"
+  ],
+  "installation_state": "must_be_resolved_from_local_asset_receipts_and_precheck",
+  "last_development_validation": {
+    "date": "2026-11-03",
+    "scope": "Windows runner-only text/single-image/two-image preflight and paired four-case smoke",
+    "status": "completed_not_quality_accepted",
+    "target_board": false,
+    "whole_interaction": false
+  },
+  "candidate_version": "1.1.26-candidate"
+}

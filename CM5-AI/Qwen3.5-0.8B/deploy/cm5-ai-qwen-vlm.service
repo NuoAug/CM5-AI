@@ -1,0 +1,26 @@
+[Unit]
+Description=CM5-AI llama.cpp VLM (Qwen3.5-0.8B candidate)
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cm5
+Group=cm5
+EnvironmentFile=/etc/cm5-ai-qwen.env
+WorkingDirectory=/opt/cm5-ai-qwen-candidate/runtime/llama.cpp/build/bin
+ExecStart=/bin/bash -lc 'exec /opt/cm5-ai-qwen-candidate/runtime/llama.cpp/build/bin/llama-server -m "$VLM_MODEL" --mmproj "$VLM_MMPROJ" --no-mmproj-offload --alias qwen3.5-0.8b -c "$VLM_CTX" -t "$VLM_THREADS" -ngl 0 --parallel 1 --host 127.0.0.1 --port 18101 --api-key "$VLM_API_KEY" --cors-origins http://127.0.0.1:18100'
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/cm5-ai-qwen-candidate/logs /opt/cm5-ai-qwen-candidate/data
+LimitNOFILE=65536
+# 不建议直接设置 MemoryMax：超限会被 systemd 直接杀掉，服务端自己的预算检查会先返回 503。
+# MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target

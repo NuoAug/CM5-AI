@@ -1,0 +1,31 @@
+[Unit]
+Description=CM5-AI web, KWS and device audio
+After=network.target cm5-ai-qwen-vlm.service
+Wants=cm5-ai-qwen-vlm.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=cm5
+Group=cm5
+SupplementaryGroups=audio video render
+EnvironmentFile=/etc/cm5-ai-qwen.env
+WorkingDirectory=/opt/cm5-ai-qwen-candidate/app
+ExecStartPre=/opt/cm5-ai-qwen-candidate/app/.venv/bin/python /opt/cm5-ai-qwen-candidate/app/precheck.py --allow-busy
+ExecStart=/opt/cm5-ai-qwen-candidate/app/.venv/bin/python /opt/cm5-ai-qwen-candidate/app/server.py
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/cm5-ai-qwen-candidate/logs /opt/cm5-ai-qwen-candidate/data
+LimitNOFILE=65536
+# 不用 MemoryMax 直接杀服务；内存预算由应用检查并返回 503。
+# MemoryMax=3G
+
+[Install]
+WantedBy=multi-user.target

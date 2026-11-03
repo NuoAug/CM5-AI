@@ -1,0 +1,11 @@
+[Unit]
+Description=Run CM5-AI healthcheck every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=cm5-ai-qwen-healthcheck.service
+
+[Install]
+WantedBy=timers.target

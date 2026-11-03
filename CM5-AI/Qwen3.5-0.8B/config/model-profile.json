@@ -1,0 +1,35 @@
+{
+  "profile_id": "qwen3.5-0.8b-q4km-f16-candidate",
+  "model_id": "qwen3.5-0.8b",
+  "stage": "candidate",
+  "default_for_product": false,
+  "baseline_code_sha": "e213bce16a9e4ad2713033e726d3507f21113f20",
+  "model_file": "models/vlm/Qwen3.5-0.8B/Qwen3.5-0.8B-Q4_K_M.gguf",
+  "mmproj_file": "models/vlm/Qwen3.5-0.8B/mmproj-F16.gguf",
+  "runner_file": "runtime/llama.cpp-b12066/llama-server.exe",
+  "runner_tag": "b12066",
+  "threads": 4,
+  "context": 2048,
+  "gpu_layers": 0,
+  "parallel": 1,
+  "main_control_transport": null,
+  "audio_input_default": "browser",
+  "audio_output_default": "browser",
+  "image_source_default": "main-control",
+  "validated": {
+    "text": true,
+    "single_image": true,
+    "two_images": true,
+    "cancel": false,
+    "target_board": false
+  },
+  "validation_evidence": "development_runner_smoke_only; target board, natural quality, runtime compute cancellation not validated",
+  "chat_template": "embedded_in_fixed_GGUF",
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  },
+  "stop_tokens": "runtime_embedded_template_defaults",
+  "visual_preprocessor": "libmtmd_with_matching_fixed_revision_mmproj",
+  "complete_interaction_assets_installed": false,
+  "runner_file_posix": "runtime/llama.cpp/build/bin/llama-server"
+}
