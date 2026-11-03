@@ -1,0 +1,137 @@
+{
+  "evidence": "runner_only_development_test",
+  "input_origin": "constructed dialogue prompts and existing repository cats sample; no personal recording",
+  "model": "MiniCPM-V 4.7 1B Q4_K_M + f16 visual component",
+  "configuration": {
+    "threads": 4,
+    "ctx": 2048,
+    "parallel": 1,
+    "gpu_layers": 0,
+    "cache_prompt": false,
+    "temperature": 0.2,
+    "top_p": 0.9
+  },
+  "cases": [
+    {
+      "case_id": "chat-natural",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是离线中文语音助手。先回答核心问题，按需要展开细节；自然接住上下文，不编造依据。不根据图片判断行走安全、距离或通行条件。"
+        },
+        {
+          "role": "user",
+          "content": "我今天工作总出错，越着急越做不好，觉得自己挺没用的。你能陪我聊聊吗？"
+        }
+      ],
+      "max_tokens": 128,
+      "ttft_content_ms": 433.3866000015405,
+      "total_ms": 2087.5685999999405,
+      "answer": "当然可以，我在这儿呢。别担心，我会陪你聊聊。你遇到的这些情况很常见，有时候确实需要一点耐心来理清思路。不过没关系，我理解你的感受，也愿意倾听。你可以告诉我具体发生了什么，或者只是想发泄一下情绪，我都在听。",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 58,
+        "prompt_tokens": 76,
+        "total_tokens": 134,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "http_status": 200,
+      "status": "ok"
+    },
+    {
+      "case_id": "chat-multiturn",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是离线中文语音助手。先回答核心问题，按需要展开细节；自然接住上下文，不编造依据。不根据图片判断行走安全、距离或通行条件。"
+        },
+        {
+          "role": "user",
+          "content": "我今天工作总出错，越着急越做不好，觉得自己挺没用的。你能陪我聊聊吗？"
+        },
+        {
+          "role": "assistant",
+          "content": "当然可以，我在这儿呢。别担心，我会陪你聊聊。你遇到的这些情况很常见，有时候确实需要一点耐心来理清思路。不过没关系，我理解你的感受，也愿意倾听。你可以告诉我具体发生了什么，或者只是想发泄一下情绪，我都在听。"
+        },
+        {
+          "role": "user",
+          "content": "你刚才说的我能理解，不过我最怕的是同事觉得我拖后腿。你能接着刚才的话说说吗？"
+        }
+      ],
+      "max_tokens": 160,
+      "ttft_content_ms": 848.6062000010861,
+      "total_ms": 2680.744900004356,
+      "answer": "完全理解你的顾虑，我也很担心同事会认为我拖后腿。不过没关系，我理解你的感受，也愿意尝试调整。你可以试着把任务分解成更小的步骤，这样更容易完成。或者，你也可以先完成一个简单的小目标，看看进展后，再决定下一步。我会在这里支持你，随时准备帮助你。",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 70,
+        "prompt_tokens": 170,
+        "total_tokens": 240,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "http_status": 200,
+      "status": "ok"
+    },
+    {
+      "case_id": "chat-detailed",
+      "messages": [
+        {
+          "role": "system",
+          "content": "你是离线中文语音助手。先回答核心问题，按需要展开细节；自然接住上下文，不编造依据。不根据图片判断行走安全、距离或通行条件。"
+        },
+        {
+          "role": "user",
+          "content": "请详细解释一下心理学里的反刍思维是什么、它和正常反思有什么区别，再给我一个今晚能实行的例子。不要随意给我下诊断。"
+        }
+      ],
+      "max_tokens": 256,
+      "ttft_content_ms": 496.0596000018995,
+      "total_ms": 3875.768199999584,
+      "answer": "反刍思维是一种心理学概念，指的是个体反复回顾过去的事件、想法或经历，通常是为了消化、理解或处理这些内容。这种思维模式可能让人陷入循环，反复思考同一问题或经历，导致焦虑或无力感。\n\n正常反思则更灵活，通常基于当前情境，以清晰、客观的方式回顾和评估自己的行为和感受。它有助于调整行为、学习并适应变化。\n\n今晚的例子：当你感到疲惫时，反刍思维可能是反复回想昨晚的糟糕经历，而正常反思则是评估当前任务是否可行，并决定是否需要休息或调整计划。",
+      "finish_reason": "stop",
+      "usage": {
+        "completion_tokens": 124,
+        "prompt_tokens": 87,
+        "total_tokens": 211,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "http_status": 200,
+      "status": "ok"
+    },
+    {
+      "case_id": "vision-cats",
+      "messages": [
+        {
+          "role": "user",
+          "content": "[image bytes omitted]; 请描述图里有什么，具体说说数量、姿态和主要颜色。看不清就说看不清。"
+        }
+      ],
+      "max_tokens": 128,
+      "ttft_content_ms": 2989.339099993231,
+      "total_ms": 6535.10439999809,
+      "answer": "图中有两只猫，具体描述如下：\n\n- 数量：2只猫。\n- 姿态：\n  - 左边的猫：侧卧着，身体舒展，头转向右，眼睛半睁，尾巴自然下垂，看起来放松。\n  - 右边的猫：侧卧在后方，身体弯曲，头低着，似乎在睡觉，姿态非常放松。\n- 主要颜色：\n  - 条纹猫：灰褐色与黑色相间的条纹，属于虎斑猫。\n  - 背景：亮粉色（或玫红色）的布料，沙发是红色。\n  -",
+      "finish_reason": "length",
+      "usage": {
+        "completion_tokens": 128,
+        "prompt_tokens": 142,
+        "total_tokens": 270,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        }
+      },
+      "http_status": 200,
+      "status": "ok",
+      "image_preprocessing": {
+        "sample": "cats.jpg",
+        "max_side_px": 512,
+        "jpeg_quality": 85
+      }
+    }
+  ]
+}
