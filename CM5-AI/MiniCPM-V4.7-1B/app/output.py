@@ -101,7 +101,9 @@ class OutputBus:
         self._sink_stop = threading.Event()
         self._history: deque = deque(maxlen=128)
         self._prepare_queues = {False: queue.Queue(maxsize=8), True: queue.Queue(maxsize=4)}
-        self._prepare_threads = []
+        self._prepare_threads = [None, None]
+        self._attachment_generation = 0
+        self._lifecycle_lock = threading.RLock()
         self._active_jobs = {}
         self._playing_payload = None
         self._sink_queue = queue.PriorityQueue(maxsize=4)
@@ -147,34 +149,68 @@ class OutputBus:
             self._stats["subscribers"] = len(self._subs)
 
     def attach_sink(self, sink) -> None:
-        """设备端 ALSA sink；浏览器调试时不挂载。"""
-        with self._lock:
-            self._sink = sink
-            self._sink_stop.clear()
-            self._stats["sink"] = type(sink).__name__
-        if callable(getattr(sink, 'prepare', None)):
-            for urgent in (False, True):
-                thread = threading.Thread(target=self._prepare_worker, args=(urgent,),
-                                          name='urgent-tts' if urgent else 'ordinary-tts', daemon=True)
-                self._prepare_threads.append(thread)
-                thread.start()
-        if self._sink_thread is None or not self._sink_thread.is_alive():
-            self._sink_thread = threading.Thread(target=self._sink_worker, name="output-sink", daemon=True)
-            self._sink_thread.start()
+        """挂载幂等；普通/紧急合成和播放各只保留一个工作线程槽位。"""
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._sink is sink and not self._sink_stop.is_set():
+                    return
+                previous = self._sink
+            if previous is not None:
+                self.detach_sink()
+            with self._lock:
+                self._attachment_generation += 1
+                self._sink_stop = threading.Event()
+                self._sink = sink
+                self._stats["sink"] = type(sink).__name__
+                if callable(getattr(sink, 'prepare', None)):
+                    for urgent in (False, True):
+                        index = int(urgent)
+                        thread = self._prepare_threads[index]
+                        if thread is None or not thread.is_alive():
+                            thread = threading.Thread(target=self._prepare_worker, args=(urgent,),
+                                                      name='urgent-tts' if urgent else 'ordinary-tts', daemon=True)
+                            self._prepare_threads[index] = thread
+                            thread.start()
+                if self._sink_thread is None or not self._sink_thread.is_alive():
+                    self._sink_thread = threading.Thread(target=self._sink_worker, name="output-sink", daemon=True)
+                    self._sink_thread.start()
 
     def detach_sink(self) -> None:
-        with self._lock:
-            sink = self._sink
-            self._sink = None
-            self._stats["sink"] = "none"
-        self._sink_stop.set()
-        if sink is not None:
-            try:
-                sink.stop()
-            except Exception:  # noqa: BLE001
-                pass
+        with self._lifecycle_lock:
+            with self._lock:
+                sink = self._sink
+                self._sink = None
+                self._sink_stop.set()
+                self._attachment_generation += 1
+                self._epoch += 1
+                self._stats["sink"] = "none"
+                for _, event, _ in list(self._active_jobs.values()):
+                    event.set()
+                for pending in [*self._prepare_queues.values(), self._sink_queue]:
+                    while True:
+                        try:
+                            pending.get_nowait()
+                            self._stats["dropped"] += 1
+                        except queue.Empty:
+                            break
+                self._history.clear()
+                for subscriber in self._subs:
+                    while True:
+                        try:
+                            subscriber.get_nowait()
+                        except queue.Empty:
+                            break
+            self.turns.cancel()
+            if sink is not None:
+                try:
+                    sink.stop()
+                except Exception:
+                    pass
 
     def _payload_live(self, payload):
+        attachment = payload.get('_attachment_generation')
+        if attachment is not None and (attachment != self._attachment_generation or self._sink is None or self._sink_stop.is_set()):
+            return False
         if time.monotonic() * 1000 >= payload.get('expires_mono_ms', float('inf')):
             return False
         if payload.get('priority', PRIORITY_ANSWER) <= PRIORITY_DANGER:
@@ -184,7 +220,12 @@ class OutputBus:
         return payload.get('epoch') == self._epoch
 
     def _prepare_worker(self, urgent):
-        while not self._sink_stop.is_set():
+        while True:
+            with self._lock:
+                if self._sink is None:
+                    if self._prepare_threads[int(urgent)] is threading.current_thread():
+                        self._prepare_threads[int(urgent)] = None
+                    return
             try:
                 priority, event_id, payload = self._prepare_queues[urgent].get(timeout=.1)
             except queue.Empty:
@@ -214,7 +255,12 @@ class OutputBus:
                     self._active_jobs.pop(event_id, None)
 
     def _sink_worker(self) -> None:
-        while not self._sink_stop.is_set():
+        while True:
+            with self._lock:
+                if self._sink is None:
+                    if self._sink_thread is threading.current_thread():
+                        self._sink_thread = None
+                    return
             try:
                 _priority, _event_id, payload = self._sink_queue.get(timeout=0.5)
             except queue.Empty:
@@ -394,7 +440,9 @@ class OutputBus:
                 "at_mono": now,
             }
             sink = self._sink
+            attachment_generation = self._attachment_generation
         if sink is not None:
+            payload = dict(payload, _attachment_generation=attachment_generation)
             if priority <= PRIORITY_INTERRUPT or event.preempt:
                 try:
                     sink.stop()
@@ -430,7 +478,9 @@ class OutputBus:
         with self._lock:
             self._fanout(payload)
             sink = self._sink
+            attachment_generation = self._attachment_generation
         if sink is not None:
+            payload = dict(payload, _attachment_generation=attachment_generation)
             destination = self._prepare_queues[False] if callable(getattr(sink, 'prepare', None)) else self._sink_queue
             try:
                 destination.put_nowait((PRIORITY_ANSWER, payload['id'], payload))
@@ -512,6 +562,9 @@ class OutputBus:
             data["queue_limit"] = MAX_QUEUE
             data["epoch"] = self._epoch
             data['active_jobs'] = len(self._active_jobs)
+            data['connection_closures'] = self.turns.close_status()
+            data['attachment_generation'] = self._attachment_generation
+            data['prepare_workers'] = sum(t is not None and t.is_alive() for t in self._prepare_threads)
             data['prepare_queues'] = {str(k): q.qsize() for k, q in self._prepare_queues.items()}
             last = data.get("last_event")
             if last:
