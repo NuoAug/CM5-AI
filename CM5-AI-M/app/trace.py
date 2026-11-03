@@ -107,6 +107,7 @@ class TraceStore:
         self._lock = threading.RLock()
         self._active: dict[str, RequestTrace] = {}
         self._recent: dict[str, tuple[RequestTrace, float]] = {}
+        self._listeners = []
 
     def start(self, trace_id: str, kind: str, **meta) -> RequestTrace:
         trace = RequestTrace(trace_id, kind, **meta)
@@ -155,6 +156,18 @@ class TraceStore:
         self._write(data)
         return data
 
+    def subscribe(self, callback):
+        with self._lock:
+            if callback not in self._listeners:
+                if len(self._listeners) >= 8:
+                    raise ValueError("trace listener limit")
+                self._listeners.append(callback)
+
+    def unsubscribe(self, callback):
+        with self._lock:
+            if callback in self._listeners:
+                self._listeners.remove(callback)
+
     def _write(self, data: dict) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,6 +178,15 @@ class TraceStore:
                 f.write(json.dumps(data, ensure_ascii=False) + "\n")
         except OSError:
             pass
+        with self._lock:
+            callbacks = list(self._listeners)
+        for callback in callbacks:
+            try:
+                callback(data)
+            except Exception:
+                # Observers must not interrupt generation/playback; batch logger records its own failures.
+                import logging
+                logging.getLogger("cm5").exception("trace observer failed")
 
     def records(self, limit: int = 100, kind: Optional[str] = None) -> list[dict]:
         with self._lock:

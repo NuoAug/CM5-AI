@@ -42,6 +42,25 @@ class DeviceVolumeTests(unittest.TestCase):
         with mock.patch.object(device_volume, "_mixer", return_value=(["amixer"], "Array", "PCM,1")), mock.patch.object(device_volume, "_run", return_value="Capabilities: cvolume\nCapture 20 [60%]"):
             with self.assertRaises(RuntimeError): device_volume.get_volume()
 
+    def test_numeric_output_card_is_not_silently_card_zero(self):
+        with mock.patch.object(device_volume.shutil, 'which', return_value='/usr/bin/amixer'), mock.patch.dict(device_volume.os.environ, {'ALSA_OUTPUT':'plughw:2,0','ALSA_MIXER_CARD':'','ALSA_MIXER_CONTROL':'PCM,0'}):
+            args,card,control=device_volume._mixer()
+        self.assertEqual(card,'2')
+        self.assertEqual(args,['/usr/bin/amixer','-c','2'])
+
+    def test_partial_mute_and_channels_are_visible(self):
+        mixed=SAMPLE.replace('Playback 37 [62%] [-23.00dB] [on]', 'Playback 37 [62%] [-23.00dB] [off]',1)
+        with mock.patch.object(device_volume,'_mixer',return_value=(['amixer'],'Array','PCM,0')),mock.patch.object(device_volume,'_run',return_value=mixed):
+            result=device_volume.get_volume()
+        self.assertFalse(result['muted'])
+        self.assertTrue(result['partially_muted'])
+        self.assertEqual(result['channels_percent'],[62,62])
+
+    def test_amixer_failure_detail_is_not_reported_as_success(self):
+        with mock.patch.object(device_volume.subprocess,'run',return_value=mock.Mock(returncode=1,stdout='',stderr='Unable to find simple control PCM')):
+            with self.assertRaisesRegex(RuntimeError,'Unable to find simple control'):
+                device_volume._run(['amixer','sget','PCM'])
+
     def test_api_mode_errors_and_set(self):
         client = server.app.test_client()
         with mock.patch.object(server, "OUTPUT_SINK", "browser"):

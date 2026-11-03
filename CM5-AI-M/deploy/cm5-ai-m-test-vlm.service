@@ -1,0 +1,19 @@
+[Unit]
+Description=CM5-AI-M temporary MiniCPM physical test runner
+After=network.target
+
+[Service]
+Type=simple
+User=mylin
+Group=mylin
+EnvironmentFile=/home/mylin/CM5-AI-M/config/pi-test.env
+WorkingDirectory=/home/mylin/CM5-AI-M
+ExecStart=/bin/bash /home/mylin/CM5-AI-M/deploy/pi-test-vlm.sh
+Restart=no
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=25
+StandardOutput=journal
+StandardError=journal
+
+# Intentionally no Install section: start manually for this test; do not enable.

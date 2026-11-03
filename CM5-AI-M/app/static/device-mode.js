@@ -1,7 +1,7 @@
 /* 远程测试台只控制服务端设备；状态未知或掉线时不退回电脑外设。 */
 (() => {
   'use strict';
-  const ui = window.CM5DeviceUI = { remote: true, status: null, live: false, pinned: false };
+  const ui = window.CM5DeviceUI = { remote: true, status: null, live: false, pinned: false, connected: false };
   let epoch = 0;
   let timer = null;
   let inflight = null;
@@ -14,22 +14,27 @@
   else $('sample-image').parentElement.before(notice);
 
   async function api(path, body) {
-    const options = { cache: 'no-store' };
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const options = { cache: 'no-store', signal: controller.signal };
     if (body !== undefined) {
       options.method = 'POST';
       options.headers = { 'Content-Type': 'application/json' };
       options.body = JSON.stringify(body);
     }
-    const response = await fetch(path, options);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
-    return data;
+    try {
+      const response = await fetch(path, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || ('HTTP ' + response.status));
+      return data;
+    } finally { clearTimeout(timeout); }
   }
   function render(status) {
     if (typeof status.remote_device_mode !== 'boolean') throw new Error('服务端未提供外设模式，请刷新或升级服务');
-    ui.status = status;
-    ui.remote = !!status.remote_device_mode;
-    if (!ui.remote) { notice.textContent = '开发模式：使用本机浏览器外设'; return; }
+    if (!status.remote_device_mode || status.voice_source !== 'device' || status.output_sink !== 'alsa') {
+      throw new Error('实机服务外设配置错误：必须使用树莓派device输入与ALSA输出');
+    }
+    ui.status = status; ui.connected = true; ui.remote = true;
     const voice = status.voice || {};
     const camera = status.camera || {};
     notice.textContent = '摄像头：树莓派' + (camera.running ? '（采集中）' : '（未采集）') +
@@ -39,7 +44,9 @@
     $('btn-cam').textContent = ui.live ? '关闭树莓派预览' : '打开树莓派摄像头';
     $('btn-shot').disabled = !camera.running;
     $('btn-voice').textContent = voice.running ? '停止树莓派收音' : '开启树莓派语音唤醒';
-    voiceState(voice.error || (voice.running ? (voice.paused ? '树莓派播报中 · 暂停收音' : '树莓派监听中 · 说「小冰小冰」') : '树莓派收音已停止'), !!voice.running && !voice.error);
+    voiceState(voice.error || (voice.running ? (voice.output_active ? (voice.aec_reference_verified ? '持续采集 · 播报中，可测试插话' : '持续采集 · 播报期间识别受保护') : '树莓派监听中 · 说「小冰小冰」') : '树莓派收音已停止'), !!voice.running && !voice.error);
+    const details = $('device-voice-details');
+    details.textContent = (voice.aec_reference_verified ? 'AEC参考路径已声明，真人插话仍需本轮验证。' : 'AEC参考尚未验证；播报时持续采集，但屏蔽识别以免回声误触发。') + (voice.last_partial ? ' 临时转写：' + voice.last_partial : '');
     $('audio').style.display = 'none';
     $('btn-tts').textContent = '在树莓派播报';
   }
@@ -48,13 +55,16 @@
   let pendingVolume = null;
   let volumeBusy = false;
   let volumeTimer = null;
+  let volumeGeneration = 0;
   function showVolume(value) {
+    if (!value || !Number.isInteger(value.volume_percent) || value.volume_percent < 0 || value.volume_percent > 100) throw new Error('树莓派返回的音量无效');
     confirmedVolume = value;
     $('device-volume').value = value.volume_percent;
-    $('device-volume').disabled = false;
-    $('device-volume-value').textContent = value.volume_percent + '%' + (value.muted ? '（静音）' : '');
+    $('device-volume').disabled = !ui.connected;
+    $('device-volume-value').textContent = value.volume_percent + '%' + (value.muted ? '（静音）' : value.partially_muted ? '（部分声道静音）' : '');
     $('device-mute').textContent = value.muted ? '取消静音' : '静音';
-    $('device-mute').disabled = !value.mute_supported;
+    $('device-mute').disabled = !ui.connected || !value.mute_supported;
+    $('device-volume-status').textContent = '树莓派已读回 · ' + (value.card || '') + ' / ' + (value.control || '') + (value.mute_supported ? '' : ' · 无静音开关，可将音量调至0%');
   }
   async function flushVolume() {
     clearTimeout(volumeTimer);
@@ -72,13 +82,15 @@
     } catch (error) {
       pendingVolume = null;
       if (confirmedVolume) showVolume(confirmedVolume);
+      $('device-volume-status').textContent = '设置失败：' + error.message + '；滑块仅显示上次确认值，请点“读取音量”核实。';
       toast('树莓派音量调节失败：' + error.message);
     } finally {
       volumeBusy = false;
-      if (confirmedVolume) $('device-mute').disabled = !confirmedVolume.mute_supported;
+      if (confirmedVolume) $('device-mute').disabled = !ui.connected || !confirmedVolume.mute_supported;
     }
   }
   function queueVolume(change) {
+    volumeGeneration += 1;
     pendingVolume = Object.assign(pendingVolume || {}, change);
     clearTimeout(volumeTimer);
     volumeTimer = setTimeout(flushVolume, 180);
@@ -95,9 +107,40 @@
     return flushVolume();
   };
 
+  function disconnected(error) {
+    ui.connected = false;
+    notice.textContent = '树莓派状态未确认：' + error.message + '；不会启用Windows外设';
+    $('device-volume').disabled = true; $('device-mute').disabled = true;
+    $('device-volume-status').textContent = '连接中断，当前音量未确认';
+    voiceState('树莓派连接中断；设备是否仍收音需恢复连接后确认', false);
+  }
+  async function readVolume() {
+    if (volumeBusy || pendingVolume) return;
+    const generation = volumeGeneration;
+    try {
+      await remote(); const value = await api('/api/device/volume');
+      if (generation === volumeGeneration && !volumeBusy && !pendingVolume) showVolume(value);
+    }
+    catch (error) {
+      $('device-volume').disabled = true; $('device-mute').disabled = true;
+      $('device-volume-value').textContent = '未确认';
+      $('device-volume-status').textContent = '音量读取失败：' + error.message + '；可点“读取音量”重试';
+    }
+  }
+  $('device-volume-refresh').onclick = readVolume;
+  $('device-volume-test').onclick = async () => {
+    try { await remote(); await deviceSpeak('这是树莓派扬声器音量测试，一二三四五。'); }
+    catch (error) { toast('试听失败：' + error.message); }
+  };
   const ready = api('/api/device/status').then(status => { render(status); return status; });
-  ready.catch(error => { notice.textContent = '设备状态不可用：' + error.message + '；不会启用电脑外设'; });
-  async function remote() { await ready; return ui.remote; }
+  ready.catch(disconnected);
+  async function remote() {
+    if (!ui.connected) {
+      try { render(await api('/api/device/status')); }
+      catch (error) { disconnected(error); throw error; }
+    }
+    return true;
+  }
 
   const originalCloseCamera = closeCamera;
   closeCamera = function () {
@@ -166,10 +209,9 @@
     $('sample-image').value = '';
     preview(epoch);
   }
-  const browserCameraClick = $('btn-cam').onclick;
   $('btn-cam').onclick = async () => {
     try {
-      if (!await remote()) return browserCameraClick();
+      await remote();
       if (ui.live) closeCamera();
       else await openDeviceCamera();
     } catch (error) {
@@ -177,10 +219,9 @@
       toast(error.message);
     }
   };
-  const browserShot = $('btn-shot').onclick;
   $('btn-shot').onclick = async () => {
     try {
-      if (!await remote()) return browserShot();
+      await remote();
       closeCamera();
       if (await loadFrame('/api/camera/still', epoch, false)) ui.pinned = true;
       render(await api('/api/device/status'));
@@ -189,7 +230,7 @@
   const browserCapture = captureFrame;
   captureFrame = async function () {
     try {
-      if (!await remote()) return browserCapture();
+      await remote();
       if (ui.live) {
         if (!await loadFrame('/api/camera/still', epoch, false, '自动抽帧（树莓派摄像头）')) return null;
         return { full: state.imageFull, small: state.imageVlm };
@@ -200,7 +241,7 @@
   };
   $('btn-voice').onclick = async () => {
     try {
-      if (!await remote()) return vOn ? stopVoice() : startVoice();
+      await remote();
       const status = await api('/api/device/status');
       render(await api('/api/device/voice', { action: status.voice.running ? 'stop' : 'start' }));
     } catch (error) { toast(error.message); }
@@ -211,33 +252,39 @@
     $('meta-tts').textContent = result.queued ? '已提交至树莓派扬声器' : '未入队';
     return result;
   }
-  const browserTts = playTts;
   playTts = async function (text) {
-    try { return await remote() ? await deviceSpeak(text) : await browserTts(text); }
+    try { await remote(); return await deviceSpeak(text); }
     catch (error) { toast(error.message); }
   };
-  const browserSpeakAnswer = speakAnswer;
-  speakAnswer = function (text) { if (!ui.remote) return browserSpeakAnswer(text); };
-  const browserSynth = synthTts;
+  speakAnswer = function () {}; // 统一树莓派输出总线负责播报，网页不重复播放。
   synthTts = async function (...args) {
-    if (await remote()) throw new Error('远程模式禁止在电脑播放，请使用树莓派播报接口');
-    return browserSynth(...args);
+    throw new Error('实机版本禁止在Windows播放，请使用树莓派播报接口');
   };
+  let displayedUtterance = '', displayedSequence = 0, displayedText = '';
   ui.showSpeech = function (event) {
+    const uid = event.utterance_id || event.id || '';
+    if (uid !== displayedUtterance) { displayedUtterance = uid; displayedSequence = 0; displayedText = ''; }
+    if (event.sequence && event.sequence <= displayedSequence) return;
+    if (event.sequence) displayedSequence = event.sequence;
+    displayedText = (event.meta && event.meta.answer) || (displayedText + (event.text || ''));
+    displayedText = displayedText.slice(-8000);
     $('out-eyes').classList.remove('empty');
-    $('out-eyes').textContent = (event.meta && event.meta.answer) || event.text;
-    $('meta-eyes').textContent = '树莓派输出 · ' + (event.source || '') + ' · ' + (event.utterance_id || '');
+    $('out-eyes').textContent = displayedText;
+    $('meta-eyes').textContent = '树莓派输出已提交 · ' + (event.source || '') + ' · ' + uid + '（是否实际出声请人工确认）';
   };
+  let statusBusy = false;
   setInterval(async () => {
-    if (document.hidden) return;
+    if (document.hidden || statusBusy) return;
+    statusBusy = true;
     try { render(await api('/api/device/status')); }
-    catch (error) { notice.textContent = '树莓派连接中断：' + error.message + '；不会改用电脑外设'; }
+    catch (error) { disconnected(error); }
+    finally { statusBusy = false; }
   }, 5000);
+  setInterval(() => { if (!document.hidden) readVolume(); }, 10000);
   ready.then(async () => {
     if (ui.remote) {
       $('device-volume-controls').style.display = 'flex';
-      try { showVolume(await api('/api/device/volume')); }
-      catch (error) { $('device-volume-value').textContent = '不可用'; $('device-volume').disabled = true; }
+      await readVolume();
     }
     if (ui.remote && ui.status.image_source === 'standalone-device-test') {
       try { await openDeviceCamera(); } catch (error) { setCameraPlaceholder('树莓派摄像头不可用', error.message); }

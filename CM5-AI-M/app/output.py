@@ -15,6 +15,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
+from tts_worker import TTSInterrupted
 from turns import TurnManager
 
 PRIORITY_DANGER = 0
@@ -247,9 +248,19 @@ class OutputBus:
                         break
                     except queue.Full:
                         continue
-            except Exception:
+            except Exception as exc:
                 with self._lock:
-                    self._stats['prepare_failed'] = self._stats.get('prepare_failed', 0) + 1
+                    if isinstance(exc, TTSInterrupted) or cancel.is_set() or not self._payload_live(payload):
+                        self._stats['prepare_cancelled'] = self._stats.get('prepare_cancelled', 0) + 1
+                    else:
+                        error = {'stage': 'prepare', 'error_type': type(exc).__name__, 'message': str(exc)[:512],
+                                 'utterance_id': str(payload.get('utterance_id') or '')[:128],
+                                 'source': str(payload.get('source') or '')[:64],
+                                 'event_id': event_id, 'at_mono': time.monotonic(),
+                                 'played': False, 'physical_first_sound_ms': None}
+                        self._stats['prepare_failed'] = self._stats.get('prepare_failed', 0) + 1
+                        self._stats['last_prepare_error'] = error
+                        self._fanout({'type': 'output_error', 'id': next(self._ids), **error})
             finally:
                 with self._lock:
                     self._active_jobs.pop(event_id, None)

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>CM5 AI 功能测试台 v1.1.20</title>
+<title>CM5-AI-M 树莓派实机测试台</title>
 <style>
   :root {
     --bg: #0b1220;
@@ -182,28 +182,35 @@
     opacity: 0; pointer-events: none; transition: .25s; font-size: 13px; max-width: 80vw; z-index: 99;
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .test-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .test-grid label, .test-ratings label { font-size:12px; color:var(--muted); }
+  .test-grid textarea { min-height:66px; margin-top:5px; }
+  .test-ratings { align-items:end; }
+  .test-ratings label { flex:1 1 120px; }
+  .test-ratings select { margin-top:5px; }
+  @media (max-width:720px) { .test-grid { grid-template-columns:1fr; } }
 </style>
 </head>
 <body>
 <header>
   <div class="brand">
-    <h1>CM5 AI 功能测试台</h1>
+    <h1>CM5-AI-M · 树莓派实机测试台</h1>
   </div>
   <div class="status">
     <div class="pill"><span class="dot" id="dot-vlm"></span>VLM</div>
     <div class="pill"><span class="dot" id="dot-ocr"></span>OCR</div>
     <div class="pill"><span class="dot" id="dot-tts"></span>TTS</div>
-    <div class="pill metric" id="mem-pill" title="左：模型侧进程内存；右：本机整机内存">
+    <div class="pill metric" id="mem-pill" title="左：模型侧进程内存；右：树莓派整机内存">
       <span class="metric-name">内存占用</span>
       <span class="metric-item">模型 <b id="mem-model">--</b></span>
       <span class="metric-sep"></span>
-      <span class="metric-item">本机 <b id="mem-device">--</b></span>
+      <span class="metric-item">树莓派 <b id="mem-device">--</b></span>
     </div>
-    <div class="pill metric" id="cpu-pill" title="左：模型侧进程占整机 CPU；右：本机整机 CPU 使用率">
+    <div class="pill metric" id="cpu-pill" title="左：模型侧进程占整机 CPU；右：树莓派整机 CPU 使用率">
       <span class="metric-name">CPU占用</span>
       <span class="metric-item">模型 <b id="cpu-model">--</b></span>
       <span class="metric-sep"></span>
-      <span class="metric-item">本机 <b id="cpu-device">--</b></span>
+      <span class="metric-item">树莓派 <b id="cpu-device">--</b></span>
     </div>
   </div>
 </header>
@@ -266,7 +273,7 @@
     <div class="card">
       <div class="panel active" id="panel-eyes">
         <h2>语音交互</h2>
-        <p class="hint">面向视障使用的单句播报，回答默认自动朗读。只报左/中/右与近/远，找不到就照兜底句念；读文字优先走 OCR，无文字再用 VLM。</p>
+        <p class="hint">摄像头、麦克风和扬声器均使用树莓派外设。Windows只显示与控制；回答分段由树莓派播放。图像描述不能作为行走指令。</p>
         <div class="cmd-row">
           <select id="eyes-command" aria-label="选择要发送给模型的指令">
             <option value="" disabled selected hidden>选择指令…</option>
@@ -289,19 +296,23 @@
           <button class="primary eyes-btn" id="btn-voice">开启语音唤醒</button>
           <button id="btn-stop">停止播报</button>
           <span id="voice-state" class="voice-state">未开启 · 先说「小冰小冰」再说指令</span>
+          <span class="hint" id="device-voice-details" style="width:100%;margin:0">正在确认树莓派语音状态</span>
         </div>
         <div class="row" id="device-volume-controls" style="display:none">
           <label for="device-volume">树莓派音量</label>
           <input id="device-volume" type="range" min="0" max="100" step="1" value="0" disabled style="flex:1;min-width:100px" />
           <span id="device-volume-value" aria-live="polite">读取中…</span>
           <button id="device-mute" disabled>静音</button>
+          <button id="device-volume-refresh">读取音量</button>
+          <button id="device-volume-test">试听音量</button>
+          <span class="hint" id="device-volume-status" role="status" style="width:100%;margin:0">等待树莓派读回音量</span>
         </div>
       </div>
 
       <div class="panel" id="panel-debug">
         <div class="subtabs">
           <button type="button" class="subtab active" data-sub="scene">场景识别</button>
-          <button type="button" class="subtab" data-sub="spatial">空间关系</button>
+          <button type="button" class="subtab" data-sub="spatial">二维画面关系</button>
           <button type="button" class="subtab" data-sub="vqa">图像问答</button>
           <button type="button" class="subtab" data-sub="ocr">中文 OCR</button>
           <button type="button" class="subtab" data-sub="tts">语音播报</button>
@@ -319,7 +330,7 @@
         </div>
 
         <div class="subpanel" id="sub-spatial">
-          <p class="hint">强制输出 JSON，检查左右、上下、遮挡。2B 级模型会出错，建议多试几张。</p>
+          <p class="hint">只测试图像中的左右、上下和遮挡描述；不提供距离、通行或行走安全结论。</p>
           <div class="row">
             <button class="primary" id="btn-spatial-left">左右关系</button>
             <button id="btn-spatial-occlusion">遮挡判断</button>
@@ -366,11 +377,54 @@
       </div>
     </div>
   </section>
+
+  <section class="card" id="test-session-card" aria-labelledby="test-session-title">
+    <h2 id="test-session-title">实机测试记录</h2>
+    <p class="hint">先开始批次，再开始本题，然后使用上方语音、拍照或提问功能。树莓派语音和网页操作统一归入当前测试题；网页会话与设备语音会话彼此独立。记录问题、转写、答案、软件时延和实际推理原图；不保存连续录像或原始录音。原图留在树莓派，JSON保存引用。评分是人工评价，不等于自动测得字错率或物理首声。</p>
+    <div class="row">
+      <input type="text" id="test-session-label" maxlength="120" placeholder="批次名称，例如 安静环境第一轮" style="flex:1;min-width:220px" />
+      <button class="primary" id="test-session-start">开始测试批次</button>
+      <button id="test-session-stop" disabled>结束测试批次</button>
+      <button id="test-session-export" disabled>导出结果JSON</button>
+      <button id="test-session-refresh">刷新记录状态</button>
+    </div>
+    <p class="hint" id="test-session-status" role="status" style="margin-top:10px">正在确认测试记录服务…</p>
+    <div class="row">
+      <input type="text" id="test-case-id" maxlength="64" placeholder="题号，例如 A01 / V01" aria-label="题号" style="flex:1;min-width:140px" />
+      <select id="test-case-category" aria-label="测试类别" style="flex:1;min-width:140px">
+        <option value="speech">语音识别</option><option value="image">图像识别</option><option value="ocr">OCR与数字</option>
+        <option value="chat">自然聊天</option><option value="barge_in">插话与回声</option><option value="stability">稳定性</option>
+      </select>
+      <button class="primary" id="test-case-start" disabled>开始本题</button>
+    </div>
+    <div class="row test-grid">
+      <label>本题提问文案<textarea id="test-case-prompt" maxlength="2000" placeholder="计划说的话或要发送的问题"></textarea></label>
+      <label>预期识别或答案<textarea id="test-case-expected" maxlength="2000" placeholder="正确物体、颜色、日期、价格，或预期行为"></textarea></label>
+    </div>
+    <div class="row test-grid">
+      <label>实际说出的原话<textarea id="test-spoken-reference" maxlength="2000" placeholder="若与计划文案不同，在此记录实际原话；语音准确性复核使用"></textarea></label>
+      <label>人工补记识别／回答<textarea id="test-observed-answer" maxlength="2000" placeholder="可留空；服务端另外自动记录最终转写与回答"></textarea></label>
+    </div>
+    <div class="row test-ratings">
+      <label>语音识别<select id="test-recognition"><option value="">未评价</option><option value="true">正确</option><option value="false">错误</option></select></label>
+      <label>图像／OCR<select id="test-image"><option value="">未评价</option><option value="true">正确</option><option value="false">错误</option></select></label>
+      <label>流畅度<select id="test-fluency"><option value="">未评价</option><option value="1">1 很差</option><option value="2">2 较差</option><option value="3">3 一般</option><option value="4">4 良好</option><option value="5">5 顺畅</option></select></label>
+      <label>稳定性<select id="test-stability"><option value="">未评价</option><option value="1">1 很差</option><option value="2">2 较差</option><option value="3">3 一般</option><option value="4">4 良好</option><option value="5">5 稳定</option></select></label>
+      <label>响应感受<select id="test-latency"><option value="">未评价</option><option value="1">1 很慢</option><option value="2">2 较慢</option><option value="3">3 一般</option><option value="4">4 较快</option><option value="5">5 及时</option></select></label>
+      <label>本题判定<select id="test-outcome"><option value="untested">尚未判定</option><option value="pass">通过</option><option value="fail">失败</option><option value="indeterminate">无法确定</option></select></label>
+    </div>
+    <div class="row">
+      <textarea id="test-review-notes" maxlength="2000" placeholder="问题备注：漏字、错物体、卡顿、断句、未出声、回声误触发、重启等" style="flex:1;min-height:64px"></textarea>
+      <button class="primary" id="test-review-save" disabled>保存本题评价</button>
+    </div>
+    <pre id="test-session-summary" class="result empty" style="min-height:64px;font-size:12px">尚无测试数据</pre>
+  </section>
 </main>
 
 <div id="toast"></div>
 <audio id="audio" hidden></audio>
 
+<script>window.CM5DeviceUI = {remote: true, showSpeech: function () {}};</script>
 <script src="/static/app-core.js?v=3"></script>
 <script>
 const state = { image: null, imageFull: null, imageVlm: null, lastScene: "", lastSpatial: "", lastVqa: "", lastOcr: "", lastEyes: "" };
@@ -536,7 +590,7 @@ function closeCamera() {
 $('btn-cam').onclick = async () => {
   if (stream) { closeCamera(); toast('摄像头已关闭'); return; }
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720 } });
+    stream = await Promise.reject(new Error('此实机版本仅使用树莓派摄像头'));
     const v = $('video'); v.srcObject = stream;
     setCameraView('video', '摄像头实时（本机）');
     $('btn-shot').disabled = false;
@@ -1175,6 +1229,7 @@ function withTimeout(promise, ms, message) {
 }
 
 async function startVoice() {
+  if (window.CM5DeviceUI && window.CM5DeviceUI.remote) return toast('请通过树莓派语音按钮操作，不使用Windows麦克风');
   $('btn-voice').disabled = true;
   voiceState('正在打开麦克风…', true);
   try {
@@ -1186,7 +1241,7 @@ async function startVoice() {
       throw new Error('系统里没有检测到麦克风设备');
     }
     vstream = await withTimeout(
-      navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }),
+      Promise.reject(new Error('此实机版本仅使用树莓派麦克风')),
       8000,
       '麦克风授权超时，请在系统设置里允许浏览器使用麦克风'
     );
@@ -1244,6 +1299,7 @@ document.querySelectorAll('.subtab').forEach(tab => {
   };
 });
 </script>
-<script src="/static/device-mode.js?v=3"></script>
+<script src="/static/device-mode.js?v=pi-1"></script>
+<script src="/static/test-session.js?v=pi-1"></script>
 </body>
 </html>

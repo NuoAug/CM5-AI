@@ -1,5 +1,7 @@
 # CM5-AI
 
+树莓派实机特调工程独立位于同级 [CM5-AI-M](CM5-AI-M/README.md)，版本v1.1.28-pi-test；Windows查看 [实机测试台](http://127.0.0.1:18090/)，步骤与提问文案见[实机测试指南](树莓派MiniCPM实机测试指南.md)。该特调版不覆盖下方MiniCPM／Qwen工程，实际视觉速度和质量仍待改善。
+
 面向视障辅助实验的本地多模态测试台。当前软件版本见 [CM5-AI/MiniCPM-V4.7-1B/VERSION](CM5-AI/MiniCPM-V4.7-1B/VERSION)，完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 MiniCPM 基线完整保留在 `CM5-AI/MiniCPM-V4.7-1B/`（v1.1.25）。已建立同级独立候选 `CM5-AI/Qwen3.5-0.8B/`（v1.1.26-candidate），包含独立代码、环境、模型与运行器；目前仅完成开发机图文候选路径，默认模型仍为 MiniCPM。

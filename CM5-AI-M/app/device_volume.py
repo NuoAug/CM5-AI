@@ -11,18 +11,20 @@ def _mixer():
         raise RuntimeError("树莓派未安装 amixer")
     device = os.environ.get("ALSA_OUTPUT", "plughw:CARD=Array,DEV=0")
     match = re.search(r"CARD=([^,]+)", device)
-    card = os.environ.get("ALSA_MIXER_CARD") or (match.group(1) if match else "0")
+    numeric = re.match(r"(?:plug)?hw:(\d+)(?:,|$)", device)
+    card = os.environ.get("ALSA_MIXER_CARD") or (match.group(1) if match else numeric.group(1) if numeric else "0")
     control = os.environ.get("ALSA_MIXER_CONTROL", "PCM,0")
     return [exe, "-c", card], card, control
 
 
 def _run(args):
     try:
-        result = subprocess.run(args, capture_output=True, text=True, timeout=3)
+        result = subprocess.run(args, capture_output=True, text=True, timeout=3, env=dict(os.environ, LC_ALL="C"))
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError("读取或设置树莓派音量失败") from exc
     if result.returncode:
-        raise RuntimeError("树莓派扬声器音量控制不可用")
+        detail = " ".join((result.stderr or "").split())[:180]
+        raise RuntimeError("树莓派扬声器音量控制不可用" + ("：" + detail if detail else ""))
     return result.stdout
 
 
@@ -33,11 +35,13 @@ def get_volume():
         raise RuntimeError("配置的 ALSA 控制不支持播放音量")
     values = [int(x) for x in re.findall(r"Playback[^\n]*\[(\d+)%\]", output)]
     switches = re.findall(r"Playback[^\n]*\[(on|off)\]", output)
-    if not values:
+    if not values or any(not 0 <= x <= 100 for x in values):
         raise RuntimeError("无法读取扬声器音量百分比")
     return {"volume_percent": round(sum(values) / len(values)),
             "muted": bool(switches) and all(x == "off" for x in switches),
-            "mute_supported": bool(switches), "card": card, "control": control,
+            "mute_supported": bool(switches),
+            "partially_muted": bool(switches) and any(x == "off" for x in switches) and not all(x == "off" for x in switches),
+            "channels_percent": values, "card": card, "control": control,
             "output": "device"}
 
 

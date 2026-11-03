@@ -41,6 +41,7 @@ from main_control import MainControlAdapter
 from turns import TurnCancelled
 from visual_context import VisualContextStore, VisualContextError
 from visual_bridge import VisualBridge
+from standalone_frame_provider import DeviceTestVisualContextStore, configure_standalone_visual
 import kws
 import device_io
 import device_voice
@@ -153,7 +154,7 @@ VOICE_SOURCE = os.environ.get("VOICE_SOURCE", "browser").strip().lower()
 # 正式模式只经主控取图；独立设备测试必须显式选择。
 IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "main-control").strip().lower()
 MAIN_CONTROL = MainControlAdapter()
-VISUAL_CONTEXT = VisualContextStore()
+VISUAL_CONTEXT = DeviceTestVisualContextStore(allow_standalone_device=True) if IMAGE_SOURCE == "standalone-device-test" else VisualContextStore()
 VISUAL_BRIDGE = VisualBridge(VISUAL_CONTEXT, lambda: MAIN_CONTROL)
 VISUAL_BRIDGE.register_routes(app)
 
@@ -164,7 +165,7 @@ def visual_error(error):
     payload = {'error': str(error), 'code': error.code}
     if error.code in ('NO_FRAME', 'STALE_FRAME', 'DEPENDENCY_UNAVAILABLE'):
         body = request.get_json(silent=True) or {}
-        answer = NO_FRAME_REPLY if body.get('task') == 'followup' else '还没有画面可用，请先拍一张；主控帧服务当前未能提供所需图片。'
+        answer = NO_FRAME_REPLY if body.get('task') == 'followup' else ('还没有画面可用，请先开启树莓派摄像头并检查连接。' if IMAGE_SOURCE == 'standalone-device-test' else '还没有画面可用，请先拍一张；主控帧服务当前未能提供所需图片。')
         payload.update(answer=answer, source='rule', has_image=False)
         if request.path.startswith('/api/voice'):
             OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source='voice', reason='frame_unavailable', ttl=3.0)
@@ -178,6 +179,11 @@ def prepare_visual_input(session_id, body, *, purpose='vqa', reuse=True):
                                      commit_guard=token.guard_context if token else None)
     g.visual_frame_context = resolved['frame_context']
     g.visual_prepared = True
+    if 'TEST_SESSIONS' in globals():
+        try:
+            TEST_SESSIONS.frame_evidence(getattr(g, 'pi_test_context', None), resolved)
+        except OSError as exc:
+            log.error('测试原图证据写入失败：%s', exc)
     return resolved
 
 
@@ -253,6 +259,7 @@ def add_visual_evidence(response):
 OUTPUT_SINK = os.environ.get("OUTPUT_SINK", "browser").strip().lower()
 
 DEVICE_CAMERA = device_io.DeviceCamera()
+STANDALONE_FRAMES = configure_standalone_visual(VISUAL_BRIDGE, IMAGE_SOURCE, DEVICE_CAMERA, lambda: MAIN_CONTROL)
 DEVICE_VOICE = None
 DEVICE_SINK = None
 
@@ -3033,6 +3040,25 @@ def api_tts():
 @app.get("/api/sample/<path:name>")
 def sample(name: str):
     return send_from_directory(SAMPLES_DIR, name)
+
+
+# 本特调版只在用户开启测试批次时持久化交互结果；物理音频时延保持未测。
+from bench_session import BenchSessions, register_test_session_api
+
+
+def pi_test_resources():
+    app_bytes, vlm_bytes, audio_bytes = model_memory_bytes()
+    return {
+        "system": system_metrics(),
+        "process_memory_bytes": {"app": app_bytes, "vlm": vlm_bytes, "audio": audio_bytes,
+                                 "basis": "process RSS on Linux; private on Windows; shared pages may overlap, not system PSS"},
+        "device": device_status(), "output": OUTPUT.stats(),
+        "system_cpu_percent": system_cpu_percent(),
+    }
+
+
+TEST_SESSIONS = BenchSessions(DATA_DIR / "test-runs", APP_VERSION, resource_getter=pi_test_resources)
+register_test_session_api(app, TEST_SESSIONS, TRACES)
 
 
 if __name__ == "__main__":

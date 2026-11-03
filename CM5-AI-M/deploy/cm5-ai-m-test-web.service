@@ -1,0 +1,22 @@
+[Unit]
+Description=CM5-AI-M temporary physical test bench and Pi peripherals
+After=network.target sound.target cm5-ai-m-test-vlm.service
+Requires=cm5-ai-m-test-vlm.service
+
+[Service]
+Type=simple
+User=mylin
+Group=mylin
+EnvironmentFile=/home/mylin/CM5-AI-M/config/pi-test.env
+WorkingDirectory=/home/mylin/CM5-AI-M/app
+ExecStartPre=/home/mylin/CM5-AI-M/app/.venv/bin/python /home/mylin/CM5-AI-M/deploy/pi-test-wait-vlm.py
+ExecStart=/home/mylin/CM5-AI-M/app/.venv/bin/python /home/mylin/CM5-AI-M/app/server.py
+Restart=no
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStartSec=140
+TimeoutStopSec=25
+StandardOutput=journal
+StandardError=journal
+
+# Intentionally no Install section: start manually for this test; do not enable.

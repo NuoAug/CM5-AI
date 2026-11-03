@@ -97,18 +97,21 @@ class DeviceCamera:
             from picamera2 import Picamera2
 
             self._picam = Picamera2()
+            # Picamera2/libcamera名称按内存位序：BGR888数组为[R,G,B]，
+            # RGB888数组为[B,G,R]。这里送PIL，必须请求BGR888避免红蓝互换。
+            # 官方映射：raspberrypi/picamera2 request.py::_get_pil_mode。
             try:
                 config = self._picam.create_video_configuration(
-                    main={"size": self.high_size, "format": "RGB888"},
-                    lores={"size": self.low_size, "format": "RGB888"},
+                    main={"size": self.high_size, "format": "BGR888"},
+                    lores={"size": self.low_size, "format": "BGR888"},
                     controls={"FrameRate": self.fps},
                 )
                 self._picam.configure(config)
                 self._use_lores = True
             except Exception:
-                # 部分平台 lores 不支持 RGB888，退回只采 main 并缩放。
+                # 部分平台 lores 不支持 BGR888，退回只采 main 并缩放。
                 config = self._picam.create_video_configuration(
-                    main={"size": self.high_size, "format": "RGB888"},
+                    main={"size": self.high_size, "format": "BGR888"},
                     controls={"FrameRate": self.fps},
                 )
                 self._picam.configure(config)

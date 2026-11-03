@@ -1,4 +1,3 @@
 @echo off
-cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\start.ps1"
-pause
+rem Windows only views the Raspberry Pi bench; no local models or peripherals.
+start "" "http://127.0.0.1:18090/"
