@@ -12,7 +12,7 @@ if [[ "$(uname -m)" != "aarch64" ]]; then
 fi
 
 if [[ ! -d "$ROOT_DIR/app" ]]; then
-  echo "未找到 $ROOT_DIR/app，请先把 CM5-AI 目录放到 $ROOT_DIR" >&2
+  echo "未找到 $ROOT_DIR/app，请先把 CM5-AI/MiniCPM-V4.7-1B 目录内的内容复制到 $ROOT_DIR（app/deploy 与 models 同级）" >&2
   exit 1
 fi
 

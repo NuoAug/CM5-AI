@@ -36,7 +36,7 @@ powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_ben
 
 由于本版模型与历史板端默认 Qwen 不同，应复核 VLM_MODEL/VLM_MMPROJ 指向 MiniCPM-V 4.7 1B 本版文件，并对该组合重新实机验收。此步骤是未来部署要求，本轮尚未在板端执行。
 
-本版未启用原生流式 ASR，主控接口已移除。不要将旧发布包覆盖回新基线，或只修改标签而继续沿用旧模型性能结论。
+本版未启用原生流式 ASR，同步主控适配入口已恢复，真实传输尚未接入。不要将旧发布包覆盖回新基线，或只修改标签而继续沿用旧模型性能结论。
 
 ## 通用新机部署模板
 
