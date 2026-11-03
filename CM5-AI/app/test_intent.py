@@ -58,23 +58,33 @@ class ControlIntentTests(unittest.TestCase):
         self.assertEqual(task.intent, "speech_stop")
         self.assertEqual(task.actions, ["cancel_speech"])
 
-    def test_removed_navigation_commands_return_capability_message(self):
-        for text in ("开始引导", "关闭引导", "打开导航", "不用导航", "不要停止引导",
-                     "引导状态", "带我走", "导航到卫生间", "请导航"):
+    def test_guidance_commands_only_submit_main_control_intents(self):
+        cases = (("开始引导", "start_guidance"), ("暂停引导", "pause_guidance"),
+                 ("继续引导", "resume_guidance"), ("关闭引导", "end_guidance"),
+                 ("重复引导", "repeat_guidance"))
+        for text, action in cases:
             with self.subTest(text=text):
-                task = intent.parse(text, has_context=True, speech_active=True)
-                self.assertEqual(task.intent, "unsupported")
-                self.assertEqual(task.clarify, intent.UNSUPPORTED_NAVIGATION_REPLY)
+                task = intent.parse(text)
+                self.assertEqual(task.intent, "control_intent")
+                self.assertEqual(task.slots, {"action": action})
                 self.assertFalse(task.needs_image)
-                self.assertEqual(task.slots, {})
                 self.assertEqual(task.actions, [])
 
-    def test_passage_questions_do_not_become_visual_followups(self):
+    def test_negation_revision_and_partial_do_not_submit_control(self):
+        for text in ("不要开始引导", "不要停止引导", "不是让你结束引导", "开始引导改成暂停引导"):
+            task = intent.parse(text)
+            self.assertEqual(task.intent, "clarify", text)
+            self.assertEqual(task.actions, [])
+        self.assertEqual(intent.parse("开始引导", is_final=False).intent, "clarify")
+
+    def test_passage_questions_only_query_main_control(self):
         for text in ("现在能走吗", "前面能走吗", "前面通不通", "可以直行吗",
-                     "能不能走楼梯", "前面能不能走楼梯", "可以过马路吗", "这里可以通过吗"):
+                     "能不能走楼梯", "前面能不能走楼梯", "可以过马路吗", "这里可以通过吗",
+                     "离我多远", "前方距离多少米", "应该怎么绕", "引导状态",
+                     "我该左转还是右转", "这条路怎么走", "这门过得去吗", "往前走会撞到吗"):
             with self.subTest(text=text):
                 task = intent.parse(text, has_context=True)
-                self.assertEqual(task.intent, "unsupported")
+                self.assertEqual(task.intent, "scene_query")
                 self.assertFalse(task.needs_image)
                 self.assertEqual(task.actions, [])
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""语音控制动作与已移除导航功能的 API 回归。"""
+"""语音控制动作与主控入口的 API 回归。"""
 
 import base64
 import io
@@ -43,7 +43,7 @@ class VoiceActionTests(unittest.TestCase):
         cancel.assert_called_once()
         camera_stop.assert_not_called()
 
-    def test_removed_navigation_requests_do_not_call_model_or_camera(self):
+    def test_main_control_requests_do_not_call_model_or_camera(self):
         for text in ("开始引导", "关闭引导", "引导状态", "现在能走吗", "前面能不能走楼梯"):
             with self.subTest(text=text):
                 server.SESSIONS.clear()
@@ -51,8 +51,9 @@ class VoiceActionTests(unittest.TestCase):
                         mock.patch.object(server.DEVICE_CAMERA, "start") as camera_start, \
                         mock.patch.object(server.DEVICE_CAMERA, "stop") as camera_stop:
                     result = self.send(text)
-                self.assertEqual(result["intent"], "unsupported")
-                self.assertIn("不提供引导或通行判断", result["answer"])
+                self.assertIn(result["intent"], ("control_intent", "scene_query"))
+                self.assertIn("主控当前不可用", result["answer"])
+                self.assertEqual(result["main_control"]["error"]["code"], "DEPENDENCY_UNAVAILABLE")
                 self.assertEqual(result["task"]["actions"], [])
                 self.assertFalse(result["task"]["needs_image"])
                 self.assertTrue(result["spoken"])
@@ -61,7 +62,8 @@ class VoiceActionTests(unittest.TestCase):
                 camera_stop.assert_not_called()
 
     def test_camera_off_requests_client_close(self):
-        with mock.patch.object(server.DEVICE_CAMERA, "stop") as camera_stop:
+        with mock.patch.object(server, "IMAGE_SOURCE", "standalone-device-test"), \
+                mock.patch.object(server.DEVICE_CAMERA, "stop") as camera_stop:
             result = self.send("关闭摄像头")
         self.assertEqual(result["intent"], "camera_off")
         self.assertTrue(result["close_camera"])

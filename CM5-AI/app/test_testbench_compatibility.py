@@ -17,15 +17,14 @@ class TestbenchCompatibilityTests(unittest.TestCase):
         with mock.patch.object(server, "piper_error", return_value="missing Piper model"):
             self.assertEqual(self.client.get("/api/health").status_code, 503)
 
-    def test_main_control_routes_and_panel_are_removed(self):
-        for method, route in (("get", "/api/main-control/status"),
-                              ("get", "/api/main-control/scene"),
-                              ("post", "/api/main-control/control")):
-            with self.subTest(route=route):
-                self.assertEqual(getattr(self.client, method)(route).status_code, 404)
+    def test_main_control_diagnostics_available_without_restoring_old_panel(self):
+        self.assertEqual(self.client.get("/api/main-control/status").status_code, 200)
+        response = self.client.get("/api/main-control/scene")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["error"]["code"], "DEPENDENCY_UNAVAILABLE")
+        self.assertEqual(self.client.post("/api/main-control/control", json={}).status_code, 400)
         with self.client.get("/") as response:
             page = response.get_data(as_text=True)
-        self.assertNotIn("main-control", page)
         self.assertNotIn("refreshMainControl", page)
         self.assertNotIn("btn-mc-", page)
 
@@ -54,16 +53,16 @@ class TestbenchCompatibilityTests(unittest.TestCase):
         self.assertNotIn("guide_running", data["active"])
         self.assertNotIn("guide_source", data["device"])
 
-    def test_ask_removed_navigation_never_falls_through_to_model(self):
+    def test_ask_main_control_never_falls_through_to_model(self):
         image = "data:image/jpeg;base64," + base64.b64encode(b"x").decode()
         for text in ("开始引导", "关闭引导", "引导状态", "现在能走吗", "前面能不能走楼梯"):
             for picture in ("", image):
                 with self.subTest(text=text, has_image=bool(picture)), mock.patch.object(server, "run_eyes") as run_eyes:
                     response = self.client.post("/api/ask", json={"text": text, "image": picture})
                     self.assertEqual(response.status_code, 200)
-                    self.assertEqual(response.json["intent"], "unsupported")
-                    self.assertEqual(response.json["source"], "rule")
-                    self.assertIn("不提供引导或通行判断", response.json["answer"])
+                    self.assertIn(response.json["intent"], ("control_intent", "scene_query"))
+                    self.assertEqual(response.json["source"], "main_control_adapter")
+                    self.assertIn("主控当前不可用", response.json["answer"])
                     self.assertEqual(response.json["task"]["actions"], [])
                     self.assertFalse(response.json["task"]["needs_image"])
                     run_eyes.assert_not_called()

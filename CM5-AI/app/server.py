@@ -35,6 +35,7 @@ from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
 
 import intent
+from main_control import MainControlAdapter
 import kws
 import device_io
 import device_voice
@@ -144,8 +145,9 @@ init_error = {"ocr": None, "asr": None}
 
 MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
 VOICE_SOURCE = os.environ.get("VOICE_SOURCE", "browser").strip().lower()
-# v1.0.0：本地交互核心与远程设备测试模式。
-IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "standalone-device-test").strip().lower()
+# 正式模式只经主控取图；独立设备测试必须显式选择。
+IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "main-control").strip().lower()
+MAIN_CONTROL = MainControlAdapter()
 OUTPUT_SINK = os.environ.get("OUTPUT_SINK", "browser").strip().lower()
 
 DEVICE_CAMERA = device_io.DeviceCamera()
@@ -171,12 +173,14 @@ def device_status():
 def start_device_services():
     """按环境变量启用 CM5 设备摄像头、ALSA 语音与播报。"""
     global DEVICE_VOICE, DEVICE_SINK
-    if DEVICE_CAMERA.available() and VOICE_SOURCE == "device":
+    if IMAGE_SOURCE == "standalone-device-test" and DEVICE_CAMERA.available() and VOICE_SOURCE == "device":
         DEVICE_CAMERA.start()
     if VOICE_SOURCE != "device":
         return
     if DEVICE_VOICE is None:
-        DEVICE_VOICE = device_voice.DeviceVoice(camera=DEVICE_CAMERA)
+        DEVICE_VOICE = device_voice.DeviceVoice(
+            camera=DEVICE_CAMERA if IMAGE_SOURCE == "standalone-device-test" else None
+        )
     if OUTPUT_SINK == "alsa" and device_io.AlsaPlayer().available() and not piper_error():
         player = device_io.AlsaPlayer()
         DEVICE_SINK = device_io.DeviceSink(
@@ -1398,8 +1402,115 @@ def health():
     ), (200 if ok else 503)
 
 
+MAIN_CONTROL_INTENTS = {"control_intent", "scene_query"}
+
+
+def main_control_task(text, *, is_final=True, session_id=""):
+    """在推理前分流；图片和聊天模型没有空间判断权限。"""
+    task = intent.parse(str(text or ""), session_id=session_id, is_final=is_final)
+    if task.intent in MAIN_CONTROL_INTENTS:
+        return task
+    if task.intent == "clarify" and intent.NAVIGATION_WORDS.search(str(text or "")):
+        return task
+    return None
+
+
+def answer_main_control(task, text, *, session_id="", request_id=None,
+                        utterance_id=None, is_final=True, source="ask"):
+    """M0只接请求/响应；实时事实播报等待M1的逐段有效期校验。"""
+    if task.intent == "clarify":
+        return {"intent": task.intent, "task": task.to_dict(), "source": "rule",
+                "answer": task.clarify, "spoken": False, "main_control": None}
+    if task.intent == "control_intent":
+        response = MAIN_CONTROL.control_intent(
+            task.slots["action"], text, utterance_id=utterance_id or request_id or task.request_id,
+            is_final=is_final, session_id=session_id or None,
+            request_id=request_id or task.request_id,
+        )
+    else:
+        response = MAIN_CONTROL.scene_query(session_id=session_id or None,
+                                            request_id=request_id or task.request_id)
+    ok = response.get("status") == "ok"
+    evidence = response.get("evidence_mode")
+    if not ok:
+        error = response.get("error") or {}
+        answer = "主控当前不可用，暂时无法确认引导操作或当前空间状态。"
+        if error.get("code") not in (None, "DEPENDENCY_UNAVAILABLE"):
+            answer += "原因：" + str(error.get("message") or error["code"])
+    elif evidence != "live":
+        answer = "这是开发替身的协议结果，不能用于当前行走判断或真实引导。"
+    elif task.intent == "control_intent":
+        data = response.get("data") or {}
+        if not data.get("accepted") or data.get("operation_state") == "rejected":
+            answer = "主控未接受这次引导操作，请查看返回原因。"
+        else:
+            answer = "主控已收到引导操作，实际执行状态见主控结果。"
+    else:
+        # 事实保留在完整envelope内，避免普通队列在等待后播放过期的行动提示。
+        answer = "已取得主控状态；实时事实播报待逐段时效校验接入。"
+    spoken = not ok
+    if spoken:
+        OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source=source,
+                    reason="main_control_unavailable", ttl=3.0)
+    return {"intent": task.intent, "task": task.to_dict(), "source": "main_control_adapter",
+            "answer": answer, "spoken": spoken, "main_control": response,
+            "unimplemented": ["guidance.event", "playback.status", "live_fact_speech"]}
+
+
+@app.get("/api/main-control/status")
+def api_main_control_status():
+    """纯诊断，不握手、不加载模型，也不代表整机就绪。"""
+    return jsonify(MAIN_CONTROL.status())
+
+
+@app.get("/api/main-control/scene")
+def api_main_control_scene():
+    return jsonify(MAIN_CONTROL.scene_query(
+        session_id=request.args.get("session_id") or None,
+        request_id=request.args.get("request_id") or None,
+    ))
+
+
+@app.post("/api/main-control/control")
+def api_main_control_control():
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("final_transcript") or "").strip()
+    task = intent.parse(text, is_final=body.get("is_final") is True)
+    # action不能绕过最终文本的规则验证；模型JSON只能是候选。
+    if task.intent != "control_intent" or task.slots["action"] != body.get("action"):
+        return jsonify({"error": "需要明确且最终有效的话语，action须与话语一致。",
+                        "code": "INVALID_PAYLOAD"}), 400
+    return jsonify(MAIN_CONTROL.control_intent(
+        task.slots["action"], text, utterance_id=str(body.get("utterance_id") or ""),
+        is_final=True, user_confirmed=body.get("user_confirmed") is True,
+        target_ref=body.get("target_ref"), session_id=body.get("session_id"),
+        request_id=body.get("request_id"),
+    ))
+
+
+@app.post("/api/main-control/frame")
+def api_main_control_frame():
+    body = request.get_json(silent=True) or {}
+    return jsonify(MAIN_CONTROL.acquire_frame(
+        mode=body.get("mode", "latest"), purpose=body.get("purpose", "vqa"),
+        frame_id=body.get("frame_id"), max_age_ms=body.get("max_age_ms", 300),
+        max_side_px=body.get("max_side_px", 1600), roi_xyxy_px=body.get("roi_xyxy_px"),
+        session_id=body.get("session_id"), request_id=body.get("request_id"),
+    ))
+
+
 @app.post("/api/vlm")
 def api_vlm():
+    body = request.get_json(force=True, silent=True) or {}
+    text = body.get("prompt") or ""
+    control_task = main_control_task(text, is_final=body.get("is_final", True) is True,
+                                     session_id=str(body.get("session_id") or ""))
+    if control_task is not None:
+        return jsonify(answer_main_control(
+            control_task, str(text), session_id=str(body.get("session_id") or ""),
+            request_id=body.get("request_id"), is_final=body.get("is_final", True) is True,
+            source="debug",
+        ))
     if not budget_guard():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     if not try_enter():
@@ -1435,6 +1546,8 @@ def api_vlm():
 
 def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64="", frame_id="", session_id="", captured_at="", trace_id=""):
     """统一执行入口，HTTP 路由和语音链路都走这里。"""
+    if main_control_task(" ".join((question, item))) is not None:
+        raise ValueError("引导与空间问题必须通过主控适配入口，不能由图文模型判断")
     spec = EYES_TASKS.get(task)
     if spec is None:
         raise ValueError(f"未知任务：{task}")
@@ -1641,6 +1754,23 @@ def push_answer_segments(answer, task, source, utterance_id=None, priority=PRIOR
 @app.post("/api/talk")
 def api_talk():
     """流式分句输出：边生成边推句，前端逐句合成播放。"""
+    body = request.get_json(force=True, silent=True) or {}
+    text = " ".join(str(body.get(key) or "") for key in ("question", "item")).strip()
+    control_task = main_control_task(text, is_final=body.get("is_final", True) is True,
+                                     session_id=str(body.get("session_id") or ""))
+    if control_task is not None:
+        result = answer_main_control(
+            control_task, str(text), session_id=str(body.get("session_id") or ""),
+            request_id=body.get("request_id"), is_final=body.get("is_final", True) is True,
+            source="debug",
+        )
+        result["done"] = True
+        # 分流仍维持SSE协议；普通输出总线已处理不可用提示，不重复发送音频片段。
+        return Response(
+            "data: " + json.dumps(result, ensure_ascii=False) + "\n\n",
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     if not budget_guard():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     if not try_enter():
@@ -1817,6 +1947,16 @@ def api_talk():
 
 @app.post("/api/eyes")
 def api_eyes():
+    body = request.get_json(force=True, silent=True) or {}
+    text = " ".join(str(body.get(key) or "") for key in ("question", "item")).strip()
+    control_task = main_control_task(text, is_final=body.get("is_final", True) is True,
+                                     session_id=str(body.get("session_id") or ""))
+    if control_task is not None:
+        return jsonify(answer_main_control(
+            control_task, str(text), session_id=str(body.get("session_id") or ""),
+            request_id=body.get("request_id"), is_final=body.get("is_final", True) is True,
+            source="debug",
+        ))
     if not budget_guard():
         return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     if not try_enter():
@@ -1885,8 +2025,6 @@ VISION_TASKS = {"scene", "detail", "read_text", "read_date", "find_object", "com
 @app.post("/api/ask")
 def api_ask():
     """文字指令入口：按意图决定是否携带画面，再复用 run_eyes。"""
-    if not budget_guard():
-        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     body = request.get_json(force=True, silent=True) or {}
     text = str(body.get("text") or "").strip()
     if not text:
@@ -1911,9 +2049,17 @@ def api_ask():
         has_context=bool(history_text(session_id)),
         speech_active=recent_speech_active(),
         session_id=session_id,
+        is_final=body.get("is_final", True) is True,
     )
     intent_name = task.intent
     TRACES.mark(trace_id, "intent_end", intent=intent_name, confidence=task.confidence)
+    if intent_name in MAIN_CONTROL_INTENTS:
+        result = answer_main_control(
+            task, text, session_id=session_id, request_id=trace_id,
+            utterance_id=body.get("utterance_id"), is_final=body.get("is_final", True) is True,
+        )
+        result.update(text=text, frame_id=frame_id, trace_id=trace_id, latency_ms=None)
+        return jsonify(result)
 
     if intent_name in ("clarify", "unsupported"):
         answer = task.clarify or "请再说一遍。"
@@ -1939,6 +2085,9 @@ def api_ask():
             "source": "rule", "answer": answer, "frame_id": frame_id,
             "trace_id": trace_id, "latency_ms": 0, "spoken": True,
         })
+
+    if not budget_guard():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
 
     if not try_enter():
         return jsonify({"error": "设备正忙，请稍后再试"}), 429
@@ -2081,8 +2230,6 @@ def asr_transcribe(samples):
 
 @app.post("/api/voice")
 def api_voice():
-    if not budget_guard():
-        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
     body = request.get_json(force=True, silent=True) or {}
     t0 = time.time()
     session_id = str(body.get("session_id") or "").strip()
@@ -2162,6 +2309,7 @@ def api_voice():
         has_context=has_context,
         speech_active=recent_speech_active(),
         session_id=session_id,
+        is_final=body.get("is_final", True) is True,
     )
     TRACES.mark(trace_id, "intent_end", intent=task.intent, confidence=task.confidence)
     with SESSION_LOCK:
@@ -2177,14 +2325,26 @@ def api_voice():
         "latency_ms": int((time.time() - t0) * 1000),
     }
 
+    if task.intent in MAIN_CONTROL_INTENTS:
+        result = answer_main_control(
+            task, cmd, session_id=session_id, request_id=trace_id,
+            utterance_id=body.get("utterance_id"), is_final=body.get("is_final", True) is True,
+            source="voice",
+        )
+        result.update(base)
+        return jsonify(result)
+
     if task.intent == "speech_stop":
         OUTPUT.cancel(min_priority=PRIORITY_INTERRUPT, source="voice")
         log.info("voice action=speech_stop session=%s", session_id)
         return voice_reply("已停止播报", "speech_stop", spoken=False, cancelled=True, **base)
 
     if task.intent == "camera_off":
-        DEVICE_CAMERA.stop()
-        answer = "已关闭摄像头"
+        if IMAGE_SOURCE == "standalone-device-test":
+            DEVICE_CAMERA.stop()
+            answer = "已关闭摄像头"
+        else:
+            answer = "当前采用主控画面，相机启停由主控管理。"
         OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="camera_off", ttl=2.0)
         log.info("voice action=camera_off session=%s", session_id)
         return voice_reply(answer, "camera_off", spoken=True, close_camera=True, **base)
@@ -2215,6 +2375,9 @@ def api_voice():
         answer = NO_FRAME_REPLY if task.intent == "followup" else "还没有画面，请先拍一张或打开相机"
         OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source="voice", reason="no_image", ttl=3.0)
         return voice_reply(answer, task.intent, spoken=True, frame_id=frame_id, **base)
+
+    if not budget_guard():
+        return jsonify({"error": f"模型内存已超出 {MEM_BUDGET_GB} GB 预算，拒绝本次请求"}), 503
 
     if not try_enter("heavy"):
         return jsonify({"error": "设备正忙，请稍后再试"}), 429

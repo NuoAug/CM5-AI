@@ -40,12 +40,17 @@ SPEECH_STOP = re.compile(
     r"停止播报|停止语音|停止说话|别播报|别念了|别说了|不要播报|不要念|关闭播报|关掉播报|"
     r"停播|闭嘴|安静|声音停|停止播放|别出声"
 )
-# 已移除的导航控制只返回固定能力说明，不进入模型推理。
-UNSUPPORTED_NAVIGATION = re.compile(
-    r"(?:开始|打开|开启|继续|恢复|暂停|停止|关闭|关掉|结束|退出|不用|别|不要)(?:引导|导航|带路|引路)|"
-    r"(?:帮我|给我)(?:导航|引导|带路)|带我走|开始走路引导|"
-    r"(?:导航|带路|引路)(?:到|去|至)|^(?:请|请你)?(?:引导|导航|带路|引路)(?:模式|状态|功能)?$"
+# 控制只认明确的完整话语；否定、改口和目的地请求交由澄清。
+NAVIGATION_WORDS = re.compile(r"引导|导航|带路|引路")
+CONTROL_ACTIONS = (
+    (r"(?:开始|打开|开启)(?:引导|导航|带路|引路)|开始走路引导", "start_guidance"),
+    (r"暂停(?:引导|导航|带路|引路)", "pause_guidance"),
+    (r"(?:继续|恢复)(?:引导|导航|带路|引路)", "resume_guidance"),
+    (r"(?:停止|关闭|关掉|结束|退出)(?:引导|导航|带路|引路)", "end_guidance"),
+    (r"(?:重复|再说一遍|重播)(?:刚才的)?(?:引导|导航|带路|引路)(?:提示)?", "repeat_guidance"),
 )
+NAVIGATION_NEGATION = re.compile(r"不要|不用|别|不是|不想|并非|没让|改成|改为|而是")
+NAVIGATION_STATUS = re.compile(r"(?:引导|导航|带路|引路)(?:的)?(?:状态|情况)|当前.*(?:引导|导航)")
 CAMERA_OFF = re.compile(
     r"(?:不要|别|不用)(?:再)?(?:打开|开启|用)?(?:摄像头|相机|镜头)"
     r"|(?:关闭|关掉|停用)(?:摄像头|相机|镜头)|(?:摄像头|相机)(?:关掉|关闭|停用)"
@@ -59,7 +64,14 @@ PASSAGE_QUERY = re.compile(
     r"(?:前面|前方|这里|那里|路口|通道).{0,8}(?:能不能|能|可以)通过|^(?:能不能|能|可以)通过(?:吗|么)?$|"
     r"现在安全吗|前面通不通|前方通不通"
 )
-UNSUPPORTED_NAVIGATION_REPLY = "当前版本不提供引导或通行判断，请使用看前方、读文字或找物品。"
+SPATIAL_QUERY = re.compile(
+    r"距离|多远|多少米|几米|怎么绕|如何绕|怎样绕|往哪(?:边|里)?走|该走哪|"
+    r"能否(?:走|通行|通过)|(?:通道|道路|路面|前方|前面|这里).{0,8}(?:安全|宽度|够宽|能过)|"
+    r"(?:宽度|高度).{0,8}(?:通过|通行|够不够)|"
+    r"(?:这|那|前面|前方).{0,8}(?:路|门|通道).{0,8}(?:怎么走|过得去|走得通)|"
+    r"(?:我|现在|这里|前面|前方).{0,8}(?:左转|右转|直走|往前走|绕过去)|"
+    r"^(?:左转|右转|直走|往前走)(?:吗|还是|会|能|$)|往前走.{0,8}(?:撞|危险)"
+)
 
 AMBIGUOUS_STOP = re.compile(r"^(?:停一下|停下来|暂停|先停|停停|等等|等一下)$")
 
@@ -189,6 +201,7 @@ def parse(
     has_context: bool = False,
     speech_active: bool = False,
     session_id: str = "",
+    is_final: bool = True,
 ) -> Task:
     """解析一条已去掉唤醒词的语音指令。"""
     normalized = normalize_text(text)
@@ -201,12 +214,35 @@ def parse(
     if not WAKE_PATTERN.search(normalized):
         pass  # 调用方已处理唤醒；这里保留原文用于日志
 
-    if not DEFINITION.search(cmd) and (UNSUPPORTED_NAVIGATION.search(cmd) or PASSAGE_QUERY.search(cmd)):
-        return _task(
-            "unsupported", priority=2, confidence=0.98, session_id=session_id,
-            clarify=UNSUPPORTED_NAVIGATION_REPLY, deadline_s=5.0,
-            note="请求的导航或通行判断能力已移除",
-        )
+    # 概念解释可聊天；同句中的当前行动/测量问题不能被“什么意思”豁免。
+    concrete_spatial_question = PASSAGE_QUERY.search(cmd) or re.search(
+        r"多远|多少(?:米|厘米)|几米|怎么绕|如何绕|怎样绕|过得去|走得通|会撞|左转还是右转", cmd
+    )
+    definition_only = (DEFINITION.search(cmd) and not concrete_spatial_question
+                       and re.search(r"(?:是什么意思|什么意思|怎么理解|如何定义)$", cmd))
+    if not definition_only:
+        if NAVIGATION_WORDS.search(cmd) or cmd == "带我走":
+            if NAVIGATION_NEGATION.search(cmd):
+                return _task(
+                    "clarify", priority=2, session_id=session_id,
+                    clarify="我还没有更改引导。请明确说开始、暂停、继续或结束引导。",
+                    note="否定或改口不直接提交控制意图",
+                )
+            for pattern, action in CONTROL_ACTIONS:
+                if re.fullmatch(r"(?:请|请你|帮我)?(?:" + pattern + r")(?:一下|吧)?", cmd):
+                    if is_final is not True:
+                        return _task("clarify", priority=2, session_id=session_id,
+                                     clarify="等待你说完后再确认引导操作。", note="临时ASR不执行控制")
+                    return _task("control_intent", {"action": action}, priority=2,
+                                 session_id=session_id, deadline_s=5.0,
+                                 note="仅向主控提交意图，不在本地执行引导")
+            if NAVIGATION_STATUS.search(cmd):
+                return _task("scene_query", priority=2, session_id=session_id, deadline_s=5.0)
+            return _task("clarify", priority=2, session_id=session_id,
+                         clarify="请明确说开始、暂停、继续、结束或重复引导。目的地关联还需主控接入。")
+        if PASSAGE_QUERY.search(cmd) or SPATIAL_QUERY.search(cmd):
+            return _task("scene_query", priority=2, session_id=session_id, deadline_s=5.0,
+                         note="空间事实只读取主控，不交给图文模型判断")
 
     # 否定“停止”优先，不取消正在进行的播报。
     if NEGATED_STOP.search(cmd):
