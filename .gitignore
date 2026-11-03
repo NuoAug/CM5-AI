@@ -20,3 +20,12 @@ CM5-AI/**/.venv/
 CM5-AI/**/logs/
 CM5-AI/**/data/
 CM5-AI/**/test-runs/
+
+# 树莓派特调版独立本地资产与测试记录
+CM5-AI-M/models/
+CM5-AI-M/runtime/
+CM5-AI-M/**/.venv/
+CM5-AI-M/logs/
+CM5-AI-M/data/
+CM5-AI-M/test-runs/
+CM5-AI-M/config/*.env
