@@ -8,10 +8,10 @@
 
 ## Windows 本地启动
 
-需预先具备 app/.venv/Scripts/python.exe、模型和运行时。双击 CM5-AI/启动测试台.bat，或在仓库根目录运行：
+需预先具备 app/.venv/Scripts/python.exe、模型和运行时。双击 CM5-AI/MiniCPM-V4.7-1B/启动测试台.bat，或在仓库根目录运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File CM5-AI/app/start.ps1
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/app/start.ps1
 ```
 
 网页 127.0.0.1:8090，VLM 127.0.0.1:8091。关闭启动窗口或执行 app/stop.ps1 停止其管理的进程。日志位于 logs/session-*，应用日志在 logs/app.log。
@@ -23,9 +23,9 @@ powershell -ExecutionPolicy Bypass -File CM5-AI/app/start.ps1
 沿用已有 SSH 身份和设备地址，工具只管理自身创建的隧道：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 start
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 check
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 stop
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 start
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 check
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 stop
 ```
 
 本机访问 127.0.0.1:18090，转发到设备 127.0.0.1:8090。参数 HostName/UserName/KeyPath 可显式传入，默认记录仅供当前环境使用。浏览器授权的本机麦克风和设备麦克风是不同来源；设备模式应通过页面的树莓派控制测试。
@@ -63,7 +63,7 @@ amixer -c Array sget PCM,0
 
 在设备已有 Python 环境中运行 app/precheck.py --allow-busy；当前工具 tools/check_cm5.py 可作只读环境检查。具体服务日志通过已有服务单元的 journalctl 查询。
 
-/api/status.version 应与 CM5-AI/VERSION 一致。引导模式已移除，健康检查不再依赖分割模型。状态正常不能替代模型精度、扬声器真实出声或长期稳定性验收。
+/api/status.version 应与 CM5-AI/MiniCPM-V4.7-1B/VERSION 一致。引导模式已移除，健康检查不再依赖分割模型。状态正常不能替代模型精度、扬声器真实出声或长期稳定性验收。
 
 ## 数据与备份
 

@@ -1,6 +1,8 @@
 # CM5-AI
 
-面向视障辅助实验的本地多模态测试台。当前软件版本见 [CM5-AI/VERSION](CM5-AI/VERSION)，完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+面向视障辅助实验的本地多模态测试台。当前软件版本见 [CM5-AI/MiniCPM-V4.7-1B/VERSION](CM5-AI/MiniCPM-V4.7-1B/VERSION)，完整变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+当前将整套代码、模型、运行时与本地数据集中放在 `CM5-AI/MiniCPM-V4.7-1B/`。后续 Qwen 版本可在 `CM5-AI` 下另建同级目录；这次没有创建或启用 Qwen。
 
 ## 功能
 
@@ -18,7 +20,7 @@
 
 文字回答支持增量分段；语音输入仍先完成整句 ASR，再执行任务，不能据此称为全双工实时对话。
 
-任务依据为 [v1.1 任务文件 PR](https://github.com/NuoAug/CM5-AI/pull/3)，当前进度、接口复现和未完成项见 [M0 开发记录](docs/M0-范围与主控适配-20261103.md)。代码默认 `IMAGE_SOURCE=main-control`，不启动独立相机；`standalone-device-test` 仅供明确选择的独立设备调试，不能用于正式主控失联回退。下表保留历史设备配置，本轮没有修改整机设备配置。
+任务依据为 [v1.1 任务文件 PR](https://github.com/NuoAug/CM5-AI/MiniCPM-V4.7-1B/pull/3)，当前进度、接口复现和未完成项见 [M0 开发记录](docs/M0-范围与主控适配-20261103.md)。代码默认 `IMAGE_SOURCE=main-control`，不启动独立相机；`standalone-device-test` 仅供明确选择的独立设备调试，不能用于正式主控失联回退。下表保留历史设备配置，本轮没有修改整机设备配置。
 
 ## 树莓派配置
 
@@ -41,10 +43,10 @@
 沿用已有 SSH 地址、身份和密钥，在仓库根目录执行以下命令，再打开 [远程测试台](http://127.0.0.1:18090)：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 start
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 check
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 start
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 check
 # 测试结束后关闭该工具创建的隧道
-powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 stop
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/tools/remote_bench.ps1 stop
 ```
 
 仓库 deploy/ 中的 /opt/cm5-ai、cm5 用户和数字 ALSA 卡号是通用安装示例，与这台设备的已有用户部署不同。设备配置、环境文件和音量保持原样；完整模型路径、校验值和参数来源见[设备与模型](docs/设备与模型-v1.0.0.md)。
@@ -60,10 +62,10 @@ powershell -ExecutionPolicy Bypass -File CM5-AI/tools/remote_bench.ps1 stop
 
 ## 快速启动
 
-Windows 环境已具备模型、Python 虚拟环境和运行时后，双击 `CM5-AI/启动测试台.bat`，访问 `http://127.0.0.1:8090`。独立 VLM 服务端口为 8091；关闭启动窗口会停止其管理的服务。
+Windows 环境已具备模型、Python 虚拟环境和运行时后，双击 `CM5-AI/MiniCPM-V4.7-1B/启动测试台.bat`，访问 `http://127.0.0.1:8090`。独立 VLM 服务端口为 8091；关闭启动窗口会停止其管理的服务。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File CM5-AI/app/start.ps1
+powershell -ExecutionPolicy Bypass -File CM5-AI/MiniCPM-V4.7-1B/app/start.ps1
 ```
 
 树莓派远程访问使用上面的 SSH 隧道命令；后续部署步骤见[部署与运维](docs/CM5-部署与运维.md)。
@@ -72,18 +74,20 @@ powershell -ExecutionPolicy Bypass -File CM5-AI/app/start.ps1
 
 ```text
 CM5-AI/
-  VERSION       软件版本
-  app/          服务、网页和回归测试
-  deploy/       ARM64 系统部署模板
-  tools/        基准、回放和远程隧道工具
-  testsets/     意图回归案例
-  samples/      测试示例图
-  models/       本地模型，不入库
-  runtime/      本地运行时，不入库
-  logs/         运行日志，不入库
-  data/         缓存与运行产物，不入库
-  test-runs/    原始测试记录，不入库
-docs/           文档和结果摘要
+  MiniCPM-V4.7-1B/  当前整套 MiniCPM 运行工程
+    VERSION
+    启动测试台.bat
+    app/            服务、网页、测试与本地虚拟环境
+    deploy/         部署模板
+    tools/          基准与检查工具
+    testsets/       测试输入
+    samples/        示例图
+    models/         图文、ASR、OCR、TTS 与唤醒模型（不入库）
+    runtime/        本地运行时（不入库）
+    logs/           日志（不入库）
+    data/           缓存（不入库）
+    test-runs/      原始测试记录（不入库）
+docs/               公共任务说明与报告
 ```
 
 Git 仓库只分发代码、文档、示例和测试集。模型、运行时、真实凭据、虚拟环境、音频缓存及原始日志不随仓库分发。备份统一位于 `D:\Desktop\Project\Log-Cache`。
@@ -95,8 +99,8 @@ Git 仓库只分发代码、文档、示例和测试集。模型、运行时、�
 ## 验证
 
 ```powershell
-CM5-AI/app/.venv/Scripts/python.exe -m unittest discover -s CM5-AI/app -p "test_*.py"
-node CM5-AI/app/test_remote_device_ui.cjs
+CM5-AI/MiniCPM-V4.7-1B/app/.venv/Scripts/python.exe -m unittest discover -s CM5-AI/MiniCPM-V4.7-1B/app -p "test_*.py"
+node CM5-AI/MiniCPM-V4.7-1B/app/test_remote_device_ui.cjs
 ```
 
 当前回归与历史实机数据的来源及结果详见测试日志汇总。Windows、历史 Qwen3-VL 设备性能和当前 MiniCPM-V 配置分别记录。

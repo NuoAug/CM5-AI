@@ -12,3 +12,11 @@ __pycache__/
 
 # 实机测试原始数据（报告进 docs/，原始包不入库）
 CM5-AI/test-runs/
+
+# 按图文模型存放整套工程；本地资产和产物不入库
+CM5-AI/**/models/
+CM5-AI/**/runtime/
+CM5-AI/**/.venv/
+CM5-AI/**/logs/
+CM5-AI/**/data/
+CM5-AI/**/test-runs/

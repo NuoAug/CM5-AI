@@ -49,7 +49,7 @@ def main():
     parser.add_argument("--api-key-env", default="VLM_API_KEY")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     cases = json.loads((root / "docs/m0-runner-cases-20261103.json").read_text(encoding="utf-8"))
     token = os.environ.get(args.api_key_env, "")
     headers = {"Authorization": "Bearer " + token} if token else {}
@@ -64,7 +64,7 @@ def main():
             messages = [dict(m) for m in messages]
             messages[2]["content"] = last_answer
         if case["case_id"] == "vision-cats":
-            image = Image.open(root / "CM5-AI/samples/cats.jpg").convert("RGB")
+            image = Image.open(root / "CM5-AI/MiniCPM-V4.7-1B/samples/cats.jpg").convert("RGB")
             image.thumbnail((512, 512))
             buf = io.BytesIO()
             image.save(buf, format="JPEG", quality=85)
