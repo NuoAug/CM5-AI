@@ -83,8 +83,8 @@ def main() -> int:
         data["warnings"].append("无 vcgencmd：当前不是树莓派或未安装 raspberrypi utils")
 
     for name, rel in (
-        ("vlm_model", "vlm/minicpm-v-4.7-1b/MiniCPM-V-4_7-1B-Q4_K_M.gguf"),
-        ("vlm_mmproj", "vlm/minicpm-v-4.7-1b/mmproj-model-f16.gguf"),
+        ("vlm_model", "vlm/MiniCPM-V 4.7 1B/MiniCPM-V-4_7-1B-Q4_K_M.gguf"),
+        ("vlm_mmproj", "vlm/MiniCPM-V 4.7 1B/mmproj-model-f16.gguf"),
         ("asr", "asr/sherpa-onnx-paraformer-zh-small-2024-03-09/model.int8.onnx"),
         ("piper", "tts/piper-zh_CN-huayan-medium/zh_CN-huayan-medium.onnx"),
     ):

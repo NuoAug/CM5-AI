@@ -37,8 +37,8 @@ def check_models():
         or (MODELS / "kws" / "sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01")
     )
     required = [
-        MODELS / "vlm" / "minicpm-v-4.7-1b" / "MiniCPM-V-4_7-1B-Q4_K_M.gguf",
-        MODELS / "vlm" / "minicpm-v-4.7-1b" / "mmproj-model-f16.gguf",
+        MODELS / "vlm" / "MiniCPM-V 4.7 1B" / "MiniCPM-V-4_7-1B-Q4_K_M.gguf",
+        MODELS / "vlm" / "MiniCPM-V 4.7 1B" / "mmproj-model-f16.gguf",
         MODELS / "ocr" / "pp-ocrv6-small" / "PP-OCRv6_det_small.onnx",
         MODELS / "ocr" / "pp-ocrv6-small" / "PP-OCRv6_rec_small.onnx",
         MODELS / "ocr" / "pp-ocrv6-small" / "ch_ppocr_mobile_v2.0_cls_mobile.onnx",

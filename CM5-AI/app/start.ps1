@@ -6,8 +6,8 @@ $vlm = Join-Path $root "runtime\llama.cpp\llama-server.exe"
 if (-not (Test-Path $vlm)) {
     $vlm = Join-Path $root "runtime\llama.cpp-src\build4\bin\llama-server.exe"
 }
-$model = Join-Path $root "models\vlm\minicpm-v-4.7-1b\MiniCPM-V-4_7-1B-Q4_K_M.gguf"
-$mmproj = Join-Path $root "models\vlm\minicpm-v-4.7-1b\mmproj-model-f16.gguf"
+$model = Join-Path $root "models\vlm\MiniCPM-V 4.7 1B\MiniCPM-V-4_7-1B-Q4_K_M.gguf"
+$mmproj = Join-Path $root "models\vlm\MiniCPM-V 4.7 1B\mmproj-model-f16.gguf"
 $logs = Join-Path $root "logs"
 New-Item -ItemType Directory -Force -Path $logs | Out-Null
 
@@ -38,8 +38,8 @@ $env:VLM_API_KEY = $apiKey
 Set-Content -Path (Join-Path $logs "vlm.key") -Value $apiKey -NoNewline -Encoding ascii
 
 $vlmArgs = @(
-    "-m", $model,
-    "--mmproj", $mmproj,
+    "-m", ('"' + $model + '"'),
+    "--mmproj", ('"' + $mmproj + '"'),
     "-c", "$vlmCtx",
     "-t", "$vlmThreads",
     "-ngl", "0",
