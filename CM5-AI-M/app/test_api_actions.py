@@ -102,5 +102,33 @@ class VoiceActionTests(unittest.TestCase):
         run_eyes.assert_not_called()
 
 
+class DeviceSpeakTests(unittest.TestCase):
+    def setUp(self):
+        self.client = server.app.test_client()
+        self.player = mock.Mock()
+        self.player.available.return_value = True
+
+    def post(self, **body):
+        sink = mock.Mock()
+        sink.player = self.player
+        with mock.patch.object(server, "OUTPUT_SINK", "alsa"), \
+                mock.patch.object(server, "DEVICE_SINK", sink), \
+                mock.patch.object(server.OUTPUT, "new_utterance_id", return_value="u-test"), \
+                mock.patch.object(server.OUTPUT, "push_segment", return_value={"id": "e1"}) as push:
+            result = self.client.post("/api/device/speak", json=body)
+        return result, push
+
+    def test_prompt_id_is_forwarded_to_output_meta(self):
+        result, push = self.post(text="我在，请说", prompt_id="wake_ack")
+        self.assertEqual(result.status_code, 202)
+        self.assertEqual(result.get_json()["prompt_id"], "wake_ack")
+        self.assertEqual(push.call_args.kwargs["meta"], {"prompt_id": "wake_ack"})
+
+    def test_rejects_unknown_prompt_without_meta(self):
+        result, push = self.post(text="普通播报")
+        self.assertEqual(result.status_code, 202)
+        self.assertIsNone(push.call_args.kwargs["meta"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

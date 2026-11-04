@@ -1,5 +1,12 @@
 # 变更记录
 
+## v1.1.31-pi-tune — 2026-11-04
+
+- 新增本地预制提示音：启动校验 models/tts/prompts/manifest.json（sha256、16kHz 单声道、时长上限），唤醒确认「我在，请说」按事件 ID 取预制 WAV 交给唯一 ALSA 播放队列，优先级/取消/主控危险提示沿用现有机制；清单缺失、摘要不符或文件损坏回退 Piper，不阻断启动。/api/status 暴露 tts.prompts，/api/device/speak 支持 prompt_id 供试听与板端验证。
+- 流式 ASR 端点可配：设备侧尾部静音与仅静音阈值可用 ASR_ENDPOINT_SILENCE／ASR_ENDPOINT_SILENCE_ONLY 覆盖；bench_streaming_asr 增加同参回放与报告字段，便于同板对照 1.2 秒与 0.9 秒端点。
+- 板端验证 v1.1.30：近黑画面 422 提示重拍不调模型；自然询价走 OCR 证据（未绑定归属时明确说明）；A/B 两图比价只读 OCR 金额；真实相机 scene 155.3 秒且不再输出障碍/可通行结论；连续 20 次在途取消全部 499 并释放槽位；外部 kill arecord 后 1 秒内自动恢复监听、故障计数与最后错误可见；主控缺失按 interaction.v0.1 返回 DEPENDENCY_UNAVAILABLE，不冒充现场。
+- Windows 全量 449 项通过（1 项 Piper 条件跳过）；板端预制提示音试听与 ASR 端点回放对比待部署后验证，真人唤醒/接续未验证。
+
 ## v1.1.30-pi-tune — 2026-11-04
 
 - 意图解析新增会话上下文（话题/画面分离），文字与语音入口按会话历史构造上下文，不再把任意历史当成看图；完整问句传入视觉任务，聊天续问不再错误转为看图。

@@ -50,6 +50,7 @@ import device_volume
 from output import OUTPUT, PRIORITY_ANSWER, PRIORITY_CONFIRM, PRIORITY_DANGER, PRIORITY_INTERRUPT
 from stream_text import TTS_NORM_VERSION, normalize_for_tts, segment_text, SemanticSegmenter
 from tts_worker import PiperWorker, TTSInterrupted
+from tts_prompts import PromptStore
 from trace import TraceStore
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -76,6 +77,8 @@ TTS_SMOOTH = os.environ.get("TTS_SMOOTH", "0").strip().lower() in ("1", "true", 
 TTS_BACKEND = os.environ.get("TTS_BACKEND", "persistent").strip().lower()
 TTS_IDLE_SECONDS = float(os.environ.get("TTS_IDLE_SECONDS", "0"))
 TTS_CACHE_VERSION = "piper-persistent-v3"
+TTS_PROMPT_DIR = Path(os.environ.get("TTS_PROMPT_DIR") or (MODELS / "tts" / "prompts"))
+PROMPT_STORE = PromptStore(TTS_PROMPT_DIR, sample_rate=16000)
 _PIPER_WORKER = None
 
 # 线程数可配置：默认值与现状一致，CM5 上按实测再调，不做绑核
@@ -492,6 +495,10 @@ def start_device_services():
         )
     if OUTPUT_SINK == "alsa" and device_io.AlsaPlayer().available() and not piper_error():
         player = device_io.AlsaPlayer()
+        try:
+            PROMPT_STORE.load()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[device] prompt audio load failed: %s", exc)
         DEVICE_SINK = device_io.DeviceSink(
             synth=lambda text: piper_wav(text)[0],
             player=player,
@@ -499,6 +506,7 @@ def start_device_services():
             cancel_synth=lambda: _PIPER_WORKER.interrupt() if _PIPER_WORKER is not None else False,
             before_speak=DEVICE_VOICE.pause,
             after_speak=DEVICE_VOICE.resume,
+            prompts=PROMPT_STORE,
         )
         OUTPUT.attach_sink(DEVICE_SINK)
         DEVICE_VOICE.set_sink_present(True)
@@ -1798,6 +1806,7 @@ def status():
                 else {"alive": False, "engine": "piper-subprocess", "synth_count": None},
                 "smooth": TTS_SMOOTH,
                 "error": piper_error() or None,
+                "prompts": PROMPT_STORE.status(),
             },
             "kws": kws.status(),
             "output": OUTPUT.stats(),
@@ -2897,6 +2906,7 @@ def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_s
             OUTPUT.push(
                 "我在，请说", priority=PRIORITY_CONFIRM, source="voice",
                 reason="wake", ttl=2.0, dedupe_key="voice-wake",
+                meta={"prompt_id": "wake_ack"},
             )
             return voice_reply(
                 "我在，请说", "wake", text=text,
@@ -3215,6 +3225,7 @@ def api_device_speak():
     """试听和手动朗读也走同一个 ALSA 播放器，网页不播放音频。"""
     body = request.get_json(silent=True) or {}
     text = str(body.get("text") or "").strip()
+    prompt_id = str(body.get("prompt_id") or "").strip()
     if not text or len(text) > 200:
         return jsonify({"error": "请输入 1 到 200 字的播报文本"}), 400
     if OUTPUT_SINK != "alsa" or DEVICE_SINK is None:
@@ -3222,9 +3233,12 @@ def api_device_speak():
     if not DEVICE_SINK.player.available():
         return jsonify({"error": "树莓派音频输出设备不可用"}), 503
     uid = OUTPUT.new_utterance_id("remote-speak")
+    meta = {"prompt_id": prompt_id} if prompt_id else None
     event = OUTPUT.push_segment(text, utterance_id=uid, priority=PRIORITY_ANSWER,
-                                source="remote_testbench", reason="manual_speak", ttl=60.0)
-    return jsonify({"queued": event is not None, "utterance_id": uid, "playback": "device"}), 202
+                                source="remote_testbench", reason="manual_speak", ttl=60.0,
+                                meta=meta)
+    return jsonify({"queued": event is not None, "utterance_id": uid, "playback": "device",
+                    "prompt_id": prompt_id or None}), 202
 
 
 @app.get("/api/camera/still")

@@ -58,17 +58,29 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--chunk-ms", type=int, default=100)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--endpoint-silence", type=float, default=1.2,
+                        help="说完判定用的尾部静音秒数（设备默认 ASR_ENDPOINT_SILENCE）")
+    parser.add_argument("--endpoint-silence-only", type=float, default=2.4,
+                        help="只有静音时的判定秒数（设备默认 ASR_ENDPOINT_SILENCE_ONLY）")
     parser.add_argument("--realtime", action="store_true", help="按音频时长节奏送块；默认尽快增量回放")
     args = parser.parse_args()
     if not 10 <= args.chunk_ms <= 1000:
         parser.error("chunk-ms 必须在 10—1000 范围")
-    config = StreamingASRConfig(args.model_dir, num_threads=args.threads)
+    if args.endpoint_silence <= 0 or args.endpoint_silence_only <= 0:
+        parser.error("端点静音阈值必须为正数")
+    config = StreamingASRConfig(
+        args.model_dir, num_threads=args.threads,
+        trailing_silence_seconds=args.endpoint_silence,
+        silence_only_seconds=args.endpoint_silence_only,
+    )
     engine = StreamingASR(config)
     load_start = time.perf_counter()
     engine.load()
     report = {"evidence_mode": "replay", "backend": "native_online_paraformer_int8",
               "model_load_ms": (time.perf_counter() - load_start) * 1000,
               "threads": args.threads, "chunk_ms": args.chunk_ms, "paced": args.realtime,
+              "endpoint_silence_s": args.endpoint_silence,
+              "endpoint_silence_only_s": args.endpoint_silence_only,
               "word_timestamps_supported": False, "cases": [],
               "limits": ["No live microphone or playback", "No target-board evidence", "Small sample; no quality or P95 claim"]}
     try:

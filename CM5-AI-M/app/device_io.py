@@ -559,6 +559,19 @@ class AlsaPlayer:
             self._terminate(proc)
 
 
+def _payload_prompt_id(payload) -> str:
+    """读取输出事件里的固定提示 ID；缺省返回空串。"""
+    if not isinstance(payload, dict):
+        return ""
+    direct = payload.get("prompt_id")
+    if direct:
+        return str(direct)
+    meta = payload.get("meta")
+    if isinstance(meta, dict) and meta.get("prompt_id"):
+        return str(meta["prompt_id"])
+    return ""
+
+
 class DeviceSink:
     """把统一输出总线接到 Piper + 连续 PCM 播放。
 
@@ -575,10 +588,12 @@ class DeviceSink:
         status_cb: Optional[Callable] = None,
         emergency_synth: Optional[Callable] = None,
         cancel_synth: Optional[Callable] = None,
+        prompts=None,
     ):
         self.synth = synth
         self.emergency_synth = emergency_synth or synth
         self.cancel_synth = cancel_synth
+        self.prompts = prompts
         self.player = player
         self.before_speak = before_speak
         self.after_speak = after_speak
@@ -600,6 +615,13 @@ class DeviceSink:
     def prepare(self, payload, cancel_event):
         if cancel_event.is_set():
             return b''
+        prompt_id = _payload_prompt_id(payload)
+        if prompt_id:
+            store = self.prompts
+            if store is not None:
+                wav = store.read(prompt_id)
+                if wav:
+                    return wav
         synth = self.emergency_synth if payload.get('priority', 3) == 0 else self.synth
         return synth(str(payload.get('text') or ''))
 

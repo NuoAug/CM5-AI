@@ -169,7 +169,11 @@ class DeviceVoice:
                         model_dir = Path(os.environ.get("ASR_STREAMING_MODEL_DIR") or
                                          ROOT / "models/asr-streaming/sherpa-onnx-streaming-paraformer-bilingual-zh-en")
                         self._asr = StreamingASR(StreamingASRConfig(
-                            model_dir, num_threads=int(os.environ.get("ASR_STREAMING_THREADS", "1"))))
+                            model_dir,
+                            num_threads=int(os.environ.get("ASR_STREAMING_THREADS", "1")),
+                            trailing_silence_seconds=float(os.environ.get("ASR_ENDPOINT_SILENCE", "1.2")),
+                            silence_only_seconds=float(os.environ.get("ASR_ENDPOINT_SILENCE_ONLY", "2.4")),
+                        ))
                     if self._asr_session is not None:
                         self._asr.close()
                         self._asr_session = None
@@ -340,7 +344,8 @@ class DeviceVoice:
                 self._conversation_active = True
                 if self.backend == "offline-paraformer":
                     OUTPUT.push("我在，请说", priority=PRIORITY_CONFIRM, source="device",
-                                reason="wake", ttl=2.0, dedupe_key="device-wake")
+                                reason="wake", ttl=2.0, dedupe_key="device-wake",
+                                meta={"prompt_id": "wake_ack"})
             if self.backend == "offline-paraformer":
                 command = event.get("command")
                 if command is not None and len(command):
