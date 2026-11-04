@@ -122,6 +122,74 @@ class ControlIntentTests(unittest.TestCase):
         self.assertEqual(task.intent, "chat")
 
 
+class SessionRoutingTests(unittest.TestCase):
+    def test_chat_continues_even_when_a_photo_is_cached(self):
+        context = intent.SessionContext(topic="chat", has_frame=True)
+        for text in ("那你觉得呢", "为什么", "为什么我总是在意别人的评价", "那该怎么办",
+                     "然后呢", "可以详细说说吗", "你刚才说的前面有什么问题", "我比较难过"):
+            with self.subTest(text=text):
+                task = intent.parse(text, context=context)
+                self.assertEqual(task.intent, "chat")
+                self.assertFalse(task.needs_image)
+
+    def test_visual_followup_depends_on_current_topic_and_frame(self):
+        text = "那你觉得呢"
+        self.assertEqual(intent.parse(text, context=intent.SessionContext("vision", True)).intent, "followup")
+        task = intent.parse(text, context=intent.SessionContext("vision", False))
+        self.assertEqual(task.intent, "clarify")
+        self.assertFalse(task.needs_image)
+        # An explicit question about the visible scene can change topic.
+        task = intent.parse("眼前这个是什么", context=intent.SessionContext("chat", False))
+        self.assertEqual(task.intent, "followup")
+        self.assertTrue(task.needs_image)
+
+    def test_abstract_comparison_and_general_cost_are_chat(self):
+        context = intent.SessionContext("chat", True)
+        for text in ("这两种解决方式有什么区别", "比较一下这两个方案", "保质期和到期日有什么区别",
+                     "学费多少钱", "工资和房租的价格对比", "为什么和朋友有距离感"):
+            with self.subTest(text=text):
+                task = intent.parse(text, context=context)
+                self.assertEqual(task.intent, "chat")
+                self.assertFalse(task.needs_image)
+
+    def test_natural_visible_comparison_is_not_scene_description(self):
+        for text in ("这两个东西有什么区别", "这俩有什么差别", "比较一下这两本天气手册",
+                     "左边和右边这两个一样吗"):
+            with self.subTest(text=text):
+                task = intent.parse(text)
+                self.assertEqual(task.intent, "compare")
+                self.assertTrue(task.needs_image)
+                self.assertTrue(task.slots["item"])
+                self.assertNotIn("comparison", task.slots)
+
+    def test_price_routes_distinguish_one_label_and_two_products(self):
+        for text, target in (("这个多少钱", "这个"), ("帮我看看右边那包的价签", "右边那包的"),
+                             ("请告诉我这瓶多少块", "这瓶")):
+            with self.subTest(text=text):
+                task = intent.parse(text)
+                self.assertEqual(task.intent, "read_price")
+                self.assertEqual(task.slots["item"], target)
+                self.assertTrue(task.needs_image)
+        for text in ("这两个哪个更便宜", "这两个分别多少钱", "哪款更划算", "两包的价格一样吗"):
+            with self.subTest(text=text):
+                task = intent.parse(text)
+                self.assertEqual(task.intent, "compare")
+                self.assertEqual(task.slots["comparison"], "price")
+                self.assertTrue(task.needs_image)
+        self.assertEqual(intent.parse("这几块砖是什么颜色").intent, "followup")
+
+    def test_natural_passage_queries_keep_main_control_authority(self):
+        for text in ("请告诉我能不能从椅子旁边穿过去", "我能从门框边上过吗",
+                     "能不能从桌椅缝里钻过去", "我从书架旁挤得过去吗", "这个缝够我侧身过吗",
+                     "能从它们中间走过去不", "请看前方我可以迈过去吗"):
+            with self.subTest(text=text):
+                task = intent.parse(text, context=intent.SessionContext("chat", True))
+                self.assertEqual(task.intent, "scene_query")
+                self.assertFalse(task.needs_image)
+                self.assertEqual(task.actions, [])
+                self.assertNotIn("action", task.slots)
+
+
 class TaskShapeTests(unittest.TestCase):
     def test_task_has_required_fields(self):
         task = intent.parse("前面有什么", session_id="s1")

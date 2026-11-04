@@ -11,6 +11,7 @@ import importlib.util
 import io
 import os
 import re
+import select
 import shutil
 import subprocess
 import tempfile
@@ -202,6 +203,12 @@ class DeviceCamera:
         self._stop_camera()
 
 
+class AlsaCaptureError(RuntimeError):
+    def __init__(self, message: str, returncode: Optional[int] = None):
+        super().__init__(message)
+        self.returncode = returncode
+
+
 class AlsaCapture:
     """arecord 原始 PCM 采集，16 kHz / 单声道 / 16-bit。"""
 
@@ -210,71 +217,146 @@ class AlsaCapture:
         self.sample_rate = sample_rate
         self.chunk_frames = chunk_frames
         self._proc: Optional[subprocess.Popen] = None
+        self._retiring: Optional[subprocess.Popen] = None
         self._lock = threading.RLock()
+        self._generation = 0
+        self.last_error: Optional[AlsaCaptureError] = None
 
     def available(self) -> bool:
         return alsa_card_present(self.device, "arecord")
 
     def start(self) -> bool:
-        if not self.available():
-            return False
-        if self._proc is not None and self._proc.poll() is None:
-            return True
-        self._proc = None
-        exe = audio_tools()["arecord"]
-        try:
-            self._proc = subprocess.Popen(
-                [exe, "-q", "-D", self.device, "-f", "S16_LE", "-r", str(self.sample_rate), "-c", "1", "-t", "raw"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                bufsize=0,
-            )
-            time.sleep(0.25)
-            if self._proc.poll() is not None:
-                self._proc = None
+        with self._lock:
+            if self.running:
+                return True
+            generation = self._generation
+        available = self.available()
+        with self._lock:
+            if generation != self._generation:
                 return False
-            return True
-        except Exception:  # noqa: BLE001
+            if self.running:
+                return True
+            if self._retiring is not None:
+                if self._retiring.poll() is None:
+                    self.last_error = AlsaCaptureError("旧 arecord 尚未退出，等待设备释放")
+                    return False
+                self._terminate(self._retiring)
+            if not available:
+                self.last_error = AlsaCaptureError("麦克风设备或 arecord 不可用")
+                return False
+            old_proc = self._proc
             self._proc = None
+            try:
+                proc = subprocess.Popen(
+                    [audio_tools()["arecord"], "-q", "-D", self.device, "-f", "S16_LE",
+                     "-r", str(self.sample_rate), "-c", "1", "-t", "raw"],
+                    stdout=subprocess.PIPE,
+                    # 驱动诊断进入服务日志。无额外 stderr 管道、线程或缓冲队列。
+                    bufsize=0,
+                )
+            except (OSError, TypeError) as exc:
+                self.last_error = AlsaCaptureError(f"启动 arecord 失败：{exc}")
+                proc = None
+            self._proc = proc
+        self._terminate(old_proc)
+        if proc is None:
             return False
+        time.sleep(0.25)
+        with self._lock:
+            if self._proc is not proc:
+                return False
+            if proc.poll() is None:
+                self.last_error = None
+                return True
+        self._fail(proc, "arecord 启动后退出")
+        return False
+
+    def _terminate(self, proc) -> None:
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                proc.kill()
+                proc.wait(timeout=1)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if proc.poll() is None:
+            # 例如内核 I/O 暂未解除。保留身份，禁止重开占用同一采集端。
+            return
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except OSError:
+                pass
+        with self._lock:
+            if self._retiring is proc:
+                self._retiring = None
+
+    def _fail(self, proc, reason: str) -> Optional[AlsaCaptureError]:
+        with self._lock:
+            if self._proc is not proc:
+                # 显式停止或其他代次已经接管，只能清理自己持有的进程。
+                return None
+            returncode = proc.poll()
+            if returncode is not None:
+                reason += f"（退出码 {returncode}）"
+            error = AlsaCaptureError(reason, returncode)
+            self.last_error = error
+            self._retiring = proc
+            self._proc = None
+        self._terminate(proc)
+        return error
+
+    @staticmethod
+    def _read_pipe(proc, count: int, deadline: float) -> bytes:
+        if os.name == "posix":
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([proc.stdout], [], [], remaining)[0]:
+                raise TimeoutError("2 秒内未收到完整 PCM 块")
+        return proc.stdout.read(count)
 
     def read(self) -> Optional[np.ndarray]:
-        proc = self._proc
-        if proc is None or proc.stdout is None:
-            return None
-        if proc.poll() is not None:
-            self._proc = None
+        with self._lock:
+            proc = self._proc
+        if proc is None:
             return None
         nbytes = self.chunk_frames * 2
+        raw = bytearray()
+        deadline = time.monotonic() + 2.0
         try:
-            raw = proc.stdout.read(nbytes)
-        except Exception:  # noqa: BLE001
+            while len(raw) < nbytes:
+                if proc.poll() is not None:
+                    raise OSError("arecord 已退出")
+                block = self._read_pipe(proc, nbytes - len(raw), deadline)
+                if not block:
+                    raise EOFError("arecord 输出已结束")
+                raw.extend(block)
+        except (OSError, ValueError, EOFError) as exc:
+            error = self._fail(proc, f"麦克风采集中断：{exc}")
+            if error is not None:
+                raise error from exc
             return None
-        if not raw or len(raw) < nbytes:
-            return None
+        with self._lock:
+            if self._proc is not proc:
+                return None
         return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
     def stop(self) -> None:
         with self._lock:
-            proc = self._proc
+            self._generation += 1
+            proc = self._proc or self._retiring
+            self._retiring = proc
             self._proc = None
-        if proc is not None:
-            try:
-                proc.terminate()
-                proc.wait(timeout=2)
-            except Exception:  # noqa: BLE001
-                try:
-                    proc.kill()
-                except Exception:  # noqa: BLE001
-                    pass
+        self._terminate(proc)
 
     @property
     def running(self) -> bool:
-        proc = self._proc
-        if proc is not None and proc.poll() is not None:
-            self._proc = None
-            return False
-        return proc is not None
+        with self._lock:
+            return self._proc is not None and self._proc.poll() is None
 
 
 class AlsaPlayer:

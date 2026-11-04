@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import re
-import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -62,10 +61,16 @@ PASSAGE_QUERY = re.compile(
     r"能不能(?:走|直行|通行|过马路|过街)|(?:能|可以)(?:直行|走|通行|过马路|过街).{0,12}(?:吗|么|不)|"
     r"(?:能不能|能|可以)通过(?:这|那|路口|通道|马路|街道|楼梯|走廊|大门)|"
     r"(?:前面|前方|这里|那里|路口|通道).{0,8}(?:能不能|能|可以)通过|^(?:能不能|能|可以)通过(?:吗|么)?$|"
+    r"(?:能不能|可不可以|能否|可否|能|可以).{0,20}?(?:穿|钻|挤|跨|迈|走|绕)?(?:过去|过来|通过|通行)(?:吗|么|不|呢|吧|$)|"
+    r"(?:穿|钻|挤|跨|迈|走|过|绕)得(?:过去|过来|过|去|通|了)(?:吗|么|不|呢|$)|"
+    r"(?:从|沿着|顺着|贴着).{1,16}(?:边|旁|间|口|缝|侧).{0,4}(?:通过|通行|过|走过去)(?:吗|么|不|呢)|"
+    r"(?:够不够|够).{0,10}(?:我|人|身体|侧身|转身).{0,6}(?:通过|通行|过去|过|走)(?:吗|么|不|$)|"
     r"现在安全吗|前面通不通|前方通不通"
 )
 SPATIAL_QUERY = re.compile(
-    r"距离|多远|多少米|几米|怎么绕|如何绕|怎样绕|往哪(?:边|里)?走|该走哪|"
+    r"多远|多少(?:米|厘米)|几米|^(?:距离|测距)(?:呢|吗|多少)?$|"
+    r"(?:前方|前面|目标|障碍|这个|那个|离我).{0,8}距离|距离.{0,4}(?:多少|多大)|"
+    r"怎么绕|如何绕|怎样绕|往哪(?:边|里)?走|该走哪|"
     r"能否(?:走|通行|通过)|(?:通道|道路|路面|前方|前面|这里).{0,8}(?:安全|宽度|够宽|能过)|"
     r"(?:宽度|高度).{0,8}(?:通过|通行|够不够)|"
     r"(?:这|那|前面|前方).{0,8}(?:路|门|通道).{0,8}(?:怎么走|过得去|走得通)|"
@@ -75,18 +80,51 @@ SPATIAL_QUERY = re.compile(
 
 AMBIGUOUS_STOP = re.compile(r"^(?:停一下|停下来|暂停|先停|停停|等等|等一下)$")
 
-DATE_WORDS = ("日期", "生产", "保质期", "过期", "批号", "到期", "有效期")
-TEXT_WORDS = ("读", "念", "什么字", "写的什么", "文字", "上面的字", "标签上", "写的啥")
+DATE_WORDS = ("日期", "保质期", "过期", "批号", "到期", "有效期")
+TEXT_QUERY = re.compile(
+    r"什么字|写的什么|写了什么|写的啥|上面的字|标签上|文字|"
+    r"(?:^|帮我|请|请你|给我|你能)(?:读|念)(?:一下|一读|一念|出|这|那|上面|标签|包装|路牌|字|$)"
+)
 DETAIL_WORDS = ("详细", "仔细说", "具体说", "多说说", "多讲", "描述一下")
-COMPARE_WORDS = ("比较", "对比", "哪个更", "有什么不同")
 CHAT_WORDS = ("聊", "烦", "难受", "难过", "开心", "累", "陪我", "新闻", "天气", "心情", "无聊", "孤单")
-SCENE_WORDS = ("有什么", "看看", "前面", "前方", "周围", "什么情况", "前面是", "这边是")
-FOLLOW_MARKERS = re.compile(r"这|那|它|他|她|刚才|刚刚|为什么|怎么|多少|哪个|哪边|是不是|吗|呢|还|再")
+CHAT_TOPIC = re.compile(
+    r"情绪|感受|评价|意见|观点|想法|看法|建议|办法|方案|做法|方式|心理|压力(?!锅|表|计|罐|阀)|"
+    r"烦恼|担心|在意|介意|焦虑|心态|同事|人际|关系|工作中|学习上|读书"
+)
+DISCOURSE_REF = re.compile(
+    r"(?:刚才|刚刚|之前|前面|上次)(?:我|你|我们)?(?:说|讲|提|回答|解释)"
+)
+VISUAL_SOURCE = re.compile(r"眼前|手里|画面|图[里中上]|图片|照片|镜头|这张图|那张图|标签上|包装上|价签")
+VISUAL_LOCATION = re.compile(r"前面|前方|周围|附近|这边|这里")
+SCENE_QUERY = re.compile(
+    r"(?:眼前|前面|前方|周围|附近|这边|这里|手里|画面(?:里|中)?)(?:现在)?(?:有什么|什么情况|是什么)|"
+    r"(?:看|看看|描述)(?:一下|下)?(?:眼前|前面|前方|周围|画面|这里)|^(?:有什么|看看|什么情况)$"
+)
+OBJECT_REF = re.compile(r"(?:这|那)(?:(?:几|两|三|四|五|[1-9])?(?:个|件|只|袋|瓶|款|样|盒|张|杯|包|本|块|根|片)|两|些|是(?=什么|哪))|它|(?:左|右)(?:边|侧)")
+VISUAL_ATTRIBUTE = re.compile(r"颜色|长什么样|什么形状|什么材质|是什么东西|几只|几件|挡住|有没有破损")
+FOLLOW_MARKERS = re.compile(r"为什么|为何|为啥|怎么|多少|哪个|哪边|是不是|然后|继续|接着|展开|这|那|它|他|她|刚才|刚刚|吗|呢|还|再")
+PAIR_REF = re.compile(r"这俩|那俩|(?:两|二|2|俩)(?:个|件|瓶|袋|包|盒|样|张|款|只|杯|罐|条|种|份)|左右|左边.{0,12}(?:和|与|比)右边|右边.{0,12}(?:和|与|比)左边")
+COMPARE_REQUEST = re.compile(r"^(?:请|请你|帮我|给我|想|要|能不能|可不可以)*(?:比较|对比)(?:一下)?")
+COMPARE_RELATION = re.compile(r"区别|不同|差别|一样吗|(?:哪个|哪款|哪种|哪边|哪一个|哪瓶|哪包|谁)(?:更|好|差|贵|便宜|划算)")
+PRICE_QUERY = re.compile(
+    r"多少钱|(?:多少|几)(?:块钱|元(?:钱)?|块(?=吗|呢|么|$))|什么价|卖多少|售价|标价|价签|价钱|价格|单价"
+)
+PRICE_COMPARE = re.compile(r"更(?:贵|便宜|划算)|(?:哪个|哪款|哪种|哪包|哪瓶|哪边|谁)(?:贵|便宜|划算)|哪个价格|哪款价格")
+COMPARE_ADJECTIVE = re.compile(r"^(?:有点|很|挺|更|不)?(?:烦|累|开心(?!果)|难受|难过|孤单|无聊)")
+NON_VISUAL_PRICE = re.compile(r"汇率|利率|房租|工资|学费|租金|月费|预算|机票|市场行情|物价")
 
 TOILET_WORDS = ("卫生间", "洗手间", "厕所", "WC", "wc", "toilet", "Toilet")
 EXIT_WORDS = ("出口", "安全出口", "EXIT", "exit")
 
-VISION_INTENTS = {"scene", "read_text", "read_date", "find_object", "followup", "compare", "detail"}
+VISION_INTENTS = {"scene", "read_text", "read_date", "read_price", "find_object", "followup", "compare", "detail"}
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """上一轮话题与是否有可用画面独立传入，不把任意历史当成看图。"""
+
+    topic: str = "unknown"  # chat / vision / unknown
+    has_frame: bool = False
 
 
 @dataclass
@@ -199,11 +237,12 @@ def parse(
     text: str,
     *,
     has_context: bool = False,
+    context: Optional[SessionContext] = None,
     speech_active: bool = False,
     session_id: str = "",
     is_final: bool = True,
 ) -> Task:
-    """解析一条已去掉唤醒词的语音指令。"""
+    """解析最终话语或明确文本请求。新调用方传入可区分话题和图像的上下文。"""
     normalized = normalize_text(text)
     cmd = clean_command(normalized)
     if not cmd:
@@ -211,8 +250,15 @@ def parse(
     if ACK_ONLY.fullmatch(cmd):
         return _task("ack", confidence=1.0, session_id=session_id)
 
-    if not WAKE_PATTERN.search(normalized):
-        pass  # 调用方已处理唤醒；这里保留原文用于日志
+    if context is None:
+        # 旧二元接口只用于兼容；正常业务入口传明确的会话信号。
+        context = SessionContext("vision", True) if has_context else SessionContext()
+    visual_source = bool(VISUAL_SOURCE.search(cmd))
+    object_ref = bool(OBJECT_REF.search(cmd))
+    scene_request = bool(SCENE_QUERY.search(cmd))
+    conversational_topic = not visual_source and (
+        bool(CHAT_TOPIC.search(cmd)) or (context.topic == "chat" and bool(DISCOURSE_REF.search(cmd)))
+    )
 
     # 概念解释可聊天；同句中的当前行动/测量问题不能被“什么意思”豁免。
     concrete_spatial_question = PASSAGE_QUERY.search(cmd) or re.search(
@@ -310,31 +356,47 @@ def parse(
             {"target": "exit", "item": "出口标识"},
             needs_image=True, confidence=0.95, session_id=session_id,
         )
-    if any(w in cmd for w in DATE_WORDS):
-        return _task(
-            "read_date",
-            needs_image=True, confidence=0.95, session_id=session_id,
-        )
-    if any(w in cmd for w in TEXT_WORDS):
-        return _task(
-            "read_text",
-            needs_image=True, confidence=0.9, session_id=session_id,
-        )
+    if definition_only and not visual_source:
+        return _task("chat", {"question": cmd}, confidence=0.85, session_id=session_id)
 
-    if any(w in cmd for w in COMPARE_WORDS):
-        item = extract_compare(cmd)
-        if not item:
-            return _task(
-                "clarify", priority=2, confidence=0.5, session_id=session_id,
-                clarify="你要比较哪两样东西？",
-            )
-        return _task(
-            "compare", {"item": item}, needs_image=True, confidence=0.85,
-            session_id=session_id,
-        )
+    pair_ref = bool(PAIR_REF.search(cmd))
+    price_query = bool(PRICE_QUERY.search(cmd))
+    price_compare = bool(PRICE_COMPARE.search(cmd))
+    compare_request = COMPARE_REQUEST.match(cmd)
+    compare_relation = bool(COMPARE_RELATION.search(cmd))
+    implicit_pair = (compare_relation and (pair_ref or object_ref or context.topic == "vision" or price_compare)) or (
+        pair_ref and price_query
+    )
+    non_visual_price = price_query and not visual_source and NON_VISUAL_PRICE.search(cmd)
+    if not conversational_topic and not non_visual_price and (compare_request or implicit_pair):
+        item = extract_compare(cmd) if compare_request else cmd
+        if item and (pair_ref or visual_source or not COMPARE_ADJECTIVE.match(item)):
+            slots = {"item": item, "question": cmd}
+            if price_query or price_compare:
+                slots["comparison"] = "price"
+            return _task("compare", slots, needs_image=True, confidence=0.85, session_id=session_id)
+        if not item and context.topic != "chat":
+            return _task("clarify", priority=2, confidence=0.5, session_id=session_id,
+                         clarify="你要比较哪两样东西？")
+
+    if price_query and not conversational_topic and not non_visual_price:
+        prefix = PRICE_QUERY.split(cmd, maxsplit=1)[0]
+        item = re.sub(r"^(?:请你|请|能不能|可以|帮我|给我|告诉我|看看|看一下|看下|读一下|念一下|看|读|念)+", "", prefix)
+        return _task("read_price", {"question": cmd, "item": item},
+                     needs_image=True, confidence=0.9, session_id=session_id)
+
+    concept_comparison = compare_relation and not (pair_ref or object_ref or visual_source or context.topic == "vision")
+    if conversational_topic or non_visual_price or concept_comparison or any(w in cmd for w in CHAT_WORDS):
+        return _task("chat", {"question": cmd}, confidence=0.8, session_id=session_id)
+    if any(w in cmd for w in DATE_WORDS):
+        return _task("read_date", needs_image=True, confidence=0.95, session_id=session_id)
+    if TEXT_QUERY.search(cmd):
+        return _task("read_text", needs_image=True, confidence=0.9, session_id=session_id)
 
     if any(w in cmd for w in DETAIL_WORDS):
-        return _task("detail", needs_image=True, confidence=0.85, session_id=session_id)
+        if visual_source or scene_request or VISUAL_LOCATION.search(cmd) or context.topic == "vision":
+            return _task("detail", needs_image=True, confidence=0.85, session_id=session_id)
+        return _task("chat", {"question": cmd}, confidence=0.8, session_id=session_id)
 
     if "找" in cmd or "有没有" in cmd:
         item = extract_item(cmd)
@@ -357,26 +419,27 @@ def parse(
                 session_id=session_id,
             )
 
-    # 聊天与实时信息优先于“有什么”这类泛场景词
-    if DEFINITION.search(cmd) and "眼前" not in cmd and "手里" not in cmd:
-        return _task("chat", {"question": cmd}, confidence=0.85, session_id=session_id)
-    if any(w in cmd for w in CHAT_WORDS):
-        return _task("chat", {"question": cmd}, confidence=0.8, session_id=session_id)
-
-    # “眼前这个是什么”优先按追问；“眼前有什么/手里有什么”仍按场景描述
-    if ("眼前" in cmd or "手里" in cmd) and not any(w in cmd for w in ("有什么", "看看", "周围", "什么情况")):
-        return _task(
-            "followup", {"question": cmd}, needs_image=True, confidence=0.8,
-            session_id=session_id,
-        )
-    if any(w in cmd for w in SCENE_WORDS):
+    if scene_request:
         return _task("scene", needs_image=True, confidence=0.85, session_id=session_id)
 
-    if has_context and (FOLLOW_MARKERS.search(cmd) or len(cmd) >= 6):
-        return _task(
-            "followup", {"question": cmd}, needs_image=True, confidence=0.6,
-            session_id=session_id,
-        )
+    has_visual_attribute = bool(VISUAL_ATTRIBUTE.search(cmd))
+    explicit_visual = visual_source or (object_ref and has_visual_attribute)
+    if explicit_visual:
+        return _task("followup", {"question": cmd}, needs_image=True, confidence=0.8, session_id=session_id)
+
+    if FOLLOW_MARKERS.search(cmd):
+        if context.topic == "vision":
+            if context.has_frame:
+                return _task("followup", {"question": cmd}, needs_image=True, confidence=0.7, session_id=session_id)
+            return _task("clarify", priority=2, confidence=0.5, session_id=session_id,
+                         clarify="前一张画面现在不可用。你要重新看一下，还是继续聊天？")
+        if context.has_frame and context.topic == "unknown" and (object_ref or has_visual_attribute):
+            return _task("followup", {"question": cmd}, needs_image=True, confidence=0.7, session_id=session_id)
+        if context.topic == "chat":
+            return _task("chat", {"question": cmd}, confidence=0.8, session_id=session_id)
+
+    if context.topic == "chat" and len(cmd) >= 3:
+        return _task("chat", {"question": cmd}, confidence=0.7, session_id=session_id)
 
     if len(cmd) >= 8:
         return _task("chat", {"question": cmd}, confidence=0.65, session_id=session_id)

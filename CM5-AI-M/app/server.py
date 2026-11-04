@@ -37,9 +37,10 @@ from rapidocr import EngineType, ModelType, OCRVersion, RapidOCR
 import sherpa_onnx
 
 import intent
+from image_quality import assess_image_quality
 from main_control import MainControlAdapter
 from turns import TurnCancelled
-from visual_context import VisualContextStore, VisualContextError
+from visual_context import VisualContextStore, VisualContextError, extract_fields
 from visual_bridge import VisualBridge
 from standalone_frame_provider import DeviceTestVisualContextStore, configure_standalone_visual
 import kws
@@ -149,7 +150,8 @@ asr_engine = None
 asr_last_used = 0.0
 init_error = {"ocr": None, "asr": None}
 
-MEM_BUDGET_GB = float(os.environ.get("MEM_BUDGET_GB", "3.6"))
+# A local admission guard only. Target acceptance also measures PSS, swap and device allocations.
+MEM_BUDGET_GB = min(3.0, float(os.environ.get("MEM_BUDGET_GB", "3.0")))
 VOICE_SOURCE = os.environ.get("VOICE_SOURCE", "browser").strip().lower()
 # 正式模式只经主控取图；独立设备测试必须显式选择。
 IMAGE_SOURCE = os.environ.get("IMAGE_SOURCE", "main-control").strip().lower()
@@ -161,7 +163,8 @@ VISUAL_BRIDGE.register_routes(app)
 
 @app.errorhandler(VisualContextError)
 def visual_error(error):
-    status = {'NO_FRAME': 404, 'STALE_FRAME': 409, 'DEPENDENCY_UNAVAILABLE': 503, 'BUSY': 429}.get(error.code, 400)
+    status = {'NO_FRAME': 404, 'STALE_FRAME': 409, 'DEPENDENCY_UNAVAILABLE': 503, 'BUSY': 429,
+              'LOW_QUALITY_FRAME': 422}.get(error.code, 400)
     payload = {'error': str(error), 'code': error.code}
     if error.code in ('NO_FRAME', 'STALE_FRAME', 'DEPENDENCY_UNAVAILABLE'):
         body = request.get_json(silent=True) or {}
@@ -170,6 +173,11 @@ def visual_error(error):
         if request.path.startswith('/api/voice'):
             OUTPUT.push(answer, priority=PRIORITY_CONFIRM, source='voice', reason='frame_unavailable', ttl=3.0)
             payload['spoken'] = True
+    if error.code == 'LOW_QUALITY_FRAME':
+        payload.update(answer=str(error), source='rule', has_image=True,
+                       input_quality=getattr(g, 'vlm_input_quality', []))
+        if request.path in ('/api/eyes', '/api/ask', '/api/talk', '/api/voice', '/api/voice/final'):
+            push_answer_segments(str(error), 'image_quality', 'image_quality')
     return jsonify(payload), status
 
 
@@ -211,6 +219,25 @@ def encode_visual_image(encoded, *, frame_id=None, object_id=None, use_current_o
     return result
 
 
+def validate_vlm_inputs(encoded_images):
+    """Check the actual model inputs. The OCR path retains the original frame."""
+    images = encoded_images if isinstance(encoded_images, (list, tuple)) else [encoded_images]
+    if not encoded_images:
+        return
+    assessments = []
+    for index, encoded in enumerate(images):
+        result = assess_image_quality(decode_image(encoded))
+        assessments.append(dict(result, input_index=index))
+    g.vlm_input_quality = assessments
+    frame_context = getattr(g, 'visual_frame_context', None)
+    if frame_context is not None:
+        frame_context['input_quality'] = assessments
+    for result in assessments:
+        if result['blocked']:
+            prefix = f"图{'AB'[result['input_index']]}：" if len(images) == 2 else ""
+            raise VisualContextError('LOW_QUALITY_FRAME', prefix + result['message'])
+
+
 def comparison_images(session_id, image):
     if not session_id:
         return image
@@ -242,6 +269,179 @@ def remember_ocr_evidence(session_id, frame_id, lines):
         with token.guard_context() if token else nullcontext():
             VISUAL_CONTEXT.add_ocr(session_id, frame_id, rows, recognizer='RapidOCR', replace=True)
             g.ocr_evidence = VISUAL_CONTEXT.structured_fields(session_id, frame_id)
+
+
+# ---------- 价格证据：只用 OCR 原文和对象归属，不让 VLM 猜价 ----------
+PRICE_MISS_REPLY = "没看清价格，请把价签对准光线，靠近一点再拍一张"
+PRICE_MULTI_REPLY = "画面里不止一个价格，我不确定你要哪一个。请分别对准价签各拍一张。"
+PRICE_UNBOUND_SUFFIX = "，但我没有把它归到具体商品。请把商品和价签拍在同一张画面里，或先指认商品。"
+PRICE_COMPARE_NEED_SLOTS = "比价需要先明确A和B各自是哪张图。请先分别指认A图和B图。"
+
+
+def _price_amount_text(entry):
+    value = entry.get("value")
+    raw = entry.get("raw_value") or ""
+    if value is not None and entry.get("currency") in (None, "CNY"):
+        text = f"{value} 元"
+    else:
+        text = raw or (str(value) if value is not None else "")
+    unit = entry.get("unit")
+    if unit:
+        text += f"，每{unit}"
+    conditions = entry.get("conditions") or []
+    if conditions:
+        text += "，标注了" + "、".join(str(c) for c in conditions)
+    if entry.get("unit_ambiguous"):
+        text += "；同一处有多个金额，单位可能对不上"
+    return text
+
+
+def _price_rows_from_lines(lines, frame_id=""):
+    rows = []
+    for index, line in enumerate(lines or []):
+        rect = _box_rect(line)
+        if not rect:
+            continue
+        rows.append({"row_id": f"ocr-line-{index}", "frame_id": frame_id,
+                     "object_id": None, "raw_text": line.get("text", ""),
+                     "roi_xyxy_px": list(rect), "score": line.get("score")})
+    return rows
+
+
+def _ocr_lines(img, task="price", trace_id=""):
+    if ocr_engine is None:
+        raise RuntimeError("OCR 未初始化：" + str(init_error["ocr"]))
+    save_debug_image(f"{task}.png", img)
+    TRACES.mark(trace_id, "ocr_start", task=task)
+    with OCR_LOCK:
+        res = ocr_engine(img)
+    lines = parse_ocr_result(res)
+    TRACES.mark(trace_id, "ocr_end", task=task)
+    return lines
+
+
+def _cached_visual(session_id):
+    return (bool(session_id) and has_request_context()
+            and bool(getattr(g, "visual_frame_context", {}).get("cache_enabled")))
+
+
+def _object_bound_to_frame(session_id, frame_id):
+    """只认本帧内确认过的对象；跨帧或未确认都不算归属。"""
+    if not session_id or not frame_id:
+        return None
+    try:
+        snapshot = VISUAL_CONTEXT.snapshot(session_id)
+    except VisualContextError:
+        return None
+    candidates = []
+    context = getattr(g, "visual_frame_context", {}) if has_request_context() else {}
+    if context.get("used_frame_id") == frame_id:
+        candidates.append(context.get("selected_object_id"))
+    for ref in (snapshot.get("slots") or {}).values():
+        if ref and ref.get("frame_id") == frame_id:
+            candidates.append(ref.get("object_id"))
+    if snapshot.get("current_frame_id") == frame_id:
+        candidates.append(snapshot.get("current_object_id"))
+    valid = set()
+    for obj in snapshot.get("objects") or []:
+        object_id = obj.get("visual_target_id") or obj.get("object_id")
+        if object_id and any(view.get("frame_id") == frame_id for view in obj.get("views") or []):
+            valid.add(object_id)
+    for candidate in candidates:
+        if candidate and candidate in valid:
+            return candidate
+    return None
+
+
+def price_evidence(session_id, frame_id, lines, object_id=None):
+    """有缓存视觉上下文时用登记的 OCR 证据；否则退化为本次 OCR 行。"""
+    if _cached_visual(session_id):
+        if object_id:
+            try:
+                VISUAL_CONTEXT.associate_ocr(session_id, frame_id, object_id)
+            except VisualContextError as exc:
+                log.info("[price] 价签绑定失败，保留未归属：%s", exc)
+                object_id = None
+        evidence = VISUAL_CONTEXT.structured_fields(session_id, frame_id, object_id=object_id)
+        if has_request_context():
+            g.ocr_evidence = evidence
+        return evidence
+    return extract_fields(_price_rows_from_lines(lines, frame_id), object_id=object_id)
+
+
+def price_answer(evidence):
+    prices = list((evidence.get("fields") or {}).get("price") or [])
+    if not prices:
+        return {"answer": PRICE_MISS_REPLY, "missing": ["price"],
+                "association": evidence.get("association")}
+    distinct = {str(price.get("value")) for price in prices}
+    if len(distinct) > 1:
+        return {"answer": PRICE_MULTI_REPLY, "missing": [],
+                "association": evidence.get("association"), "price_count": len(prices)}
+    amount = _price_amount_text(prices[0])
+    if evidence.get("association") == "confirmed" and evidence.get("object_id"):
+        answer = f"这件商品的价签是{amount}。"
+    else:
+        answer = f"画面里价签是{amount}{PRICE_UNBOUND_SUFFIX}"
+    return {"answer": answer, "missing": [], "association": evidence.get("association")}
+
+
+def _slot_price(session_id, slot, trace_id=""):
+    ref = VISUAL_CONTEXT.frame_for_slot(session_id, slot)
+    frame_id = ref["frame_id"]
+    raw = VISUAL_CONTEXT.image_bytes(session_id, frame_id)
+    img = Image.open(io.BytesIO(raw)).convert("RGB")
+    lines = _ocr_lines(img, task=f"price_{slot.lower()}", trace_id=trace_id)
+    remember_ocr_evidence(session_id, frame_id, lines)
+    object_id = ref.get("object_id") or _object_bound_to_frame(session_id, frame_id)
+    return frame_id, price_evidence(session_id, frame_id, lines, object_id=object_id)
+
+
+def _run_price_compare(session_id, item="", question="", trace_id="", t0=None):
+    t0 = time.time() if t0 is None else t0
+    if not session_id:
+        raise VisualContextError("NO_FRAME", PRICE_COMPARE_NEED_SLOTS)
+    try:
+        slots = VISUAL_CONTEXT.snapshot(session_id).get("slots") or {}
+    except VisualContextError:
+        slots = {}
+    if not all(slot in slots for slot in ("A", "B")):
+        raise VisualContextError("NO_FRAME", PRICE_COMPARE_NEED_SLOTS)
+    picked = {}
+    for slot in ("A", "B"):
+        frame_id, evidence = _slot_price(session_id, slot, trace_id=trace_id)
+        prices = list((evidence.get("fields") or {}).get("price") or [])
+        if len({str(price.get("value")) for price in prices}) != 1:
+            answer = f"{slot} 图里没有唯一可读的价签。请分别把商品和价签拍清楚再比。"
+            session_remember(session_id, question or item or "比价", answer,
+                             visual=True, frame_id=frame_id)
+            return {"task": "price_compare", "source": "ocr", "answer": answer,
+                    "missing": ["price"], "evidence": {slot: evidence},
+                    "latency_ms": int((time.time() - t0) * 1000)}
+        picked[slot] = (frame_id, evidence, prices[0])
+    amount_a = _price_amount_text(picked["A"][2])
+    amount_b = _price_amount_text(picked["B"][2])
+    try:
+        value_a = float(picked["A"][2].get("value"))
+        value_b = float(picked["B"][2].get("value"))
+    except (TypeError, ValueError):
+        value_a = value_b = None
+    if value_a is None or value_b is None:
+        answer = "两边的价签里只有一边能读出金额，请分别把商品和价签拍清楚再比。"
+        missing = ["price"]
+    elif abs(value_a - value_b) < 1e-9:
+        answer = f"A 和 B 价格一样，都是 {amount_a}。"
+        missing = []
+    else:
+        cheaper = "A" if value_a < value_b else "B"
+        answer = f"A：{amount_a}；B：{amount_b}。{cheaper} 更便宜。"
+        missing = []
+    session_remember(session_id, question or item or "比价", answer,
+                     visual=True, frame_id=picked["A"][0])
+    return {"task": "price_compare", "source": "ocr", "answer": answer,
+            "missing": missing,
+            "evidence": {slot: picked[slot][1] for slot in ("A", "B")},
+            "latency_ms": int((time.time() - t0) * 1000)}
 
 
 @app.after_request
@@ -465,7 +665,7 @@ EYES_RULE = (
     "你是视障人士的AI助手。先说最重要的事实，再用一到两句口语中文回答；不分点、不加括号、不用 Markdown。"
     "方位只说左/中/右，远近只说近/远；不要重复同一方位。"
     "只说画面里看得见的；看不清、被挡住、没看到就直说，不猜、不补常识。"
-    "不报米数、不报秒数，不说能不能走、能不能过马路。"
+    "只描述图像事实；不要判断有无障碍、安全、可通行性或实际距离。"
 )
 
 CHAT_RULE = (
@@ -477,9 +677,10 @@ CHAT_RULE = (
 )
 
 DETAIL_RULE = (
-    "你是视障人士的AI助手。先用一句话说正前方和近处有没有障碍，再补充主要物体的位置和外观；总共三到五句口语中文，不分点、不加括号、不用 Markdown。"
+    "你是视障人士的AI助手。先直接回答用户所问；开放描述时再补充主要物体的位置和外观。"
+    "总共三到五句口语中文，不分点、不加括号、不用 Markdown。"
     "方位只说左/中/右，远近只说近/远，不重复同一方位；看不清就直说，不猜、不补常识。"
-    "不报米数、不报秒数，不说能不能走、能不能过马路。"
+    "不要判断有无障碍、安全、可通行性或实际距离。"
 )
 
 FOLLOW_RULE = (
@@ -505,7 +706,6 @@ EYES_TASKS = {
         "prompt": (
             "看图，用一到两句说清正前方从近到远有什么。"
             "如果画面主要是文字、标牌或屏幕，就照原文读出最醒目的文字，不要编造人物、车辆、台阶或道路。"
-            "没有明显障碍就说“前方没看到明显障碍”。"
             "不要分点、不要换行。"
         ),
         "max_tokens": 72,
@@ -564,16 +764,16 @@ EYES_TASKS = {
     },
     "detail": {
         "prompt": (
-            "详细描述这张图片：先说正前方和近处有没有障碍物，再说主要物体的位置、外观和相互位置关系，"
-            "用三到五句口语中文，不要分点。看不清的地方直接说看不清，不要猜。"
+            "回答具体问题；如果没有具体问题，描述主要物体的位置、外观和相互位置关系。"
+            "看不清就说明，避免猜测。"
         ),
         "max_tokens": 160,
         "fallback": "看不清",
     },
     "compare": {
         "prompt": (
-            "比较画面里“{item}”和另一个同类物体：先说各自在左/中/右、近还是远，"
-            "再说大小、颜色或遮挡上的差别，两三句口语中文。看不清就说看不清。"
+            "比较用户所指的两个物体（{item}）。分别说可确认的外观和差别，"
+            "保持两个对象的身份；分不清时问用户指的是哪两个。"
         ),
         "max_tokens": 120,
         "fallback": "看不清",
@@ -590,6 +790,21 @@ EYES_TASKS = {
         "prompt": "只读出生产日期、保质期和批次，看不清就说看不清。",
         "max_tokens": 64,
         "fallback": "日期没看清，请把标签对准光线，靠近一点",
+    },
+    "price": {
+        "prompt": (
+            "只读画面里的价格标签：金额、单位、促销条件按原文说，"
+            "不改写、不推断、不把旁边的价格归给商品；看不清就说看不清。"
+        ),
+        "max_tokens": 32,
+        "fallback": "没看清价格",
+    },
+    "price_compare": {
+        "prompt": (
+            "只比较两张图里各自价签的金额，不推断归属；任一张看不清就问用户。"
+        ),
+        "max_tokens": 32,
+        "fallback": "价格没看清",
     },
 }
 
@@ -624,6 +839,19 @@ def settle_eyes_answer(task, answer, fallback, item=""):
     return answer
 
 
+VISUAL_ACTION_CLAIM = re.compile(
+    r"(?:没有|没看到|未见|无)(?:明显|任何)?障碍"
+    r"|(?:可以|能够|能|不能|可安全|无法安全|放心|建议|请)\s*(?:向[前左中右]\s*)?"
+    r"(?:通行|绕行|穿过|通过|前进|直走|走过去|走过|走到|转弯)"
+    r"|(?:距离|相距|离你|离您)[^，。；]{0,12}\d+(?:\.\d+)?\s*(?:米|厘米|毫米)"
+)
+VISUAL_ACTION_REPLY = "照片只能用来描述画面。当前距离和通行情况需要主控确认。"
+
+
+def visual_answer(answer):
+    return VISUAL_ACTION_REPLY if VISUAL_ACTION_CLAIM.search(answer) else answer
+
+
 def build_eyes_prompt(task, item="", context="", question=""):
     spec = EYES_TASKS[task]
     rule = RULES_BY_TASK.get(task, EYES_RULE)
@@ -641,7 +869,8 @@ def prompt_for(task, item="", context="", question=""):
         return prompt
     if task == "followup":
         return build_eyes_prompt("followup", context=context, question=question)
-    return build_eyes_prompt(task, item=item)
+    prompt = build_eyes_prompt(task, item=item)
+    return prompt + f"\n\n用户的具体问题：{question}" if question else prompt
 
 
 # ---------- 会话状态：按 session_id 隔离，有界 + TTL，换画面只标记失效 ----------
@@ -735,6 +964,30 @@ def session_context(session_id, client_context="", include_visual=True):
     else:
         text = server
     return text[-MAX_CONTEXT_CHARS:]
+
+
+def session_intent_context(session_id, *, has_image=False):
+    """把上一轮话题和当前画面可用性分开传给意图层。
+
+    网页端每个请求都可能附带缓存的画面，不能据此把话题判成看图；
+    话题只看会话历史最后一条，画面只看本请求或视觉上下文里是否真的可用。
+    """
+    topic = "unknown"
+    sess = get_session(session_id)
+    with SESSION_LOCK:
+        history = list(sess["history"])
+    if history:
+        topic = "vision" if history[-1].get("visual") else "chat"
+    has_frame = bool(has_image)
+    if not has_frame and (session_id or "").strip():
+        try:
+            VISUAL_CONTEXT.current_frame(session_id)
+            has_frame = True
+        except VisualContextError:
+            has_frame = False
+        except Exception:  # noqa: BLE001 - 视觉上下文异常不能阻断意图解析
+            has_frame = False
+    return intent.SessionContext(topic=topic, has_frame=has_frame)
 
 
 # ---------- 日期标签解析（只靠 OCR，值不合格就拒猜） ----------
@@ -941,8 +1194,7 @@ PROMPTS = {
     "scene": (
         "请用中文描述这张图片：\n"
         "1) 画面里有哪些主要物体（最多 8 个，每个只列一次，不要重复）；\n"
-        "2) 这是什么场景；\n"
-        "3) 有没有明显的危险或异常。\n"
+        "2) 这是什么场景。\n"
         "只描述看得见的内容，不要猜测。"
     ),
     "spatial": (
@@ -1445,33 +1697,42 @@ def stream_vlm(prompt, img_b64=None, max_tokens=160, temperature=0.3):
     }
     token = check_turn()
     with requests.post(VLM_URL + "/v1/chat/completions", json=payload, headers=vlm_headers(), stream=True, timeout=(5, 30)) as resp:
+        close = resp.close
         if token:
-            token.register_close(resp.close)
-        resp.raise_for_status()
-        for raw in resp.iter_lines(chunk_size=1):
+            token.register_close(close)
+        try:
+            resp.raise_for_status()
+            for raw in resp.iter_lines(chunk_size=1):
+                check_turn()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", "ignore").strip()
+                if not line.startswith("data:"):
+                    continue
+                chunk = line[5:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    data = json.loads(chunk)
+                except json.JSONDecodeError:
+                    continue
+                choices = data.get('choices') or [{}]
+                if has_request_context() and choices[0].get('finish_reason'):
+                    g.vlm_finish_reason = choices[0]['finish_reason']
+                    if token:
+                        token.backend_exit_confirmed = True
+                delta = choices[0].get("delta", {}).get("content") or ""
+                for tag in ("<think>", "</think>"):
+                    delta = delta.replace(tag, "")
+                if delta:
+                    yield delta
+        except (AttributeError, OSError, requests.RequestException):
+            # Closing the response during cancellation may interrupt an active read.
             check_turn()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", "ignore").strip()
-            if not line.startswith("data:"):
-                continue
-            chunk = line[5:].strip()
-            if chunk == "[DONE]":
-                break
-            try:
-                data = json.loads(chunk)
-            except json.JSONDecodeError:
-                continue
-            choices = data.get('choices') or [{}]
-            if has_request_context() and choices[0].get('finish_reason'):
-                g.vlm_finish_reason = choices[0]['finish_reason']
-                if token:
-                    token.backend_exit_confirmed = True
-            delta = choices[0].get("delta", {}).get("content") or ""
-            for tag in ("<think>", "</think>"):
-                delta = delta.replace(tag, "")
-            if delta:
-                yield delta
+            raise
+        finally:
+            if token:
+                token.unregister_close(close)
 
 
 def parse_ocr_result(res):
@@ -1730,7 +1991,8 @@ def api_vlm():
         except Exception as exc:  # noqa: BLE001
             return jsonify({"error": f"图片解析失败：{exc}"}), 400
 
-        img_b64 = image_to_jpeg_b64(img)
+        img_b64 = image_to_jpeg_b64(img, VLM_IMAGE_MAX_SIDE)
+        validate_vlm_inputs(img_b64)
         save_debug_image("request.jpg", img)
         if not vlm_health():
             return jsonify({"error": "VLM 服务未启动（127.0.0.1:8091）"}), 503
@@ -1741,7 +2003,10 @@ def api_vlm():
             mode, b64_md5(body.get("image", "")), result.get("latency_ms"),
             (result.get("answer") or "")[:160],
         )
+        result["answer"] = visual_answer(result["answer"])
         return jsonify(result)
+    except VisualContextError as exc:
+        return visual_error(exc)
     except Exception as exc:  # noqa: BLE001
         log.exception("vlm failed")
         return jsonify({"error": f"VLM 调用失败：{exc}"}), 500
@@ -1768,7 +2033,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
     if has_request_context() and task != 'chat' and not getattr(g, 'visual_prepared', False):
         request_body = request.get_json(silent=True) or {}
         resolved = prepare_visual_input(session_id, dict(request_body, image=image_b64, image_vlm=image_vlm_b64, frame_id=frame_id),
-                                        purpose='ocr' if task in ('date', 'text') else ('compare' if task == 'compare' else 'vqa'))
+                                        purpose='ocr' if task in ('date', 'text', 'price', 'price_compare') else ('compare' if task == 'compare' else 'vqa'))
         image_b64, image_vlm_b64 = resolved['image'], resolved['image_vlm']
         frame_id, captured_at = resolved['frame_id'], resolved['captured_at']
     t0 = time.time()
@@ -1846,6 +2111,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
                 "frame_age_s": round(age, 1) if age is not None else None,
                 "latency_ms": int((time.time() - t0) * 1000),
             }
+        validate_vlm_inputs(img)
         prompt = build_eyes_prompt("followup", context=ctx, question=question)
         if not vlm_health():
             raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
@@ -1857,7 +2123,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         if out.get("decode_ms") is not None:
             TRACES.mark(trace_id, "decode_ms", value_ms=out["decode_ms"], task="followup")
         TRACES.mark(trace_id, "vlm_end", task="followup", latency_ms=out.get("latency_ms"))
-        answer = out["answer"] or spec["fallback"]
+        answer = visual_answer(out["answer"] or spec["fallback"])
         session_remember(session_id, question, answer, visual=bool(img), frame_id=frame_id)
         return {
             "task": task,
@@ -1872,6 +2138,24 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
         img = decode_image(image_b64)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"图片解析失败：{exc}")
+
+    if task == "price":
+        lines = _ocr_lines(img, task="price", trace_id=trace_id)
+        remember_ocr_evidence(session_id, frame_id, lines)
+        object_id = _object_bound_to_frame(session_id, frame_id)
+        evidence = price_evidence(session_id, frame_id, lines, object_id=object_id)
+        verdict = price_answer(evidence)
+        session_remember(session_id, question or item or "读价格", verdict["answer"],
+                         visual=True, frame_id=frame_id)
+        return {
+            "task": task,
+            "source": "ocr",
+            "answer": verdict["answer"],
+            "association": verdict.get("association"),
+            "missing": verdict.get("missing", []),
+            "evidence": evidence,
+            "latency_ms": int((time.time() - t0) * 1000),
+        }
 
     if task == "date":
         if ocr_engine is None:
@@ -1927,6 +2211,10 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
                 "latency_ms": int((time.time() - t0) * 1000),
             }
 
+    if task == "price_compare":
+        return _run_price_compare(session_id, item=item, question=question,
+                                  trace_id=trace_id, t0=t0)
+
     vlm_img = image_vlm_b64 or image_b64
     try:
         img_b64 = encode_visual_image(image_b64 if getattr(g, "visual_frame_context", {}).get("cache_enabled") else vlm_img)
@@ -1935,6 +2223,7 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
     if task == "compare":
         img_b64 = comparison_images(session_id, img_b64)
         context = "图片按 A、B 顺序输入，分别保持对象身份。" + context
+    validate_vlm_inputs(img_b64)
     if not vlm_health():
         raise RuntimeError("VLM 服务未启动（127.0.0.1:8091）")
     TRACES.mark(trace_id, "vlm_start", task=task)
@@ -1945,8 +2234,8 @@ def run_eyes(task, item="", context="", question="", image_b64="", image_vlm_b64
     if out.get("decode_ms") is not None:
         TRACES.mark(trace_id, "decode_ms", value_ms=out["decode_ms"], task=task)
     TRACES.mark(trace_id, "vlm_end", task=task, latency_ms=out.get("latency_ms"))
-    answer = settle_eyes_answer(task, out["answer"], spec["fallback"].format(item=item), item)
-    session_remember(session_id, item or task, answer, visual=True, frame_id=frame_id)
+    answer = visual_answer(settle_eyes_answer(task, out["answer"], spec["fallback"].format(item=item), item))
+    session_remember(session_id, question or item or task, answer, visual=True, frame_id=frame_id)
     return {
         "task": task,
         "source": "vlm",
@@ -2062,6 +2351,7 @@ def api_talk():
                     img_b64 = None
         if task == "compare" and img_b64:
             img_b64 = comparison_images(session_id, img_b64)
+        validate_vlm_inputs(img_b64)
     except Exception:
         leave()
         raise
@@ -2124,6 +2414,7 @@ def api_talk():
         stream_seg = SemanticSegmenter()
         sequence = 0
         emitted = ""
+        blocked = False
         if not VLM_LOCK.acquire(timeout=30):
             yield f"data: {json.dumps({'error': '设备正忙，请稍后再试'}, ensure_ascii=False)}\n\n"
             leave()
@@ -2131,11 +2422,15 @@ def api_talk():
         inner = None
 
         def emit(piece, final):
-            nonlocal sequence, emitted
+            nonlocal sequence, emitted, blocked
             token.check()
             piece = (piece or "").strip()
-            if not piece:
+            if not piece or blocked:
                 return None
+            if task != "chat" and VISUAL_ACTION_CLAIM.search(emitted + piece):
+                piece = VISUAL_ACTION_REPLY
+                final = True
+                blocked = True
             sequence += 1
             if sequence == 1:
                 TRACES.mark(trace_id, "first_segment", chars=len(piece), segments=None)
@@ -2177,6 +2472,8 @@ def api_talk():
                     yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
             OUTPUT.finish_utterance(utterance_id, token)
             answer = settle_eyes_answer(task, full, spec["fallback"].format(item=item), item)
+            if task != "chat":
+                answer = VISUAL_ACTION_REPLY if blocked else visual_answer(answer)
             session_remember(session_id, question or item or task, answer, visual=bool(img_b64), frame_id=frame_id)
             TRACES.mark(trace_id, "answer", chars=len(answer), source="vlm")
             if not emitted and answer:
@@ -2292,7 +2589,7 @@ def api_eyes():
         leave()
 
 
-VISION_TASKS = {"scene", "detail", "read_text", "read_date", "find_object", "compare", "followup"}
+VISION_TASKS = {"scene", "detail", "read_text", "read_date", "read_price", "find_object", "compare", "followup"}
 
 
 @app.post("/api/ask")
@@ -2319,7 +2616,7 @@ def api_ask():
 
     task = intent.parse(
         text,
-        has_context=bool(history_text(session_id)),
+        context=session_intent_context(session_id, has_image=has_image),
         speech_active=recent_speech_active(),
         session_id=session_id,
         is_final=body.get("is_final", True) is True,
@@ -2352,7 +2649,7 @@ def api_ask():
     if intent_name in VISION_TASKS:
         begin_turn(session_id, trace_id)
         resolved = prepare_visual_input(session_id, body,
-                    purpose='ocr' if intent_name in ('read_text', 'read_date') else ('compare' if intent_name == 'compare' else 'vqa'),
+                    purpose='ocr' if intent_name in ('read_text', 'read_date', 'read_price') else ('compare' if intent_name == 'compare' else 'vqa'),
                     reuse=intent_name != 'scene')
         image, image_vlm = resolved['image'], resolved['image_vlm']
         frame_id, captured_at = resolved['frame_id'], resolved['captured_at']
@@ -2385,6 +2682,9 @@ def api_ask():
             result = run_eyes("text", **common)
         elif intent_name == "read_date":
             result = run_eyes("date", **common)
+        elif intent_name == "read_price":
+            result = run_eyes("price", item=task.slots.get("item", ""),
+                              question=text, **common)
         elif intent_name == "find_object":
             target = task.slots.get("target")
             if target in ("toilet", "exit"):
@@ -2392,7 +2692,11 @@ def api_ask():
             else:
                 result = run_eyes("item", item=task.slots.get("item", ""), **common)
         elif intent_name == "compare":
-            result = run_eyes("compare", item=task.slots.get("item", ""), **common)
+            if task.slots.get("comparison") == "price":
+                result = run_eyes("price_compare", item=task.slots.get("item", ""),
+                                  question=text, **common)
+            else:
+                result = run_eyes("compare", item=task.slots.get("item", ""), **common)
         elif intent_name == "followup":
             result = run_eyes("followup", question=text, **common)
         else:
@@ -2611,10 +2915,10 @@ def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_s
         log.info("voice duplicate text=%r", text)
         return voice_reply("", "ack", text=text, latency_ms=int((time.time() - t0) * 1000), spoken=False, armed=True)
 
-    has_context = bool(history_text(session_id))
+    has_img_now = bool(body.get("image") or body.get("image_vlm"))
     task = intent.parse(
         cmd,
-        has_context=has_context,
+        context=session_intent_context(session_id, has_image=has_img_now),
         speech_active=recent_speech_active(),
         session_id=session_id,
         is_final=body.get("is_final", True) is True,
@@ -2682,7 +2986,7 @@ def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_s
     if task.needs_image:
         begin_turn(session_id, trace_id)
         resolved = prepare_visual_input(session_id, dict(body, text=cmd),
-                    purpose='ocr' if task.intent in ('read_text', 'read_date') else ('compare' if task.intent == 'compare' else 'vqa'),
+                    purpose='ocr' if task.intent in ('read_text', 'read_date', 'read_price') else ('compare' if task.intent == 'compare' else 'vqa'),
                     reuse=task.intent != 'scene')
         img, img_vlm = resolved['image'], resolved['image_vlm']
         frame_id, captured_at = resolved['frame_id'], resolved['captured_at']
@@ -2706,6 +3010,8 @@ def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_s
             result = run_eyes("text", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "read_date":
             result = run_eyes("date", image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
+        elif task.intent == "read_price":
+            result = run_eyes("price", item=task.slots.get("item", ""), question=cmd, image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "find_object":
             target = task.slots.get("target")
             if target in ("toilet", "exit"):
@@ -2713,7 +3019,10 @@ def process_voice_final(body, text, trace_id, t0, duration=None, rms=None, src_s
             else:
                 result = run_eyes("item", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "compare":
-            result = run_eyes("compare", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
+            if task.slots.get("comparison") == "price":
+                result = run_eyes("price_compare", item=task.slots.get("item", ""), question=cmd, image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
+            else:
+                result = run_eyes("compare", item=task.slots.get("item", ""), image_b64=img, image_vlm_b64=img_vlm, frame_id=frame_id, session_id=session_id, captured_at=captured_at, trace_id=trace_id)
         elif task.intent == "followup":
             result = run_eyes(
                 "followup", context=context, question=task.slots.get("question", cmd),
