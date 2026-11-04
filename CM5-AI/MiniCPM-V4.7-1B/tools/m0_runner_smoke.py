@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[3]
-    cases = json.loads((root / "docs/m0-runner-cases-20261103.json").read_text(encoding="utf-8"))
+    cases = json.loads((root / "docs/05-测试与验证/m0-runner-cases-20261103.json").read_text(encoding="utf-8"))
     token = os.environ.get(args.api_key_env, "")
     headers = {"Authorization": "Bearer " + token} if token else {}
     results = {"evidence": "runner_only", "cases": []}

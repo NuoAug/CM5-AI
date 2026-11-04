@@ -38,7 +38,7 @@ def main():
     if not output.is_relative_to((ROOT/"test-runs").resolve()):parser.error("结果只能写本候选test-runs")
     if not 1024<=args.port<=65535:parser.error("端口无效")
     output.parent.mkdir(parents=True,exist_ok=True)
-    corpus=ROOT.parents[1]/"docs/m0-runner-cases-20261103.json"
+    corpus=ROOT.parents[1]/"docs/05-测试与验证/m0-runner-cases-20261103.json"
     cases=json.loads(corpus.read_text(encoding="utf-8"))["cases"]
     runner=ROOT/"runtime/llama.cpp-b12066/llama-server.exe"
     variants=[("minicpm-v",baseline/"models/vlm/MiniCPM-V 4.7 1B/MiniCPM-V-4_7-1B-Q4_K_M.gguf",baseline/"models/vlm/MiniCPM-V 4.7 1B/mmproj-model-f16.gguf"),("qwen3.5-0.8b",ROOT/"models/vlm/Qwen3.5-0.8B/Qwen3.5-0.8B-Q4_K_M.gguf",ROOT/"models/vlm/Qwen3.5-0.8B/mmproj-F16.gguf")]

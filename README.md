@@ -209,10 +209,12 @@ node CM5-AI-M/app/test_test_session_ui.cjs
 
 - [CHANGELOG.md](CHANGELOG.md)：版本变更记录
 - [树莓派MiniCPM实机测试指南.md](树莓派MiniCPM实机测试指南.md)：测试台操作、提问文案与记录方式
-- [docs/M0-范围与主控适配-20261103.md](docs/M0-范围与主控适配-20261103.md) 及 M1/M2/M3：任务范围、语音与取消、图片对象与 OCR、Qwen 对照
-- [docs/工作进度-20261104.md](docs/工作进度-20261104.md)、[docs/下一阶段优化与实现方案-20261103.md](docs/下一阶段优化与实现方案-20261103.md)：当前进度与优化方案
-- [docs/功能与架构-v1.0.0.md](docs/功能与架构-v1.0.0.md)、[docs/设备与模型-v1.0.0.md](docs/设备与模型-v1.0.0.md)、[docs/CM5-部署与运维.md](docs/CM5-部署与运维.md)、[docs/测试日志汇总-v1.0.0.md](docs/测试日志汇总-v1.0.0.md)
-- [docs/main-control-task/](docs/main-control-task/)：持续执行指令、主控与交互接口合同
+- [docs/README.md](docs/README.md)：文档索引、阅读顺序与命名/维护规范
+- [docs/01-范围与需求/](docs/01-范围与需求/)、[docs/03-实施记录/](docs/03-实施记录/)：职责范围与 M0–M3 阶段实施记录
+- [docs/02-架构与接口/](docs/02-架构与接口/)：功能架构、设备与模型、主控接口合同
+- [docs/04-部署与运维/](docs/04-部署与运维/)、[docs/05-测试与验证/](docs/05-测试与验证/)：部署运维、测试日志与报告模板
+- [docs/06-计划与进度/](docs/06-计划与进度/)：工作进度与下一阶段优化方案
+- [docs/main-control-task/](docs/main-control-task/)：主控下达任务包（任务书、接口合同、持续执行指令，路径按流程固定）
 - [CM5-AI-M/deploy/pi-test-deployment.md](CM5-AI-M/deploy/pi-test-deployment.md)：板端部署、审计、回滚与清理
 - [CM5-AI-M/README.md](CM5-AI-M/README.md)、[CM5-AI/Qwen3.5-0.8B/README.md](CM5-AI/Qwen3.5-0.8B/README.md)：子工程说明
 
