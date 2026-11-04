@@ -5,7 +5,7 @@
 - 新增本地预制提示音：启动校验 models/tts/prompts/manifest.json（sha256、16kHz 单声道、时长上限），唤醒确认「我在，请说」按事件 ID 取预制 WAV 交给唯一 ALSA 播放队列，优先级/取消/主控危险提示沿用现有机制；清单缺失、摘要不符或文件损坏回退 Piper，不阻断启动。/api/status 暴露 tts.prompts，/api/device/speak 支持 prompt_id 供试听与板端验证。
 - 流式 ASR 端点可配：设备侧尾部静音与仅静音阈值可用 ASR_ENDPOINT_SILENCE／ASR_ENDPOINT_SILENCE_ONLY 覆盖；bench_streaming_asr 增加同参回放与报告字段，便于同板对照 1.2 秒与 0.9 秒端点。
 - 板端验证 v1.1.30：近黑画面 422 提示重拍不调模型；自然询价走 OCR 证据（未绑定归属时明确说明）；A/B 两图比价只读 OCR 金额；真实相机 scene 155.3 秒且不再输出障碍/可通行结论；连续 20 次在途取消全部 499 并释放槽位；外部 kill arecord 后 1 秒内自动恢复监听、故障计数与最后错误可见；主控缺失按 interaction.v0.1 返回 DEPENDENCY_UNAVAILABLE，不冒充现场。
-- Windows 全量 449 项通过（1 项 Piper 条件跳过）；板端预制提示音试听与 ASR 端点回放对比待部署后验证，真人唤醒/接续未验证。
+- 板端 v1.1.31 部署验证：预制提示音清单加载并通过 /api/device/speak prompt_id 播放与取消；ASR 端点回放对照 0.9 秒较 1.2 秒提前约 0.60 秒且转写一致；新增 tools/vlm_split.py 板端拆测（纯文本预填充 1.10 秒、图片请求预填充约 142.3 秒、解码 8 token 约 0.5 秒，384/448/512 输入 token 数相同）。真人验听、真实唤醒/接续与真实主控联调仍未验证。
 
 ## v1.1.30-pi-tune — 2026-11-04
 
