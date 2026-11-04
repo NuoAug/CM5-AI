@@ -29,3 +29,6 @@ CM5-AI-M/logs/
 CM5-AI-M/data/
 CM5-AI-M/test-runs/
 CM5-AI-M/config/*.env
+
+# DevPilot 本地工作目录
+.dsh-pilot/
